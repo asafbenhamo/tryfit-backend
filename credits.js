@@ -1,94 +1,84 @@
-const Database = require("better-sqlite3");
+const fs = require("fs");
 const path = require("path");
 
-const db = new Database(path.join(__dirname, "credits.db"));
+const DB_FILE = path.join(__dirname, "credits.json");
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS stores (
-    shop TEXT PRIMARY KEY,
-    credits INTEGER DEFAULT 0,
-    total_used INTEGER DEFAULT 0,
-    plan TEXT DEFAULT 'none',
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS usage_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shop TEXT NOT NULL,
-    ip TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS credit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    shop TEXT NOT NULL,
-    amount INTEGER NOT NULL,
-    reason TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-`);
+function loadDB() {
+  try {
+    if (fs.existsSync(DB_FILE)) return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+  } catch(e) {}
+  return { stores: {}, usage: [] };
+}
 
-const getStore = db.prepare("SELECT * FROM stores WHERE shop = ?");
-const addCredits = db.prepare("UPDATE stores SET credits = credits + ?, updated_at = datetime('now') WHERE shop = ?");
-const setCredits = db.prepare("UPDATE stores SET credits = ?, updated_at = datetime('now') WHERE shop = ?");
-const useCredit = db.prepare("UPDATE stores SET credits = credits - 1, total_used = total_used + 1, updated_at = datetime('now') WHERE shop = ? AND credits > 0");
-const logUsage = db.prepare("INSERT INTO usage_log (shop, ip) VALUES (?, ?)");
-const logCredit = db.prepare("INSERT INTO credit_log (shop, amount, reason) VALUES (?, ?, ?)");
-const getAllStores = db.prepare("SELECT * FROM stores ORDER BY updated_at DESC");
-const getUsage30d = db.prepare("SELECT COUNT(*) as count FROM usage_log WHERE shop = ? AND created_at > datetime('now', '-30 days')");
+function saveDB(db) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
 
 function checkAndUseCredit(shop, ip) {
-  const store = getStore.get(shop);
+  const db = loadDB();
+  const store = db.stores[shop];
   if (!store) return { allowed: false, reason: "not_found", credits: 0 };
   if (store.credits <= 0) return { allowed: false, reason: "no_credits", credits: 0 };
-  const result = useCredit.run(shop);
-  if (result.changes === 0) return { allowed: false, reason: "no_credits", credits: 0 };
-  logUsage.run(shop, ip);
-  return { allowed: true, credits: store.credits - 1 };
+  store.credits--;
+  store.total_used = (store.total_used || 0) + 1;
+  store.updated_at = new Date().toISOString();
+  db.usage.push({ shop, ip, time: new Date().toISOString() });
+  if (db.usage.length > 10000) db.usage = db.usage.slice(-5000);
+  saveDB(db);
+  return { allowed: true, credits: store.credits };
 }
 
 function createStore(shop, credits, plan) {
-  const existing = getStore.get(shop);
-  if (existing) {
-    addCredits.run(credits, shop);
-    db.prepare("UPDATE stores SET plan = ?, updated_at = datetime('now') WHERE shop = ?").run(plan, shop);
-    logCredit.run(shop, credits, "Admin add");
-    return { message: shop + " +" + credits + " credits" };
+  const db = loadDB();
+  if (db.stores[shop]) {
+    db.stores[shop].credits += credits;
+    db.stores[shop].plan = plan;
+    db.stores[shop].updated_at = new Date().toISOString();
+  } else {
+    db.stores[shop] = { credits, plan, total_used: 0, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
   }
-  db.prepare("INSERT INTO stores (shop, credits, plan) VALUES (?, ?, ?)").run(shop, credits, plan);
-  logCredit.run(shop, credits, "New store");
-  return { message: shop + " created with " + credits + " credits" };
+  saveDB(db);
+  return { message: shop + " — " + db.stores[shop].credits + " credits" };
 }
 
 function removeStore(shop) {
-  db.prepare("DELETE FROM stores WHERE shop = ?").run(shop);
+  const db = loadDB();
+  delete db.stores[shop];
+  saveDB(db);
   return { message: shop + " removed" };
 }
 
 function addCreditsToStore(shop, amount, reason) {
-  const store = getStore.get(shop);
-  if (!store) return { error: "Store not found" };
-  addCredits.run(amount, shop);
-  logCredit.run(shop, amount, reason || "Admin top-up");
-  const updated = getStore.get(shop);
-  return { message: shop + " now has " + updated.credits + " credits" };
+  const db = loadDB();
+  if (!db.stores[shop]) return { error: "Store not found" };
+  db.stores[shop].credits += amount;
+  db.stores[shop].updated_at = new Date().toISOString();
+  saveDB(db);
+  return { message: shop + " now has " + db.stores[shop].credits + " credits" };
 }
 
 function setCreditsForStore(shop, amount, reason) {
-  const store = getStore.get(shop);
-  if (!store) return { error: "Store not found" };
-  setCredits.run(amount, shop);
-  logCredit.run(shop, amount - store.credits, reason || "Admin set");
+  const db = loadDB();
+  if (!db.stores[shop]) return { error: "Store not found" };
+  db.stores[shop].credits = amount;
+  db.stores[shop].updated_at = new Date().toISOString();
+  saveDB(db);
   return { message: shop + " set to " + amount + " credits" };
 }
 
 function listStores() {
-  const stores = getAllStores.all();
-  stores.forEach(s => { s.usage_30d = getUsage30d.get(s.shop).count; });
-  return stores;
+  const db = loadDB();
+  const now = Date.now();
+  const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+  return Object.entries(db.stores).map(([shop, s]) => {
+    const usage_30d = db.usage.filter(u => u.shop === shop && (now - new Date(u.time).getTime()) < thirtyDays).length;
+    return { shop, ...s, usage_30d };
+  }).sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
 }
 
 function getStoreCredits(shop) {
-  const store = getStore.get(shop);
+  const db = loadDB();
+  const store = db.stores[shop];
   if (!store) return { credits: 0, active: false };
   return { credits: store.credits, active: store.credits > 0, plan: store.plan };
 }
