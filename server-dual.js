@@ -160,7 +160,14 @@ async function submitAndWaitFashn(modelImage, garmentUrl, category) {
 // ======================
 async function submitRunPod(dataUri, garmentUrl, category) {
   let rpCategory = category;
-  if (!rpCategory || rpCategory === "auto") rpCategory = "tops";
+  const categoryMap = {
+    "blouses": "upper_body", "shirts": "upper_body", "sweaters": "upper_body",
+    "vest": "upper_body", "vests": "upper_body", "tops": "upper_body",
+    "jeans": "lower_body", "trousers": "lower_body", "bottoms": "lower_body",
+    "dresses": "overall", "one-piece": "overall", "set": "overall",
+    "auto": "upper_body"
+  };
+  rpCategory = categoryMap[(rpCategory || "").toLowerCase()] || "upper_body";
   const body = {
     input: {
       model_image: dataUri,
