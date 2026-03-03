@@ -54,7 +54,38 @@ function checkRateLimit(ip, limit) {
 app.get("/health", (req, res) => {
   res.json({ status: "ok", mode: BACKEND_MODE });
 });
-
+app.get("/privacy", (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TryFit - Privacy Policy</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:40px 20px;color:#333;line-height:1.6}
+h1{color:#E94560}h2{color:#2D3436;margin-top:30px}
+</style>
+</head>
+<body>
+<h1>TryFit Privacy Policy</h1>
+<p>Last updated: March 2026</p>
+<h2>What We Collect</h2>
+<p>TryFit processes photos that customers voluntarily upload to use the virtual try-on feature. These photos are sent to our processing servers solely to generate the try-on result.</p>
+<h2>How We Use Your Data</h2>
+<p>Uploaded photos are used only to generate virtual try-on images. Photos are not stored permanently and are automatically deleted after processing is complete.</p>
+<h2>Data Sharing</h2>
+<p>We do not sell, rent, or share customer photos or personal data with third parties. Photos are processed by our AI servers and deleted immediately after the result is generated.</p>
+<h2>Data Retention</h2>
+<p>Customer photos are temporarily processed and not retained after the try-on result is delivered. No personal data is stored on our servers.</p>
+<h2>Cookies</h2>
+<p>TryFit does not use cookies or tracking technologies.</p>
+<h2>Merchant Data</h2>
+<p>We access product images and product information from your Shopify store solely to provide the virtual try-on feature. We do not access customer personal information, order data, or payment information.</p>
+<h2>Contact</h2>
+<p>For privacy questions, contact us at support@tryfit.app</p>
+</body>
+</html>`);
+});
 // === FASHN FUNCTIONS ===
 
 function buildFashnBody(dataUri, garmentUrl, category) {
