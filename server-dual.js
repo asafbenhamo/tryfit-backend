@@ -3,19 +3,21 @@ const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs");
 require("dotenv").config();
+const creditsSystem = require("./credits");
+const adminRouter = require("./admin");
+
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
 app.set("trust proxy", 1);
 app.use(cors({
   origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "OPTIONS", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"]
 }));
 app.use(express.json());
 
 // ======================
 // BACKEND MODE: "fashn" or "runpod"
-// Set in .env file: BACKEND_MODE=runpod
 // ======================
 const BACKEND_MODE = process.env.BACKEND_MODE || "fashn";
 
@@ -51,9 +53,13 @@ function checkRateLimit(ip, limit) {
   return true;
 }
 
+// ======================
+// STATIC PAGES
+// ======================
 app.get("/health", (req, res) => {
   res.json({ status: "ok", mode: BACKEND_MODE });
 });
+
 app.get("/privacy", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -86,8 +92,19 @@ h1{color:#E94560}h2{color:#2D3436;margin-top:30px}
 </body>
 </html>`);
 });
-// === FASHN FUNCTIONS ===
 
+// ======================
+// ADMIN + CREDITS
+// ======================
+app.use("/admin", adminRouter);
+
+app.get("/api/credits/:shop", (req, res) => {
+  res.json(creditsSystem.getStoreCredits(req.params.shop));
+});
+
+// ======================
+// FASHN FUNCTIONS
+// ======================
 function buildFashnBody(dataUri, garmentUrl, category) {
   console.log("Building FASHN body with category:", category);
   return {
@@ -138,13 +155,12 @@ async function submitAndWaitFashn(modelImage, garmentUrl, category) {
   throw new Error("No output image");
 }
 
-// === RUNPOD FUNCTIONS ===
-
+// ======================
+// RUNPOD FUNCTIONS
+// ======================
 async function submitRunPod(dataUri, garmentUrl, category) {
-  // Map "auto" category to "tops" for RunPod (FASHN VTON doesn't support "auto")
   let rpCategory = category;
   if (!rpCategory || rpCategory === "auto") rpCategory = "tops";
-
   const body = {
     input: {
       model_image: dataUri,
@@ -152,7 +168,6 @@ async function submitRunPod(dataUri, garmentUrl, category) {
       category: rpCategory
     }
   };
-
   const response = await fetch(RUNPOD_BASE_URL + "/run", {
     method: "POST",
     headers: {
@@ -186,35 +201,44 @@ async function submitAndWaitRunPod(modelImage, garmentUrl, category) {
   throw new Error("No output image from RunPod");
 }
 
-// === UNIFIED SUBMIT FUNCTIONS ===
-
+// === UNIFIED ===
 async function submitJob(dataUri, garmentUrl, category) {
-  if (BACKEND_MODE === "runpod") {
-    return await submitRunPod(dataUri, garmentUrl, category);
-  } else {
-    return await submitFashn(dataUri, garmentUrl, category);
-  }
+  if (BACKEND_MODE === "runpod") return await submitRunPod(dataUri, garmentUrl, category);
+  return await submitFashn(dataUri, garmentUrl, category);
 }
 
 async function submitAndWait(modelImage, garmentUrl, category) {
-  if (BACKEND_MODE === "runpod") {
-    return await submitAndWaitRunPod(modelImage, garmentUrl, category);
-  } else {
-    return await submitAndWaitFashn(modelImage, garmentUrl, category);
-  }
+  if (BACKEND_MODE === "runpod") return await submitAndWaitRunPod(modelImage, garmentUrl, category);
+  return await submitAndWaitFashn(modelImage, garmentUrl, category);
 }
 
-// === ROUTES ===
-
+// ======================
+// TRY-ON ROUTES
+// ======================
 app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) => {
   try {
     console.log("=== NEW TRY-ON REQUEST [" + BACKEND_MODE + "] ===");
     const ip = getRealIP(req);
     const dailyLimit = parseDailyLimit(req.body.daily_limit);
     console.log("User IP:", ip, "| Limit:", dailyLimit);
+
+    // === CREDITS CHECK ===
+    const shop = req.body.shop || req.headers["x-shop-domain"] || "";
+    if (shop) {
+      const creditCheck = creditsSystem.checkAndUseCredit(shop, ip);
+      if (!creditCheck.allowed) {
+        if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
+        if (creditCheck.reason === "not_found") {
+          return res.status(403).json({ error: "החנות לא רשומה במערכת. צרו קשר עם TryFit." });
+        }
+        return res.status(403).json({ error: "נגמרו הקרדיטים! צרו קשר לחידוש המנוי.", credits: 0 });
+      }
+      console.log("Shop:", shop, "| Credits remaining:", creditCheck.credits);
+    }
+
     if (!checkRateLimit(ip, dailyLimit)) {
       if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-      return res.status(429).json({ error: "הגעת למגבלה היומית. חזור מחר!" });
+      return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
     }
     let garmentImageUrl = req.body.garment_image_url;
     if (garmentImageUrl && garmentImageUrl.startsWith("//")) {
@@ -231,7 +255,6 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
     console.log("Garment URL:", garmentImageUrl);
 
     if (BACKEND_MODE === "runpod") {
-      // RunPod: submit and wait for result
       const outputImage = await submitAndWaitRunPod(dataUri, garmentImageUrl, category);
       if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
       res.json({
@@ -240,7 +263,6 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
         prediction_id: "runpod-direct"
       });
     } else {
-      // FASHN: submit and return prediction_id for polling
       const data = await submitFashn(dataUri, garmentImageUrl, category);
       console.log("FASHN response:", JSON.stringify(data));
       if (data.id) {
@@ -266,7 +288,7 @@ app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, 
     const dailyLimit = parseDailyLimit(req.body.daily_limit);
     if (!checkRateLimit(ip, dailyLimit)) {
       if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-      return res.status(429).json({ error: "הגעת למגבלה היומית. חזור מחר!" });
+      return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
     }
     if (!req.file) return res.status(400).json({ error: "No model image uploaded" });
     const imageBuffer = fs.readFileSync(req.file.path);
@@ -317,7 +339,7 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
     console.log("User IP:", ip, "| Limit:", dailyLimit);
     if (!checkRateLimit(ip, dailyLimit)) {
       if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-      return res.status(429).json({ error: "הגעת למגבלה היומית. חזור מחר!" });
+      return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
     }
     if (!req.file) return res.status(400).json({ error: "No model image" });
     const imageBuffer = fs.readFileSync(req.file.path);
@@ -366,12 +388,10 @@ app.get("/api/tryon/status/:id", async (req, res) => {
     const predictionId = req.params.id;
 
     if (BACKEND_MODE === "runpod") {
-      // RunPod status check
       const response = await fetch(RUNPOD_BASE_URL + "/status/" + predictionId, {
         headers: { "Authorization": "Bearer " + RUNPOD_API_KEY }
       });
       const data = await response.json();
-      // Map RunPod status to FASHN-compatible format
       if (data.status === "COMPLETED") {
         res.json({
           status: "completed",
@@ -383,7 +403,6 @@ app.get("/api/tryon/status/:id", async (req, res) => {
         res.json({ status: "processing" });
       }
     } else {
-      // FASHN status check
       const response = await fetch("https://api.fashn.ai/v1/status/" + predictionId, {
         headers: { "Authorization": "Bearer " + process.env.FASHN_API_KEY }
       });
@@ -405,5 +424,6 @@ app.listen(PORT, () => {
   } else {
     console.log("RunPod Endpoint:", RUNPOD_ENDPOINT_ID);
   }
-  console.log("Rate limit: dynamic per store");
+  console.log("Credits system: ACTIVE");
+  console.log("Admin dashboard: /admin");
 });
