@@ -230,7 +230,7 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
     console.log("User IP:", ip, "| Limit:", dailyLimit);
 
     // === CREDITS CHECK ===
-    const shop = req.body.shop || req.headers["x-shop-domain"] || "";
+    const shop = req.body.shop || req.headers["x-shop-domain"] || (req.headers.referer ? (() => { try { return new URL(req.headers.
     if (shop) {
       const creditCheck = creditsSystem.checkAndUseCredit(shop, ip);
       if (!creditCheck.allowed) {
