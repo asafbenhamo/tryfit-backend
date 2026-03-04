@@ -1,11 +1,17 @@
 const fs = require("fs");
 const path = require("path");
+const { execSync } = require("child_process");
 
-const DB_FILE = path.join(__dirname, "credits.json");
+const DB_FILE = path.join("/tmp", "credits.json");
+const RAILWAY_TOKEN = process.env.RAILWAY_API_TOKEN || "";
 
 function loadDB() {
   try {
     if (fs.existsSync(DB_FILE)) return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+  } catch(e) {}
+  // Try loading from env variable as backup
+  try {
+    if (process.env.CREDITS_DATA) return JSON.parse(process.env.CREDITS_DATA);
   } catch(e) {}
   return { stores: {}, usage: [] };
 }
@@ -16,8 +22,11 @@ function saveDB(db) {
 
 function checkAndUseCredit(shop, ip) {
   const db = loadDB();
+  if (!db.stores[shop]) {
+    db.stores[shop] = { credits: 15, plan: "free-trial", total_used: 0, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    saveDB(db);
+  }
   const store = db.stores[shop];
-  if (!store) return { allowed: false, reason: "not_found", credits: 0 };
   if (store.credits <= 0) return { allowed: false, reason: "no_credits", credits: 0 };
   store.credits--;
   store.total_used = (store.total_used || 0) + 1;
@@ -83,4 +92,19 @@ function getStoreCredits(shop) {
   return { credits: store.credits, active: store.credits > 0, plan: store.plan };
 }
 
-module.exports = { checkAndUseCredit, createStore, removeStore, addCreditsToStore, setCreditsForStore, listStores, getStoreCredits };
+function exportDB() {
+  const db = loadDB();
+  return JSON.stringify(db);
+}
+
+function importDB(data) {
+  try {
+    const db = JSON.parse(data);
+    saveDB(db);
+    return { message: "Imported successfully" };
+  } catch(e) {
+    return { error: "Invalid JSON" };
+  }
+}
+
+module.exports = { checkAndUseCredit, createStore, removeStore, addCreditsToStore, setCreditsForStore, listStores, getStoreCredits, exportDB, importDB };
