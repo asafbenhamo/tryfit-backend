@@ -1,17 +1,11 @@
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
 
-const DB_FILE = path.join("/tmp", "credits.json");
-const RAILWAY_TOKEN = process.env.RAILWAY_API_TOKEN || "";
+const DB_FILE = process.env.RAILWAY_VOLUME_MOUNT_PATH ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, "credits.json") : path.join(__dirname, "credits.json");
 
 function loadDB() {
   try {
     if (fs.existsSync(DB_FILE)) return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-  } catch(e) {}
-  // Try loading from env variable as backup
-  try {
-    if (process.env.CREDITS_DATA) return JSON.parse(process.env.CREDITS_DATA);
   } catch(e) {}
   return { stores: {}, usage: [] };
 }
@@ -92,19 +86,4 @@ function getStoreCredits(shop) {
   return { credits: store.credits, active: store.credits > 0, plan: store.plan };
 }
 
-function exportDB() {
-  const db = loadDB();
-  return JSON.stringify(db);
-}
-
-function importDB(data) {
-  try {
-    const db = JSON.parse(data);
-    saveDB(db);
-    return { message: "Imported successfully" };
-  } catch(e) {
-    return { error: "Invalid JSON" };
-  }
-}
-
-module.exports = { checkAndUseCredit, createStore, removeStore, addCreditsToStore, setCreditsForStore, listStores, getStoreCredits, exportDB, importDB };
+module.exports = { checkAndUseCredit, createStore, removeStore, addCreditsToStore, setCreditsForStore, listStores, getStoreCredits };
