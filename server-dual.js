@@ -53,6 +53,15 @@ function checkRateLimit(ip, limit) {
   return true;
 }
 
+function getShopFromRequest(req) {
+  if (req.body.shop) return req.body.shop;
+  if (req.headers["x-shop-domain"]) return req.headers["x-shop-domain"];
+  try {
+    if (req.headers.referer) return new URL(req.headers.referer).hostname;
+  } catch (e) {}
+  return "";
+}
+
 // ======================
 // STATIC PAGES
 // ======================
@@ -230,7 +239,7 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
     console.log("User IP:", ip, "| Limit:", dailyLimit);
 
     // === CREDITS CHECK ===
-    const shop = req.body.shop || req.headers["x-shop-domain"] || (req.headers.referer ? (() => { try { return new URL(req.headers.
+    const shop = getShopFromRequest(req);
     if (shop) {
       const creditCheck = creditsSystem.checkAndUseCredit(shop, ip);
       if (!creditCheck.allowed) {
@@ -344,6 +353,22 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
     const ip = getRealIP(req);
     const dailyLimit = parseDailyLimit(req.body.daily_limit);
     console.log("User IP:", ip, "| Limit:", dailyLimit);
+
+    // === CREDITS CHECK ===
+    const shop = getShopFromRequest(req);
+    console.log("Shop detected:", shop);
+    if (shop) {
+      const creditCheck = creditsSystem.checkAndUseCredit(shop, ip);
+      if (!creditCheck.allowed) {
+        if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
+        if (creditCheck.reason === "not_found") {
+          return res.status(403).json({ error: "החנות לא רשומה במערכת. צרו קשר עם TryFit." });
+        }
+        return res.status(403).json({ error: "נגמרו הקרדיטים! צרו קשר לחידוש המנוי.", credits: 0 });
+      }
+      console.log("Shop:", shop, "| Credits remaining:", creditCheck.credits);
+    }
+
     if (!checkRateLimit(ip, dailyLimit)) {
       if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
       return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
