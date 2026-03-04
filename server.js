@@ -43,6 +43,21 @@ function checkRateLimit(ip, limit) {
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
+const sharp = require("sharp");
+
+async function cropTopHalf(imageUrl) {
+  try {
+    const response = await fetch(imageUrl);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const metadata = await sharp(buffer).metadata();
+    const cropHeight = Math.round(metadata.height * 0.55);
+    const cropped = await sharp(buffer).extract({ left: 0, top: 0, width: metadata.width, height: cropHeight }).toBuffer();
+    return "data:image/jpeg;base64," + cropped.toString("base64");
+  } catch(e) {
+    console.error("Crop failed:", e.message);
+    return imageUrl;
+  }
+}
 
 function buildFashnBody(dataUri, garmentUrl, category) {
   console.log("Building FASHN body with category:", category);
@@ -170,7 +185,13 @@ async function pollFashn(predictionId) {
 }
 
 async function submitAndWait(modelImage, garmentUrl, category) {
-  const body = buildFashnBody(modelImage, garmentUrl, category);
+  let finalGarmentUrl = garmentUrl;
+  let finalCategory = category;
+  if (category === "set") {
+    try { finalGarmentUrl = await cropTopHalf(garmentUrl); } catch(e) { console.error("Crop error:", e); }
+    finalCategory = "tops";
+  }
+  const body = buildFashnBody(modelImage, finalGarmentUrl, finalCategory);
   const response = await fetch("https://api.fashn.ai/v1/run", {
     method: "POST",
     headers: {
