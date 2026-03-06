@@ -541,7 +541,21 @@ app.get("/api/tryon/status/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// === GDPR COMPLIANCE WEBHOOKS ===
+app.post("/webhooks/customers/data_request", (req, res) => {
+  console.log("GDPR: Customer data request received");
+  res.status(200).json({ message: "No customer data stored" });
+});
 
+app.post("/webhooks/customers/redact", (req, res) => {
+  console.log("GDPR: Customer redact request received");
+  res.status(200).json({ message: "No customer data to redact" });
+});
+
+app.post("/webhooks/shop/redact", (req, res) => {
+  console.log("GDPR: Shop redact request received");
+  res.status(200).json({ message: "Shop data redacted" });
+});
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log("Server running on port " + PORT);
