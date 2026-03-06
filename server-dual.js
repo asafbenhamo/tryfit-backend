@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs");
+const crypto = require("crypto");
 require("dotenv").config();
 const creditsSystem = require("./credits");
 const adminRouter = require("./admin");
@@ -60,6 +61,21 @@ function getShopFromRequest(req) {
     if (req.headers.referer) return new URL(req.headers.referer).hostname;
   } catch (e) {}
   return "";
+}
+
+// === WEBHOOK HMAC VERIFICATION ===
+function verifyShopifyWebhook(req, res, next) {
+  const hmacHeader = req.headers["x-shopify-hmac-sha256"];
+  if (!hmacHeader) {
+    return res.status(401).json({ error: "Unauthorized - No HMAC" });
+  }
+  const secret = process.env.SHOPIFY_API_SECRET || "";
+  const rawBody = JSON.stringify(req.body);
+  const hash = crypto.createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
+  if (hash !== hmacHeader) {
+    return res.status(401).json({ error: "Unauthorized - Invalid HMAC" });
+  }
+  next();
 }
 
 // ======================
@@ -170,7 +186,6 @@ async function submitAndWaitFashn(modelImage, garmentUrl, category) {
 async function submitRunPod(dataUri, garmentUrl, category) {
   let rpCategory = category;
   const categoryMap = {
-    // Upper body
     "tops": "upper_body", "top": "upper_body",
     "shirts": "upper_body", "shirt": "upper_body",
     "blouses": "upper_body", "blouse": "upper_body",
@@ -211,7 +226,6 @@ async function submitRunPod(dataUri, garmentUrl, category) {
     "corset": "upper_body",
     "bustier": "upper_body",
     "bralette": "upper_body",
-    // Lower body
     "bottoms": "lower_body", "bottom": "lower_body",
     "pants": "lower_body", "pant": "lower_body",
     "jeans": "lower_body", "jean": "lower_body",
@@ -241,7 +255,6 @@ async function submitRunPod(dataUri, garmentUrl, category) {
     "bermuda": "lower_body", "bermudas": "lower_body",
     "board shorts": "lower_body",
     "swim trunks": "lower_body",
-    // Overall / full body
     "dresses": "overall", "dress": "overall",
     "one-piece": "overall", "onepiece": "overall",
     "set": "overall", "sets": "overall",
@@ -268,7 +281,6 @@ async function submitRunPod(dataUri, garmentUrl, category) {
     "onesie": "overall",
     "catsuit": "overall",
     "unitard": "overall",
-    // Default
     "auto": "upper_body"
   };
   rpCategory = categoryMap[(rpCategory || "").toLowerCase()] || "upper_body";
@@ -333,7 +345,6 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
     const dailyLimit = parseDailyLimit(req.body.daily_limit);
     console.log("User IP:", ip, "| Limit:", dailyLimit);
 
-    // === CREDITS CHECK ===
     const shop = getShopFromRequest(req);
     if (shop) {
       const creditCheck = creditsSystem.checkAndUseCredit(shop, ip);
@@ -449,7 +460,6 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
     const dailyLimit = parseDailyLimit(req.body.daily_limit);
     console.log("User IP:", ip, "| Limit:", dailyLimit);
 
-    // === CREDITS CHECK ===
     const shop = getShopFromRequest(req);
     console.log("Shop detected:", shop);
     if (shop) {
@@ -541,21 +551,23 @@ app.get("/api/tryon/status/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-// === GDPR COMPLIANCE WEBHOOKS ===
-app.post("/webhooks/customers/data_request", (req, res) => {
-  console.log("GDPR: Customer data request received");
-  res.status(200).json({ message: "No customer data stored" });
+
+// === COMPLIANCE WEBHOOKS (HMAC VERIFIED) ===
+app.post("/webhooks/compliance", verifyShopifyWebhook, (req, res) => {
+  console.log("Compliance webhook received:", JSON.stringify(req.body).substring(0, 200));
+  res.status(200).json({ success: true });
 });
 
-app.post("/webhooks/customers/redact", (req, res) => {
-  console.log("GDPR: Customer redact request received");
-  res.status(200).json({ message: "No customer data to redact" });
+app.post("/webhooks/app/uninstalled", verifyShopifyWebhook, (req, res) => {
+  console.log("App uninstalled:", req.body?.shop_domain || "unknown");
+  res.status(200).json({ success: true });
 });
 
-app.post("/webhooks/shop/redact", (req, res) => {
-  console.log("GDPR: Shop redact request received");
-  res.status(200).json({ message: "Shop data redacted" });
+app.post("/webhooks/app/scopes_update", verifyShopifyWebhook, (req, res) => {
+  console.log("Scopes update:", req.body?.shop_domain || "unknown");
+  res.status(200).json({ success: true });
 });
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log("Server running on port " + PORT);
