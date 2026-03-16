@@ -551,7 +551,64 @@ app.get("/api/tryon/status/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+app.post("/api/tryon/generate-video", async (req, res) => {
+  try {
+    console.log("=== VIDEO GENERATION REQUEST ===");
+    const { image_url } = req.body;
+    if (!image_url) return res.status(400).json({ error: "No image URL provided" });
 
+    const shop = getShopFromRequest(req);
+    if (shop) {
+      const creditCheck = creditsSystem.checkAndUseCredit(shop, getRealIP(req), 3);
+      if (!creditCheck.allowed) {
+        return res.status(403).json({ error: "אין מספיק קרדיטים לסרטון (3 קרדיטים)" });
+      }
+    }
+
+    console.log("Sending to FASHN Image-to-Video...");
+    const response = await fetch("https://api.fashn.ai/v1/run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + process.env.FASHN_API_KEY
+      },
+      body: JSON.stringify({
+        model_name: "image-to-video",
+        inputs: {
+          image: image_url,
+          duration: 5,
+          resolution: "720p"
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (!data.id) return res.status(500).json({ error: data.error || "No prediction ID" });
+    console.log("Video prediction ID:", data.id);
+    res.json({ prediction_id: data.id });
+  } catch (err) {
+    console.error("Video generation error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/tryon/video-status/:id", async (req, res) => {
+  try {
+    const response = await fetch("https://api.fashn.ai/v1/status/" + req.params.id, {
+      headers: { "Authorization": "Bearer " + process.env.FASHN_API_KEY }
+    });
+    const data = await response.json();
+    if (data.status === "completed" && data.output && data.output[0]) {
+      res.json({ status: "completed", video_url: data.output[0] });
+    } else if (data.status === "failed") {
+      res.json({ status: "failed", error: data.error });
+    } else {
+      res.json({ status: "processing" });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 // === COMPLIANCE WEBHOOKS (HMAC VERIFIED) ===
 app.post("/webhooks/compliance", verifyShopifyWebhook, (req, res) => {
   console.log("Compliance webhook received:", JSON.stringify(req.body).substring(0, 200));
