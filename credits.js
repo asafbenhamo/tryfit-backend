@@ -14,23 +14,23 @@ function saveDB(db) {
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
-function checkAndUseCredit(shop, ip) {
+function checkAndUseCredit(shop, ip, amount) {
+  if (!amount) amount = 1;
   const db = loadDB();
   if (!db.stores[shop]) {
     db.stores[shop] = { credits: 15, plan: "free-trial", total_used: 0, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     saveDB(db);
   }
   const store = db.stores[shop];
-  if (store.credits <= 0) return { allowed: false, reason: "no_credits", credits: 0 };
-  store.credits--;
-  store.total_used = (store.total_used || 0) + 1;
+  if (store.credits < amount) return { allowed: false, reason: "no_credits", credits: store.credits };
+  store.credits -= amount;
+  store.total_used = (store.total_used || 0) + amount;
   store.updated_at = new Date().toISOString();
-  db.usage.push({ shop, ip, time: new Date().toISOString() });
+  db.usage.push({ shop, ip, time: new Date().toISOString(), amount: amount, type: amount > 1 ? "video" : "tryon" });
   if (db.usage.length > 10000) db.usage = db.usage.slice(-5000);
   saveDB(db);
   return { allowed: true, credits: store.credits };
 }
-
 function createStore(shop, credits, plan) {
   const db = loadDB();
   if (db.stores[shop]) {
