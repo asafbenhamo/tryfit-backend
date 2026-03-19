@@ -559,7 +559,7 @@ app.post("/api/tryon/generate-video", async (req, res) => {
 
     const shop = getShopFromRequest(req);
     if (shop) {
-      const creditCheck = creditsSystem.checkAndUseCredit(shop, getRealIP(req), 3);
+      const creditCheck = creditsSystem.checkAndUseCredit(shop, getRealIP(req), 6);
       if (!creditCheck.allowed) {
         return res.status(403).json({ error: "אין מספיק קרדיטים לסרטון (3 קרדיטים)" });
       }
@@ -577,7 +577,7 @@ app.post("/api/tryon/generate-video", async (req, res) => {
         inputs: {
           image: image_url,
           duration: 5,
-          resolution: "720p"
+          resolution: "1080p"
         }
       })
     });
