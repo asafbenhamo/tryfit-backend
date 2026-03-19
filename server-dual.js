@@ -577,7 +577,7 @@ app.post("/api/tryon/generate-video", async (req, res) => {
         inputs: {
           image: image_url,
           duration: 5,
-          resolution: "480p"
+          resolution: "720p"
         }
       })
     });
