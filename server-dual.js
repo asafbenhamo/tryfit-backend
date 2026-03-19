@@ -594,7 +594,7 @@ app.post("/api/tryon/generate-video", async (req, res) => {
 
 app.get("/api/tryon/video-status/:id", async (req, res) => {
   try {
-    const statusRes = await fetch(`https://api.fashn.ai/v1/run/${req.params.id}`, {
+    const statusRes = await fetch(`https://api.fashn.ai/v1/status/${req.params.id}`, {
       headers: { Authorization: `Bearer ${process.env.FASHN_API_KEY}` },
     });
     const data = await statusRes.json();
