@@ -599,7 +599,7 @@ app.get("/api/tryon/video-status/:id", async (req, res) => {
     });
     const data = await statusRes.json();
     if (data.status === "completed" && data.output) {
-      const videoUrl = typeof data.output === "string" ? data.output : data.output.video;
+      const videoUrl = Array.isArray(data.output) ? data.output[0] : (typeof data.output === "string" ? data.output : data.output.video);
       res.json({ status: "completed", video_url: `/api/tryon/video-proxy?url=${encodeURIComponent(videoUrl)}` });
     } else {
       res.json({ status: data.status || "processing", error: data.error });
