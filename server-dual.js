@@ -138,7 +138,7 @@ function buildFashnBody(dataUri, garmentUrl, category) {
       model_image: dataUri,
       garment_image: garmentUrl,
       category: category || "auto",
-      mode: "balanced",
+      mode: "quality",
       garment_photo_type: "auto"
     },
     num_samples: 1
