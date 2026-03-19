@@ -594,19 +594,33 @@ app.post("/api/tryon/generate-video", async (req, res) => {
 
 app.get("/api/tryon/video-status/:id", async (req, res) => {
   try {
-    const response = await fetch("https://api.fashn.ai/v1/status/" + req.params.id, {
-      headers: { "Authorization": "Bearer " + process.env.FASHN_API_KEY }
+    const statusRes = await fetch(`https://api.fashn.ai/v1/run/${req.params.id}`, {
+      headers: { Authorization: `Bearer ${process.env.FASHN_API_KEY}` },
     });
-    const data = await response.json();
-    if (data.status === "completed" && data.output && data.output[0]) {
-      res.json({ status: "completed", video_url: data.output[0] });
-    } else if (data.status === "failed") {
-      res.json({ status: "failed", error: data.error });
+    const data = await statusRes.json();
+    if (data.status === "completed" && data.output) {
+      const videoUrl = typeof data.output === "string" ? data.output : data.output.video;
+      res.json({ status: "completed", video_url: `/api/tryon/video-proxy?url=${encodeURIComponent(videoUrl)}` });
     } else {
-      res.json({ status: "processing" });
+      res.json({ status: data.status || "processing", error: data.error });
     }
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/tryon/video-proxy", async (req, res) => {
+  try {
+    const url = req.query.url;
+    if (!url) return res.status(400).json({ error: "Missing url" });
+    const videoRes = await fetch(url);
+    if (!videoRes.ok) return res.status(502).json({ error: "Failed to fetch video" });
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    const buffer = await videoRes.arrayBuffer();
+    res.send(Buffer.from(buffer));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 // === COMPLIANCE WEBHOOKS (HMAC VERIFIED) ===
