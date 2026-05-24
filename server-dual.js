@@ -172,12 +172,29 @@ async function pollFashn(predictionId) {
 }
 
 async function submitAndWaitFashn(modelImage, garmentUrl, category) {
-  const data = await submitFashn(modelImage, garmentUrl, category);
-  if (!data.id) throw new Error(data.message || data.error || "No prediction ID");
-  console.log("  FASHN submitted, ID:", data.id);
-  const result = await pollFashn(data.id);
-  if (result.output && result.output[0]) return result.output[0];
-  throw new Error("No output image");
+  const maxRetries = 3;
+  let lastError;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const data = await submitFashn(modelImage, garmentUrl, category);
+      if (!data.id) throw new Error(data.message || data.error || "No prediction ID");
+      console.log("  FASHN submitted, ID:", data.id, "(attempt " + attempt + "/" + maxRetries + ")");
+      const result = await pollFashn(data.id);
+      if (result.output && result.output[0]) return result.output[0];
+      throw new Error("No output image");
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        console.log("  Attempt " + attempt + " failed:", err.message);
+        console.log("  Retrying in 2 seconds...");
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 // ======================
