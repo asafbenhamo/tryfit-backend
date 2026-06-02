@@ -6,6 +6,8 @@ const crypto = require("crypto");
 require("dotenv").config();
 const creditsSystem = require("./credits");
 const adminRouter = require("./admin");
+const db = require("./database");
+const featureFlags = require("./feature-flags");
 
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
@@ -657,7 +659,7 @@ app.post("/webhooks/app/scopes_update", verifyShopifyWebhook, (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log("Server running on port " + PORT);
   console.log("Backend mode:", BACKEND_MODE.toUpperCase());
   if (BACKEND_MODE === "fashn") {
@@ -667,4 +669,21 @@ app.listen(PORT, () => {
   }
   console.log("Credits system: ACTIVE");
   console.log("Admin dashboard: /admin");
+  
+  // ========== NEW: Data Platform Initialization ==========
+  console.log("\n--- Data Platform Initialization ---");
+  console.log("Data collection enabled for:", featureFlags.getDataCollectionShops().join(", "));
+  
+  if (process.env.DATABASE_URL) {
+    const connected = await db.testConnection();
+    if (connected) {
+      await db.initializeSchema();
+      console.log("Data platform: READY");
+    } else {
+      console.log("⚠️  Data platform: DISABLED (DB connection failed, TryFit continues working normally)");
+    }
+  } else {
+    console.log("⚠️  DATABASE_URL not configured, data platform disabled");
+  }
+  console.log("---\n");
 });
