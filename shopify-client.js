@@ -1,0 +1,488 @@
+// shopify-client.js - Shopify Admin API client for data platform
+// Used to fetch customer and order data when a customer uses TryFit with consent.
+// Only operates for shops that have a configured token (currently only seven770).
+
+const db = require('./database');
+
+const SHOPIFY_API_VERSION = '2026-01';
+
+// Map shop domain -> environment variable name for its token
+const SHOP_TOKEN_MAP = {
+  'seven770.myshopify.com': 'SHOPIFY_770_TOKEN'
+};
+
+/**
+ * Get the access token for a specific shop.
+ * Returns null if no token is configured for this shop.
+ */
+function getTokenForShop(shopDomain) {
+  if (!shopDomain) return null;
+  const normalized = shopDomain.toLowerCase().trim();
+  const envVar = SHOP_TOKEN_MAP[normalized];
+  if (!envVar) return null;
+  return process.env[envVar] || null;
+}
+
+/**
+ * Check if we have a working token for a shop
+ */
+function hasTokenForShop(shopDomain) {
+  return getTokenForShop(shopDomain) !== null;
+}
+
+/**
+ * Generic Shopify Admin API GET request.
+ * Handles rate limiting, retries, and pagination.
+ */
+async function shopifyGet(shopDomain, endpoint, retries = 3) {
+  const token = getTokenForShop(shopDomain);
+  if (!token) {
+    throw new Error(`No token configured for shop: ${shopDomain}`);
+  }
+
+  const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
+  
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'X-Shopify-Access-Token': token,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      // Handle rate limiting
+      if (response.status === 429) {
+        const retryAfter = parseInt(response.headers.get('Retry-After') || '2');
+        console.log(`⏳ [Shopify] Rate limited, waiting ${retryAfter}s...`);
+        await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+        continue;
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Shopify API ${response.status}: ${errorText.substring(0, 200)}`);
+      }
+
+      return await response.json();
+    } catch (err) {
+      if (attempt === retries) throw err;
+      console.log(`⚠️  [Shopify] Attempt ${attempt} failed: ${err.message}. Retrying...`);
+      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+}
+
+/**
+ * Find a customer by email address.
+ * Returns the customer object or null if not found.
+ */
+async function findCustomerByEmail(shopDomain, email) {
+  if (!email) return null;
+  
+  try {
+    const query = encodeURIComponent(`email:${email}`);
+    const data = await shopifyGet(shopDomain, `customers/search.json?query=${query}`);
+    
+    if (data.customers && data.customers.length > 0) {
+      return data.customers[0];
+    }
+    return null;
+  } catch (err) {
+    console.error(`❌ [Shopify] findCustomerByEmail failed for ${email}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Find a customer by phone number.
+ */
+async function findCustomerByPhone(shopDomain, phone) {
+  if (!phone) return null;
+  
+  try {
+    const query = encodeURIComponent(`phone:${phone}`);
+    const data = await shopifyGet(shopDomain, `customers/search.json?query=${query}`);
+    
+    if (data.customers && data.customers.length > 0) {
+      return data.customers[0];
+    }
+    return null;
+  } catch (err) {
+    console.error(`❌ [Shopify] findCustomerByPhone failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Get a customer by Shopify ID with full details.
+ */
+async function getCustomerById(shopDomain, customerId) {
+  try {
+    const data = await shopifyGet(shopDomain, `customers/${customerId}.json`);
+    return data.customer || null;
+  } catch (err) {
+    console.error(`❌ [Shopify] getCustomerById failed for ${customerId}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Get all orders for a specific customer.
+ * Note: Shopify limits this to last 60 days by default unless read_all_orders scope is granted.
+ */
+async function getCustomerOrders(shopDomain, customerId, limit = 250) {
+  try {
+    const data = await shopifyGet(
+      shopDomain,
+      `customers/${customerId}/orders.json?status=any&limit=${limit}`
+    );
+    return data.orders || [];
+  } catch (err) {
+    console.error(`❌ [Shopify] getCustomerOrders failed for ${customerId}:`, err.message);
+    return [];
+  }
+}
+
+/**
+ * Save a Shopify customer to our store_customers table (Tier 1 - all customers).
+ * Returns the database row ID.
+ */
+async function saveStoreCustomer(shopDomain, shopifyCustomer) {
+  if (!shopifyCustomer || !shopifyCustomer.id) return null;
+  
+  try {
+    const result = await db.query(`
+      INSERT INTO store_customers (
+        shop_domain, shopify_customer_id, email, first_name, last_name,
+        phone, city, province, country, shopify_created_at, shopify_updated_at,
+        total_spent, orders_count, last_order_date, shopify_tags,
+        marketing_consent, marketing_consent_updated_at, raw_data, last_synced_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW()
+      )
+      ON CONFLICT (shop_domain, shopify_customer_id)
+      DO UPDATE SET
+        email = EXCLUDED.email,
+        first_name = EXCLUDED.first_name,
+        last_name = EXCLUDED.last_name,
+        phone = EXCLUDED.phone,
+        city = EXCLUDED.city,
+        province = EXCLUDED.province,
+        country = EXCLUDED.country,
+        shopify_updated_at = EXCLUDED.shopify_updated_at,
+        total_spent = EXCLUDED.total_spent,
+        orders_count = EXCLUDED.orders_count,
+        last_order_date = EXCLUDED.last_order_date,
+        shopify_tags = EXCLUDED.shopify_tags,
+        marketing_consent = EXCLUDED.marketing_consent,
+        marketing_consent_updated_at = EXCLUDED.marketing_consent_updated_at,
+        raw_data = EXCLUDED.raw_data,
+        last_synced_at = NOW()
+      RETURNING id
+    `, [
+      shopDomain,
+      shopifyCustomer.id,
+      shopifyCustomer.email || null,
+      shopifyCustomer.first_name || null,
+      shopifyCustomer.last_name || null,
+      shopifyCustomer.phone || (shopifyCustomer.default_address?.phone) || null,
+      shopifyCustomer.default_address?.city || null,
+      shopifyCustomer.default_address?.province || null,
+      shopifyCustomer.default_address?.country || null,
+      shopifyCustomer.created_at || null,
+      shopifyCustomer.updated_at || null,
+      parseFloat(shopifyCustomer.total_spent || '0'),
+      shopifyCustomer.orders_count || 0,
+      shopifyCustomer.last_order_date || null,
+      (shopifyCustomer.tags || '').split(',').map(t => t.trim()).filter(Boolean),
+      shopifyCustomer.accepts_marketing || false,
+      shopifyCustomer.accepts_marketing_updated_at || null,
+      JSON.stringify(shopifyCustomer)
+    ]);
+    
+    return result.rows[0]?.id || null;
+  } catch (err) {
+    console.error(`❌ [DB] saveStoreCustomer failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Save a Shopify order with all its line items.
+ */
+async function saveStoreOrder(shopDomain, shopifyOrder) {
+  if (!shopifyOrder || !shopifyOrder.id) return null;
+  
+  try {
+    // Save the order
+    await db.query(`
+      INSERT INTO store_orders (
+        shop_domain, shopify_order_id, shopify_customer_id, order_number,
+        total_price, subtotal_price, total_discounts, currency,
+        financial_status, fulfillment_status, discount_codes, source_name,
+        ordered_at, raw_data, synced_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW()
+      )
+      ON CONFLICT (shop_domain, shopify_order_id)
+      DO UPDATE SET
+        total_price = EXCLUDED.total_price,
+        financial_status = EXCLUDED.financial_status,
+        fulfillment_status = EXCLUDED.fulfillment_status,
+        raw_data = EXCLUDED.raw_data,
+        synced_at = NOW()
+    `, [
+      shopDomain,
+      shopifyOrder.id,
+      shopifyOrder.customer?.id || null,
+      shopifyOrder.order_number?.toString() || shopifyOrder.name || null,
+      parseFloat(shopifyOrder.total_price || '0'),
+      parseFloat(shopifyOrder.subtotal_price || '0'),
+      parseFloat(shopifyOrder.total_discounts || '0'),
+      shopifyOrder.currency || null,
+      shopifyOrder.financial_status || null,
+      shopifyOrder.fulfillment_status || null,
+      (shopifyOrder.discount_codes || []).map(d => d.code).filter(Boolean),
+      shopifyOrder.source_name || null,
+      shopifyOrder.created_at || null,
+      JSON.stringify(shopifyOrder)
+    ]);
+    
+    // Save line items
+    if (shopifyOrder.line_items && Array.isArray(shopifyOrder.line_items)) {
+      // First delete existing items for this order (in case of update)
+      await db.query(
+        `DELETE FROM store_order_items WHERE shop_domain = $1 AND shopify_order_id = $2`,
+        [shopDomain, shopifyOrder.id]
+      );
+      
+      // Then insert all items
+      for (const item of shopifyOrder.line_items) {
+        await db.query(`
+          INSERT INTO store_order_items (
+            shop_domain, shopify_order_id, shopify_product_id, shopify_variant_id,
+            title, variant_title, vendor, product_type, quantity, price,
+            total_discount, sku, tags, raw_data
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        `, [
+          shopDomain,
+          shopifyOrder.id,
+          item.product_id || null,
+          item.variant_id || null,
+          item.title || null,
+          item.variant_title || null,
+          item.vendor || null,
+          item.product_type || null,
+          item.quantity || 1,
+          parseFloat(item.price || '0'),
+          parseFloat(item.total_discount || '0'),
+          item.sku || null,
+          [],
+          JSON.stringify(item)
+        ]);
+      }
+    }
+    
+    return shopifyOrder.id;
+  } catch (err) {
+    console.error(`❌ [DB] saveStoreOrder failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Mark a customer as consenting to TryFit data sharing.
+ * Creates entry in tryfit_consenting_customers table (Tier 2).
+ * This is the main entry point for "customer used TryFit + checked the consent box".
+ */
+async function addTryFitConsent(shopDomain, params) {
+  const {
+    storeCustomerId,
+    shopifyCustomerId,
+    identifier,
+    email,
+    consentTextVersion = 'v1.0',
+    consentText = null,
+    ipAddress = null,
+    userAgent = null
+  } = params;
+  
+  try {
+    // Upsert the consenting customer record
+    const result = await db.query(`
+      INSERT INTO tryfit_consenting_customers (
+        shop_domain, shopify_customer_id, store_customer_id, 
+        identifier, email, first_consent_at, latest_consent_at, consent_active
+      ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), TRUE)
+      ON CONFLICT (shop_domain, identifier)
+      DO UPDATE SET
+        shopify_customer_id = COALESCE(EXCLUDED.shopify_customer_id, tryfit_consenting_customers.shopify_customer_id),
+        store_customer_id = COALESCE(EXCLUDED.store_customer_id, tryfit_consenting_customers.store_customer_id),
+        email = COALESCE(EXCLUDED.email, tryfit_consenting_customers.email),
+        latest_consent_at = NOW(),
+        consent_active = TRUE,
+        revoked_at = NULL
+      RETURNING id
+    `, [
+      shopDomain,
+      shopifyCustomerId || null,
+      storeCustomerId || null,
+      identifier,
+      email || null
+    ]);
+    
+    const tryfitCustomerId = result.rows[0]?.id;
+    
+    // Log the consent action (audit trail)
+    if (tryfitCustomerId) {
+      await db.query(`
+        INSERT INTO consent_records (
+          shop_domain, tryfit_customer_id, identifier, action,
+          consent_text_version, consent_text, ip_address, user_agent, shopify_customer_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `, [
+        shopDomain,
+        tryfitCustomerId,
+        identifier,
+        'consent_given',
+        consentTextVersion,
+        consentText,
+        ipAddress,
+        userAgent,
+        shopifyCustomerId || null
+      ]);
+    }
+    
+    return tryfitCustomerId;
+  } catch (err) {
+    console.error(`❌ [DB] addTryFitConsent failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * The main "magic" function:
+ * When a customer uses TryFit with consent, this is called.
+ * It does the full backfill:
+ *   1. Find the customer in Shopify (by email/phone)
+ *   2. Save customer to store_customers (Tier 1)
+ *   3. Mark as consenting in tryfit_consenting_customers (Tier 2)
+ *   4. Fetch ALL their orders
+ *   5. Save orders + line items
+ * 
+ * This runs in the background - doesn't block the try-on response.
+ */
+async function backfillCustomerData(shopDomain, params) {
+  const { email, phone, identifier, ipAddress, userAgent } = params;
+  
+  if (!email && !phone) {
+    console.log(`📊 [Backfill] No email/phone provided, skipping for ${identifier}`);
+    return { success: false, reason: 'no_identifier' };
+  }
+  
+  if (!hasTokenForShop(shopDomain)) {
+    console.log(`📊 [Backfill] No Shopify token for ${shopDomain}, skipping`);
+    return { success: false, reason: 'no_token' };
+  }
+  
+  console.log(`📊 [Backfill] Starting for ${shopDomain} | email: ${email || 'none'} | phone: ${phone || 'none'}`);
+  
+  try {
+    // Step 1: Find customer in Shopify
+    let shopifyCustomer = null;
+    if (email) {
+      shopifyCustomer = await findCustomerByEmail(shopDomain, email);
+    }
+    if (!shopifyCustomer && phone) {
+      shopifyCustomer = await findCustomerByPhone(shopDomain, phone);
+    }
+    
+    if (!shopifyCustomer) {
+      console.log(`📊 [Backfill] Customer not found in Shopify for ${email || phone}`);
+      // Still record consent even if customer not yet in Shopify
+      await addTryFitConsent(shopDomain, {
+        identifier,
+        email,
+        ipAddress,
+        userAgent
+      });
+      return { success: false, reason: 'customer_not_in_shopify' };
+    }
+    
+    console.log(`📊 [Backfill] Found Shopify customer ID: ${shopifyCustomer.id}`);
+    
+    // Step 2: Save to store_customers (Tier 1)
+    const storeCustomerId = await saveStoreCustomer(shopDomain, shopifyCustomer);
+    
+    // Step 3: Add to TryFit verified pool (Tier 2)
+    const tryfitCustomerId = await addTryFitConsent(shopDomain, {
+      storeCustomerId,
+      shopifyCustomerId: shopifyCustomer.id,
+      identifier,
+      email: shopifyCustomer.email || email,
+      ipAddress,
+      userAgent
+    });
+    
+    // Step 4: Fetch and save all orders
+    const orders = await getCustomerOrders(shopDomain, shopifyCustomer.id);
+    console.log(`📊 [Backfill] Fetched ${orders.length} orders for customer ${shopifyCustomer.id}`);
+    
+    let savedOrders = 0;
+    for (const order of orders) {
+      const saved = await saveStoreOrder(shopDomain, order);
+      if (saved) savedOrders++;
+    }
+    
+    console.log(`✅ [Backfill] Complete: ${savedOrders}/${orders.length} orders saved for ${shopifyCustomer.email || shopifyCustomer.id}`);
+    
+    return {
+      success: true,
+      shopifyCustomerId: shopifyCustomer.id,
+      storeCustomerId,
+      tryfitCustomerId,
+      ordersSaved: savedOrders,
+      totalOrders: orders.length
+    };
+  } catch (err) {
+    console.error(`❌ [Backfill] Failed for ${identifier}:`, err.message);
+    return { success: false, reason: 'error', error: err.message };
+  }
+}
+
+/**
+ * Verify Shopify API connectivity on startup.
+ * Tests that the token works.
+ */
+async function verifyConnection(shopDomain) {
+  if (!hasTokenForShop(shopDomain)) {
+    return { connected: false, reason: 'no_token' };
+  }
+  
+  try {
+    const data = await shopifyGet(shopDomain, 'shop.json');
+    if (data.shop) {
+      console.log(`✅ [Shopify] Connected to ${data.shop.name} (${shopDomain})`);
+      return { connected: true, shopName: data.shop.name };
+    }
+    return { connected: false, reason: 'invalid_response' };
+  } catch (err) {
+    console.error(`❌ [Shopify] Connection test failed for ${shopDomain}:`, err.message);
+    return { connected: false, reason: 'api_error', error: err.message };
+  }
+}
+
+module.exports = {
+  hasTokenForShop,
+  getTokenForShop,
+  findCustomerByEmail,
+  findCustomerByPhone,
+  getCustomerById,
+  getCustomerOrders,
+  saveStoreCustomer,
+  saveStoreOrder,
+  addTryFitConsent,
+  backfillCustomerData,
+  verifyConnection
+};

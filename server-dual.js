@@ -8,6 +8,7 @@ const creditsSystem = require("./credits");
 const adminRouter = require("./admin");
 const db = require("./database");
 const featureFlags = require("./feature-flags");
+const shopify = require("./shopify-client");
 
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
@@ -66,15 +67,30 @@ async function saveTryOnEvent(shop, eventData) {
   }
   
   try {
+    // Try to link to existing TryFit consenting customer
+    let tryfitCustomerId = null;
+    if (eventData.identifier) {
+      const linkResult = await db.query(
+        `SELECT id FROM tryfit_consenting_customers 
+         WHERE shop_domain = $1 AND identifier = $2 AND consent_active = TRUE
+         LIMIT 1`,
+        [shop, eventData.identifier]
+      );
+      if (linkResult.rows.length > 0) {
+        tryfitCustomerId = linkResult.rows[0].id;
+      }
+    }
+
     await db.query(`
       INSERT INTO tryon_events (
-        shop_domain, session_id, product_id, product_title, 
+        shop_domain, tryfit_customer_id, session_id, product_id, product_title, 
         product_category, product_price, garment_url, result_url,
         backend_mode, category_detected, success, error_message,
         ip_address, user_agent, identifier, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
     `, [
       shop,
+      tryfitCustomerId,
       eventData.session_id || null,
       eventData.product_id || null,
       eventData.product_title || null,
@@ -90,11 +106,48 @@ async function saveTryOnEvent(shop, eventData) {
       eventData.user_agent || null,
       eventData.identifier || null
     ]);
-    console.log("📊 [DataPlatform] Try-on event saved for", shop);
+    
+    // Increment total_tryons counter if linked to a TryFit customer
+    if (tryfitCustomerId) {
+      await db.query(
+        `UPDATE tryfit_consenting_customers 
+         SET total_tryons = total_tryons + 1 
+         WHERE id = $1`,
+        [tryfitCustomerId]
+      );
+    }
+    
+    console.log("📊 [DataPlatform] Try-on event saved for", shop, tryfitCustomerId ? `(linked to TryFit customer ${tryfitCustomerId})` : '(anonymous)');
   } catch (err) {
     // Log error but don't throw - try-on must continue working
     console.error("⚠️  [DataPlatform] Failed to save try-on event:", err.message);
   }
+}
+
+// === DATA PLATFORM: Handle TryFit consent + customer backfill ===
+// Called when a customer provides consent (checkbox checked).
+// Triggers Shopify backfill in the background - does not block.
+function handleConsentAndBackfill(shop, params) {
+  if (!shop) return;
+  if (!featureFlags.isDataCollectionEnabled(shop)) return;
+  if (!shopify.hasTokenForShop(shop)) {
+    console.log("📊 [DataPlatform] No Shopify token for", shop, "- skipping backfill");
+    return;
+  }
+  
+  // Fire and forget - runs in background
+  setImmediate(async () => {
+    try {
+      const result = await shopify.backfillCustomerData(shop, params);
+      if (result.success) {
+        console.log(`✅ [DataPlatform] Backfill complete for ${params.email || params.identifier}: ${result.ordersSaved} orders`);
+      } else {
+        console.log(`⚠️  [DataPlatform] Backfill skipped: ${result.reason}`);
+      }
+    } catch (err) {
+      console.error("⚠️  [DataPlatform] Backfill error:", err.message);
+    }
+  });
 }
 
 function getShopFromRequest(req) {
@@ -168,6 +221,46 @@ app.use("/admin", adminRouter);
 
 app.get("/api/credits/:shop", (req, res) => {
   res.json(creditsSystem.getStoreCredits(req.params.shop));
+});
+
+// ======================
+// DATA PLATFORM: Consent endpoint
+// ======================
+// Called by frontend when customer checks the consent checkbox.
+// Triggers customer backfill in background.
+app.post("/api/consent", express.json(), async (req, res) => {
+  try {
+    const shop = getShopFromRequest(req);
+    const { email, phone, identifier, consent_text_version } = req.body;
+    
+    if (!shop) {
+      return res.status(400).json({ error: "Shop not identified" });
+    }
+    
+    if (!featureFlags.isDataCollectionEnabled(shop)) {
+      // Silently succeed for non-enabled shops - they don't need this
+      return res.json({ success: true, data_platform: "disabled" });
+    }
+    
+    const finalIdentifier = identifier || email || phone || getRealIP(req);
+    
+    console.log(`📊 [DataPlatform] Consent received for ${shop} | ${email || phone || 'no contact'}`);
+    
+    // Trigger backfill in background (doesn't block response)
+    handleConsentAndBackfill(shop, {
+      email: email || null,
+      phone: phone || null,
+      identifier: finalIdentifier,
+      ipAddress: getRealIP(req),
+      userAgent: req.headers["user-agent"],
+      consentTextVersion: consent_text_version || 'v1.0'
+    });
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Consent endpoint error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ======================
@@ -789,6 +882,21 @@ app.listen(PORT, async () => {
     if (connected) {
       await db.initializeSchema();
       console.log("Data platform: READY");
+      
+      // Verify Shopify API connectivity for each enabled shop
+      const enabledShops = featureFlags.getDataCollectionShops();
+      for (const shop of enabledShops) {
+        if (shopify.hasTokenForShop(shop)) {
+          const verify = await shopify.verifyConnection(shop);
+          if (verify.connected) {
+            console.log(`✅ Shopify API: Connected to ${shop} (${verify.shopName})`);
+          } else {
+            console.log(`⚠️  Shopify API: Failed for ${shop} - ${verify.reason}`);
+          }
+        } else {
+          console.log(`⚠️  Shopify API: No token configured for ${shop}`);
+        }
+      }
     } else {
       console.log("⚠️  Data platform: DISABLED (DB connection failed, TryFit continues working normally)");
     }
