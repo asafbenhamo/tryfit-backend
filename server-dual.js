@@ -264,6 +264,221 @@ app.post("/api/consent", express.json(), async (req, res) => {
 });
 
 // ======================
+// DATA PLATFORM: Admin backfill endpoint
+// ======================
+// Manually triggers full shop backfill (all customers + orders to Tier 1).
+// Protected by admin password. Runs in background, returns immediately.
+const ADMIN_PASSWORD = "tryfit2026";
+const backfillStatus = {}; // In-memory status per shop
+
+app.get("/admin/backfill", (req, res) => {
+  // Show backfill UI
+  res.send(`<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>TryFit Data Platform - Backfill</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:700px;margin:40px auto;padding:20px;background:#f5f5f5;direction:rtl}
+.card{background:white;padding:30px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:20px}
+h1{color:#E94560;margin:0 0 10px}
+.warn{background:#fff3cd;border:1px solid #ffc107;padding:15px;border-radius:8px;margin:15px 0}
+input{padding:10px;font-size:16px;border:1px solid #ddd;border-radius:6px;width:100%;box-sizing:border-box;margin-bottom:10px}
+button{background:#E94560;color:white;padding:12px 24px;border:none;border-radius:6px;font-size:16px;cursor:pointer;width:100%}
+button:hover{background:#c9354c}
+button:disabled{background:#999;cursor:not-allowed}
+.status{background:#f0f8ff;padding:15px;border-radius:8px;margin-top:15px;font-family:monospace;font-size:13px;white-space:pre-wrap;max-height:400px;overflow-y:auto}
+.shop-tag{display:inline-block;background:#E94560;color:white;padding:4px 10px;border-radius:4px;font-size:13px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🚀 TryFit Data Backfill</h1>
+  <p>טוען את כל הלקוחות וההזמנות של החנות לתוך מאגר Tier 1.</p>
+  
+  <div class="warn">
+    <strong>⚠️ שים לב:</strong><br>
+    • זה ימשוך את כל הלקוחות וההזמנות של 60 הימים האחרונים מ-Shopify<br>
+    • הנתונים נשמרים ל-<code>store_customers</code> ו-<code>store_orders</code> בלבד (Tier 1)<br>
+    • לא לתחילת Tier 2 — זה למאגר פנימי של 770 בלבד<br>
+    • התהליך עשוי לקחת מספר דקות
+  </div>
+  
+  <h3>חנות לעיבוד:</h3>
+  <p><span class="shop-tag">seven770.myshopify.com</span></p>
+  
+  <h3>סיסמת אדמין:</h3>
+  <input type="password" id="password" placeholder="הזן סיסמה" />
+  
+  <button onclick="startBackfill()" id="startBtn">🚀 הפעל Backfill</button>
+  
+  <div id="status" class="status" style="display:none">ממתין להפעלה...</div>
+</div>
+
+<script>
+async function startBackfill() {
+  const password = document.getElementById('password').value;
+  const statusEl = document.getElementById('status');
+  const btnEl = document.getElementById('startBtn');
+  
+  if (!password) {
+    alert('הזן סיסמה');
+    return;
+  }
+  
+  btnEl.disabled = true;
+  btnEl.textContent = '⏳ מבצע backfill...';
+  statusEl.style.display = 'block';
+  statusEl.textContent = '🚀 שולח בקשה...';
+  
+  try {
+    const response = await fetch('/admin/backfill/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({password, shop: 'seven770.myshopify.com'})
+    });
+    
+    const data = await response.json();
+    
+    if (data.error) {
+      statusEl.textContent = '❌ שגיאה: ' + data.error;
+      btnEl.disabled = false;
+      btnEl.textContent = '🚀 הפעל Backfill';
+      return;
+    }
+    
+    statusEl.textContent = '✅ הופעל! בודק סטטוס...\\n';
+    
+    // Poll for status every 3 seconds
+    const pollInterval = setInterval(async () => {
+      try {
+        const statusRes = await fetch('/admin/backfill/status?password=' + encodeURIComponent(password));
+        const statusData = await statusRes.json();
+        
+        if (statusData.status) {
+          let text = '📊 סטטוס Backfill:\\n\\n';
+          text += '   Phase: ' + (statusData.status.current_phase || 'מתחיל') + '\\n';
+          text += '   לקוחות נמשכו: ' + (statusData.status.customers_fetched || 0) + '\\n';
+          text += '   לקוחות נשמרו: ' + (statusData.status.customers_saved || 0) + '\\n';
+          text += '   הזמנות נמשכו: ' + (statusData.status.orders_fetched || 0) + '\\n';
+          text += '   הזמנות נשמרו: ' + (statusData.status.orders_saved || 0) + '\\n';
+          text += '   זמן שעבר: ' + (statusData.status.duration_seconds || 0) + 's\\n';
+          
+          if (statusData.status.success === true) {
+            text += '\\n🎉 הושלם בהצלחה!\\n';
+            clearInterval(pollInterval);
+            btnEl.disabled = false;
+            btnEl.textContent = '✅ הושלם — הפעל שוב';
+          } else if (statusData.status.success === false) {
+            text += '\\n❌ נכשל: ' + (statusData.status.fatal_error || 'שגיאה לא ידועה');
+            clearInterval(pollInterval);
+            btnEl.disabled = false;
+            btnEl.textContent = '🚀 נסה שוב';
+          }
+          
+          statusEl.textContent = text;
+        }
+      } catch (e) {
+        console.error('Poll error:', e);
+      }
+    }, 3000);
+    
+  } catch (err) {
+    statusEl.textContent = '❌ שגיאה: ' + err.message;
+    btnEl.disabled = false;
+    btnEl.textContent = '🚀 הפעל Backfill';
+  }
+}
+</script>
+</body>
+</html>`);
+});
+
+app.post("/admin/backfill/run", express.json(), async (req, res) => {
+  try {
+    const { password, shop } = req.body;
+    
+    if (password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "סיסמה שגויה" });
+    }
+    
+    if (!shop) {
+      return res.status(400).json({ error: "Shop required" });
+    }
+    
+    if (!featureFlags.isDataCollectionEnabled(shop)) {
+      return res.status(403).json({ error: "Data collection not enabled for this shop" });
+    }
+    
+    if (!shopify.hasTokenForShop(shop)) {
+      return res.status(400).json({ error: "No Shopify token configured for this shop" });
+    }
+    
+    // Check if already running for this shop
+    if (backfillStatus[shop] && !backfillStatus[shop].success && !backfillStatus[shop].fatal_error) {
+      return res.json({ 
+        success: false, 
+        error: "Backfill already running for this shop",
+        status: backfillStatus[shop] 
+      });
+    }
+    
+    // Initialize status
+    backfillStatus[shop] = {
+      current_phase: 'starting',
+      customers_fetched: 0,
+      customers_saved: 0,
+      orders_fetched: 0,
+      orders_saved: 0,
+      started_at: new Date().toISOString()
+    };
+    
+    // Run in background
+    setImmediate(async () => {
+      try {
+        const result = await shopify.backfillEntireShop(shop, (progress) => {
+          // Update status as backfill progresses
+          backfillStatus[shop] = {
+            ...backfillStatus[shop],
+            current_phase: progress.phase,
+            ...(progress.stats || {})
+          };
+        });
+        
+        // Final status
+        backfillStatus[shop] = { ...backfillStatus[shop], ...result };
+      } catch (err) {
+        backfillStatus[shop] = {
+          ...backfillStatus[shop],
+          success: false,
+          fatal_error: err.message
+        };
+      }
+    });
+    
+    res.json({ success: true, message: "Backfill started" });
+  } catch (err) {
+    console.error("Backfill run error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/admin/backfill/status", (req, res) => {
+  const password = req.query.password;
+  
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  
+  const shop = req.query.shop || 'seven770.myshopify.com';
+  
+  res.json({ 
+    shop, 
+    status: backfillStatus[shop] || null 
+  });
+});
+
+// ======================
 // FASHN FUNCTIONS
 // ======================
 function buildFashnBody(dataUri, garmentUrl, category) {

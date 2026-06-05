@@ -473,6 +473,253 @@ async function verifyConnection(shopDomain) {
   }
 }
 
+/**
+ * Get all customers from a shop using pagination.
+ * Returns array of customer objects.
+ */
+async function getAllCustomers(shopDomain, onProgress = null) {
+  const customers = [];
+  let pageInfo = null;
+  let page = 1;
+  
+  while (true) {
+    try {
+      let endpoint = `customers.json?limit=250`;
+      if (pageInfo) {
+        endpoint = `customers.json?limit=250&page_info=${pageInfo}`;
+      }
+      
+      const token = getTokenForShop(shopDomain);
+      if (!token) throw new Error(`No token for ${shopDomain}`);
+      
+      const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
+      const response = await fetch(url, {
+        headers: {
+          'X-Shopify-Access-Token': token,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (response.status === 429) {
+        console.log(`⏳ [Shopify] Rate limited, waiting 2s...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      
+      if (!response.ok) {
+        throw new Error(`Shopify API ${response.status}: ${await response.text()}`);
+      }
+      
+      const data = await response.json();
+      const pageCustomers = data.customers || [];
+      customers.push(...pageCustomers);
+      
+      console.log(`📦 [Backfill] Customers page ${page}: ${pageCustomers.length} (total: ${customers.length})`);
+      if (onProgress) onProgress({ phase: 'customers', page, count: customers.length });
+      
+      // Check for next page (Link header pagination)
+      const linkHeader = response.headers.get('Link') || response.headers.get('link');
+      const nextMatch = linkHeader && linkHeader.match(/<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"/);
+      
+      if (!nextMatch || pageCustomers.length === 0) {
+        break; // No more pages
+      }
+      
+      pageInfo = nextMatch[1];
+      page++;
+      
+      // Small delay between pages to be nice to Shopify
+      await new Promise(resolve => setTimeout(resolve, 300));
+    } catch (err) {
+      console.error(`❌ [Backfill] getAllCustomers page ${page} failed:`, err.message);
+      break;
+    }
+  }
+  
+  return customers;
+}
+
+/**
+ * Get all orders from a shop using pagination.
+ * Note: Limited to last 60 days unless read_all_orders scope is granted.
+ */
+async function getAllOrders(shopDomain, onProgress = null) {
+  const orders = [];
+  let pageInfo = null;
+  let page = 1;
+  
+  while (true) {
+    try {
+      let endpoint = `orders.json?limit=250&status=any`;
+      if (pageInfo) {
+        endpoint = `orders.json?limit=250&status=any&page_info=${pageInfo}`;
+      }
+      
+      const token = getTokenForShop(shopDomain);
+      if (!token) throw new Error(`No token for ${shopDomain}`);
+      
+      const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
+      const response = await fetch(url, {
+        headers: {
+          'X-Shopify-Access-Token': token,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (response.status === 429) {
+        console.log(`⏳ [Shopify] Rate limited, waiting 2s...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      
+      if (!response.ok) {
+        throw new Error(`Shopify API ${response.status}: ${await response.text()}`);
+      }
+      
+      const data = await response.json();
+      const pageOrders = data.orders || [];
+      orders.push(...pageOrders);
+      
+      console.log(`📦 [Backfill] Orders page ${page}: ${pageOrders.length} (total: ${orders.length})`);
+      if (onProgress) onProgress({ phase: 'orders', page, count: orders.length });
+      
+      const linkHeader = response.headers.get('Link') || response.headers.get('link');
+      const nextMatch = linkHeader && linkHeader.match(/<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"/);
+      
+      if (!nextMatch || pageOrders.length === 0) {
+        break;
+      }
+      
+      pageInfo = nextMatch[1];
+      page++;
+      
+      await new Promise(resolve => setTimeout(resolve, 300));
+    } catch (err) {
+      console.error(`❌ [Backfill] getAllOrders page ${page} failed:`, err.message);
+      break;
+    }
+  }
+  
+  return orders;
+}
+
+/**
+ * THE BIG ONE - Backfill the entire shop.
+ * 
+ * Pulls ALL customers + ALL orders (last 60 days) and saves to Tier 1 tables.
+ * Returns stats summary.
+ * 
+ * SAFETY: Only operates on shops with data collection enabled (feature flag check).
+ * NOTE: This data goes ONLY to Tier 1 (store_customers, store_orders) - 
+ *       never to Tier 2 (tryfit_consenting_customers) without explicit consent.
+ */
+async function backfillEntireShop(shopDomain, onProgress = null) {
+  if (!hasTokenForShop(shopDomain)) {
+    return { success: false, reason: 'no_token' };
+  }
+  
+  const startTime = Date.now();
+  const stats = {
+    started_at: new Date().toISOString(),
+    shop_domain: shopDomain,
+    customers_fetched: 0,
+    customers_saved: 0,
+    customers_failed: 0,
+    orders_fetched: 0,
+    orders_saved: 0,
+    orders_failed: 0,
+    duration_seconds: 0,
+    errors: []
+  };
+  
+  try {
+    console.log(`\n🚀 [Backfill] Starting FULL backfill for ${shopDomain}\n`);
+    if (onProgress) onProgress({ phase: 'starting', stats });
+    
+    // Phase 1: Fetch all customers
+    console.log(`📥 [Backfill] Phase 1: Fetching all customers...`);
+    const customers = await getAllCustomers(shopDomain, onProgress);
+    stats.customers_fetched = customers.length;
+    console.log(`✅ [Backfill] Fetched ${customers.length} customers from Shopify`);
+    
+    // Phase 2: Save customers to Tier 1
+    console.log(`💾 [Backfill] Phase 2: Saving customers to database...`);
+    for (let i = 0; i < customers.length; i++) {
+      const customer = customers[i];
+      const saved = await saveStoreCustomer(shopDomain, customer);
+      if (saved) {
+        stats.customers_saved++;
+      } else {
+        stats.customers_failed++;
+      }
+      
+      if (i % 50 === 0 && i > 0) {
+        console.log(`   Saved ${stats.customers_saved}/${customers.length} customers...`);
+        if (onProgress) onProgress({ phase: 'saving_customers', stats });
+      }
+    }
+    console.log(`✅ [Backfill] Saved ${stats.customers_saved} customers (${stats.customers_failed} failed)`);
+    
+    // Phase 3: Fetch all orders
+    console.log(`📥 [Backfill] Phase 3: Fetching all orders...`);
+    const orders = await getAllOrders(shopDomain, onProgress);
+    stats.orders_fetched = orders.length;
+    console.log(`✅ [Backfill] Fetched ${orders.length} orders from Shopify`);
+    
+    // Phase 4: Save orders + line items to Tier 1
+    console.log(`💾 [Backfill] Phase 4: Saving orders to database...`);
+    for (let i = 0; i < orders.length; i++) {
+      const order = orders[i];
+      const saved = await saveStoreOrder(shopDomain, order);
+      if (saved) {
+        stats.orders_saved++;
+      } else {
+        stats.orders_failed++;
+      }
+      
+      if (i % 50 === 0 && i > 0) {
+        console.log(`   Saved ${stats.orders_saved}/${orders.length} orders...`);
+        if (onProgress) onProgress({ phase: 'saving_orders', stats });
+      }
+    }
+    console.log(`✅ [Backfill] Saved ${stats.orders_saved} orders (${stats.orders_failed} failed)`);
+    
+    stats.duration_seconds = Math.round((Date.now() - startTime) / 1000);
+    stats.success = true;
+    stats.completed_at = new Date().toISOString();
+    
+    // Log audit trail
+    try {
+      await db.query(`
+        INSERT INTO data_access_log (
+          shop_domain, action_type, action_details, performed_by, created_at
+        ) VALUES ($1, $2, $3, $4, NOW())
+      `, [
+        shopDomain,
+        'full_backfill',
+        JSON.stringify(stats),
+        'admin_endpoint'
+      ]);
+    } catch (e) {
+      console.log('⚠️  Could not log to data_access_log:', e.message);
+    }
+    
+    console.log(`\n🎉 [Backfill] COMPLETE in ${stats.duration_seconds}s`);
+    console.log(`   Customers: ${stats.customers_saved}/${stats.customers_fetched}`);
+    console.log(`   Orders: ${stats.orders_saved}/${stats.orders_fetched}\n`);
+    
+    if (onProgress) onProgress({ phase: 'complete', stats });
+    
+    return stats;
+  } catch (err) {
+    console.error(`❌ [Backfill] FATAL error:`, err.message);
+    stats.success = false;
+    stats.fatal_error = err.message;
+    stats.duration_seconds = Math.round((Date.now() - startTime) / 1000);
+    return stats;
+  }
+}
+
 module.exports = {
   hasTokenForShop,
   getTokenForShop,
@@ -484,5 +731,8 @@ module.exports = {
   saveStoreOrder,
   addTryFitConsent,
   backfillCustomerData,
-  verifyConnection
+  verifyConnection,
+  getAllCustomers,
+  getAllOrders,
+  backfillEntireShop
 };
