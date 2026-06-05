@@ -56,6 +56,47 @@ function checkRateLimit(ip, limit) {
   return true;
 }
 
+// === DATA PLATFORM: Save try-on event ===
+// Only saves if shop has data collection enabled (feature flag)
+// Wrapped in try/catch - never breaks try-on if DB fails
+async function saveTryOnEvent(shop, eventData) {
+  if (!shop) return;
+  if (!featureFlags.isDataCollectionEnabled(shop)) {
+    return; // Silently skip for non-enabled shops
+  }
+  
+  try {
+    await db.query(`
+      INSERT INTO tryon_events (
+        shop_domain, session_id, product_id, product_title, 
+        product_category, product_price, garment_url, result_url,
+        backend_mode, category_detected, success, error_message,
+        ip_address, user_agent, identifier, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+    `, [
+      shop,
+      eventData.session_id || null,
+      eventData.product_id || null,
+      eventData.product_title || null,
+      eventData.product_category || null,
+      eventData.product_price || null,
+      eventData.garment_url || null,
+      eventData.result_url || null,
+      eventData.backend_mode || BACKEND_MODE,
+      eventData.category_detected || null,
+      eventData.success !== false,
+      eventData.error_message || null,
+      eventData.ip_address || null,
+      eventData.user_agent || null,
+      eventData.identifier || null
+    ]);
+    console.log("📊 [DataPlatform] Try-on event saved for", shop);
+  } catch (err) {
+    // Log error but don't throw - try-on must continue working
+    console.error("⚠️  [DataPlatform] Failed to save try-on event:", err.message);
+  }
+}
+
 function getShopFromRequest(req) {
   if (req.body.shop) return req.body.shop;
   if (req.headers["x-shop-domain"]) return req.headers["x-shop-domain"];
@@ -403,11 +444,38 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
         output: [outputImage],
         prediction_id: "runpod-direct"
       });
+      // Save try-on event (data platform - 770 only)
+      saveTryOnEvent(shop, {
+        product_id: req.body.product_id,
+        product_title: req.body.product_title,
+        product_category: category,
+        product_price: req.body.product_price ? parseFloat(req.body.product_price) : null,
+        garment_url: garmentImageUrl,
+        result_url: outputImage,
+        ip_address: ip,
+        user_agent: req.headers["user-agent"],
+        identifier: req.body.identifier || ip,
+        session_id: req.body.session_id,
+        success: true
+      });
     } else {
       const data = await submitFashn(dataUri, garmentImageUrl, category);
       console.log("FASHN response:", JSON.stringify(data));
       if (data.id) {
         res.json({ prediction_id: data.id });
+        // Save try-on event (data platform - 770 only)
+        saveTryOnEvent(shop, {
+          product_id: req.body.product_id,
+          product_title: req.body.product_title,
+          product_category: category,
+          product_price: req.body.product_price ? parseFloat(req.body.product_price) : null,
+          garment_url: garmentImageUrl,
+          ip_address: ip,
+          user_agent: req.headers["user-agent"],
+          identifier: req.body.identifier || ip,
+          session_id: req.body.session_id,
+          success: true
+        });
       } else if (data.error) {
         res.status(500).json({ error: data.error });
       } else {
@@ -465,6 +533,24 @@ app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, 
       }
     }
     if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
+
+    // Save try-on event per garment (data platform - 770 only)
+    const multiShop = getShopFromRequest(req);
+    if (multiShop) {
+      results.forEach((r, idx) => {
+        saveTryOnEvent(multiShop, {
+          product_category: categories[idx] || "auto",
+          garment_url: r.garment_url,
+          ip_address: ip,
+          user_agent: req.headers["user-agent"],
+          identifier: req.body.identifier || ip,
+          session_id: req.body.session_id,
+          success: !r.error,
+          error_message: r.error || null
+        });
+      });
+    }
+
     res.json({ results: results });
   } catch (err) {
     console.error("Multi generate error:", err);
@@ -526,6 +612,30 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
     }
     if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
     const finalOutput = stepResults.filter(r => r.output_url).pop();
+
+    // Save try-on event per garment (data platform - 770 only)
+    if (shop) {
+      let productIds = [];
+      let productTitles = [];
+      try { if (req.body.product_ids) productIds = JSON.parse(req.body.product_ids); } catch(e) {}
+      try { if (req.body.product_titles) productTitles = JSON.parse(req.body.product_titles); } catch(e) {}
+      
+      stepResults.forEach((step, idx) => {
+        saveTryOnEvent(shop, {
+          product_id: productIds[idx] || null,
+          product_title: productTitles[idx] || null,
+          product_category: categories[idx] || "auto",
+          garment_url: step.garment_url,
+          result_url: step.output_url || null,
+          ip_address: ip,
+          user_agent: req.headers["user-agent"],
+          identifier: req.body.identifier || ip,
+          session_id: req.body.session_id,
+          success: !!step.output_url,
+          error_message: step.error || null
+        });
+      });
+    }
 
     res.json({
       steps: stepResults,
@@ -670,7 +780,7 @@ app.listen(PORT, async () => {
   console.log("Credits system: ACTIVE");
   console.log("Admin dashboard: /admin");
   
-  // ========== NEW: Data Platform Initialization ==========
+  // ========== Data Platform Initialization ==========
   console.log("\n--- Data Platform Initialization ---");
   console.log("Data collection enabled for:", featureFlags.getDataCollectionShops().join(", "));
   
