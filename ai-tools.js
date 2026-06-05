@@ -125,7 +125,7 @@ async function getCustomerProfile(shopDomain, options = {}) {
       `SELECT * FROM store_customers
        WHERE shop_domain = $1
          AND ($2::text IS NULL OR email = $2)
-         AND ($3::text IS NULL OR shopify_customer_id = $3)
+         AND ($3::text IS NULL OR shopify_customer_id::text = $3)
        LIMIT 1`,
       [shopDomain, email || null, shopifyCustomerId || null]
     );
