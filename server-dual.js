@@ -477,7 +477,51 @@ app.get("/admin/backfill/status", (req, res) => {
     status: backfillStatus[shop] || null 
   });
 });
+// ======================
+// DATA PLATFORM: Test tools endpoint (TEMPORARY - Phase B verification)
+// ======================
+// Runs all ai-tools functions against real data and returns JSON.
+// Protected by admin password. Remove after Phase B is verified.
+const aiTools = require("./ai-tools");
 
+app.get("/admin/test-tools", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
+  }
+
+  const shop = "seven770.myshopify.com";
+  const results = {};
+
+  try {
+    results.getTopCustomers      = await aiTools.getTopCustomers(shop, { limit: 3 });
+    results.getDormantCustomers  = await aiTools.getDormantCustomers(shop, { limit: 3, daysInactive: 30 });
+    results.getNeverPurchased    = await aiTools.getNeverPurchased(shop, { limit: 3 });
+    results.getRepeatCustomers   = await aiTools.getRepeatCustomers(shop, { limit: 3 });
+    results.searchCustomers      = await aiTools.searchCustomers(shop, { query: "a" });
+    results.getTopProducts       = await aiTools.getTopProducts(shop, { limit: 5 });
+    results.getRevenueStats      = await aiTools.getRevenueStats(shop, { days: 60 });
+    results.getTryFitInsights    = await aiTools.getTryFitInsights(shop, { days: 30 });
+
+    const top = results.getTopCustomers;
+    const sampleEmail = top.ok && top.customers && top.customers[0]
+      ? top.customers[0].email
+      : null;
+
+    if (sampleEmail) {
+      results._sample_email_used = sampleEmail;
+      results.getCustomerProfile       = await aiTools.getCustomerProfile(shop, { email: sampleEmail });
+      results.generateWhatsAppMessage  = await aiTools.generateWhatsAppMessage(shop, { email: sampleEmail, intent: "comeback" });
+    } else {
+      results.getCustomerProfile = { skipped: "no sample email available" };
+      results.generateWhatsAppMessage = { skipped: "no sample email available" };
+    }
+
+    res.json({ ok: true, shop, tested_at: new Date().toISOString(), results });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, partial_results: results });
+  }
+});
 // ======================
 // FASHN FUNCTIONS
 // ======================
