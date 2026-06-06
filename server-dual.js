@@ -561,6 +561,44 @@ app.get("/admin/test-brain", async (req, res) => {
   }
 });
 // ======================
+// AI CHAT: Real chat endpoint (Phase C.5)
+// ======================
+// POST /api/chat  body: { message, history, password }
+app.post("/api/chat", express.json(), async (req, res) => {
+  try {
+    const { message, history, password } = req.body;
+
+    if (password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "גישה נדחתה" });
+    }
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "הודעה ריקה" });
+    }
+
+    const shop = "seven770.myshopify.com";
+    const shopName = "770";
+    const priorMessages = Array.isArray(history) ? history : [];
+
+    const result = await aiBrain.askBrain(shop, shopName, message, priorMessages);
+
+    const cleanHistory = [
+      ...priorMessages,
+      { role: "user", content: message },
+      { role: "assistant", content: result.answer }
+    ];
+
+    res.json({
+      ok: result.ok,
+      answer: result.answer,
+      history: cleanHistory,
+      tools_used: result.toolsUsed
+    });
+  } catch (err) {
+    console.error("Chat endpoint error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// ======================
 // FASHN FUNCTIONS
 // ======================
 function buildFashnBody(dataUri, garmentUrl, category) {
