@@ -523,6 +523,44 @@ app.get("/admin/test-tools", async (req, res) => {
   }
 });
 // ======================
+// DATA PLATFORM: Test brain endpoint (TEMPORARY - Phase C verification)
+// ======================
+// Usage: /admin/test-brain?password=tryfit2026&q=מי הלקוחות הכי טובות שלי
+const aiBrain = require("./ai-brain");
+
+app.get("/admin/test-brain", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
+  }
+
+  const question = req.query.q;
+  if (!question) {
+    return res.status(400).json({ error: "חסרה שאלה - הוסף &q=השאלה שלך ל-URL" });
+  }
+
+  const shop = "seven770.myshopify.com";
+  const shopName = "770";
+
+  try {
+    const start = Date.now();
+    const result = await aiBrain.askBrain(shop, shopName, question);
+    const duration = Date.now() - start;
+
+    res.json({
+      ok: result.ok,
+      question,
+      answer: result.answer,
+      tools_used: result.toolsUsed,
+      duration_seconds: (duration / 1000).toFixed(1),
+      model: aiBrain.MODEL
+    });
+  } catch (err) {
+    console.error("test-brain error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// ======================
 // FASHN FUNCTIONS
 // ======================
 function buildFashnBody(dataUri, garmentUrl, category) {
