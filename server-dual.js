@@ -604,6 +604,18 @@ app.post("/api/chat", express.json(), async (req, res) => {
 app.get("/chat", (req, res) => {
   res.sendFile(__dirname + "/chat.html");
 });
+-- ============ CHAT CONVERSATIONS (advisor chat history) ============
+
+CREATE TABLE IF NOT EXISTS chat_conversations (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  title VARCHAR(255),
+  messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_conversations_shop ON chat_conversations(shop_domain, updated_at DESC);
 // ======================
 // PRODUCTS: Manual sync trigger (TEMPORARY - for testing)
 // ======================
