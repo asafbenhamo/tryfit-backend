@@ -519,6 +519,20 @@ app.get("/chat", (req, res) => {
   res.sendFile(__dirname + "/chat.html");
 });
 
+// PWA: manifest + icons
+app.get("/manifest.json", (req, res) => {
+  res.sendFile(__dirname + "/manifest.json");
+});
+app.get("/icon-192.png", (req, res) => {
+  res.sendFile(__dirname + "/icon-192.png");
+});
+app.get("/icon-512.png", (req, res) => {
+  res.sendFile(__dirname + "/icon-512.png");
+});
+app.get("/apple-touch-icon.png", (req, res) => {
+  res.sendFile(__dirname + "/apple-touch-icon.png");
+});
+
 // ======================
 // CHAT HISTORY: Persistent conversations (DB-backed)
 // ======================
