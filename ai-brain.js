@@ -123,6 +123,17 @@ const TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "getCustomerPurchases",
+    description: "מה לקוחה ספציפית קנתה בפועל - רשימת הפריטים, הכמויות, והקטגוריות האהובות עליה (ב-60 הימים האחרונים). שימושי כששואלים 'מה X אוהבת', 'מה לקנות לקמפיין מותאם ל-X', או כדי להתאים המלצות/הודעות לפי טעם הלקוחה.",
+    input_schema: {
+      type: "object",
+      properties: {
+        email: { type: "string", description: "אימייל הלקוחה" }
+      },
+      required: ["email"]
+    }
+  },
+  {
     name: "searchCustomers",
     description: "חיפוש לקוחות לפי שם או אימייל. שימושי כששואלים 'מצא את הלקוחה X'.",
     input_schema: {
@@ -174,6 +185,7 @@ const TOOL_IMPL = {
   getNeverPurchased: aiTools.getNeverPurchased,
   getRepeatCustomers: aiTools.getRepeatCustomers,
   getCustomerProfile: aiTools.getCustomerProfile,
+  getCustomerPurchases: aiTools.getCustomerPurchases,
   searchCustomers: aiTools.searchCustomers,
   getTopProducts: aiTools.getTopProducts,
   getRevenueStats: aiTools.getRevenueStats,

@@ -283,6 +283,77 @@ async function generateWhatsAppMessage(shopDomain, options = {}) {
   });
 }
 
+// ---------- 11. getCustomerPurchases ----------
+// What a specific customer actually bought (items), by email.
+// Links customer -> orders -> order items. Window limited to last 60 days.
+async function getCustomerPurchases(shopDomain, options = {}) {
+  return safe('getCustomerPurchases', async () => {
+    const { email } = options;
+    if (!email) return { found: false, reason: 'no email provided' };
+
+    // Resolve the customer's shopify id from email.
+    const cust = await db.query(
+      `SELECT shopify_customer_id, first_name, last_name, total_spent, orders_count
+       FROM store_customers
+       WHERE shop_domain = $1 AND email = $2
+       LIMIT 1`,
+      [shopDomain, email]
+    );
+    if (cust.rows.length === 0) return { found: false };
+    const customer = cust.rows[0];
+
+    // Aggregate the items this customer bought (joined through their orders).
+    const items = await db.query(
+      `SELECT i.title, i.product_type, i.vendor,
+              SUM(i.quantity)::int AS qty,
+              SUM(i.price * i.quantity)::numeric(12,2) AS spent
+       FROM store_order_items i
+       JOIN store_orders o
+         ON o.shopify_order_id = i.shopify_order_id
+        AND o.shop_domain = i.shop_domain
+       WHERE i.shop_domain = $1
+         AND o.shopify_customer_id = $2
+       GROUP BY i.title, i.product_type, i.vendor
+       ORDER BY qty DESC
+       LIMIT 30`,
+      [shopDomain, customer.shopify_customer_id]
+    );
+
+    // Summarize favorite categories.
+    const categories = await db.query(
+      `SELECT i.product_type,
+              SUM(i.quantity)::int AS qty
+       FROM store_order_items i
+       JOIN store_orders o
+         ON o.shopify_order_id = i.shopify_order_id
+        AND o.shop_domain = i.shop_domain
+       WHERE i.shop_domain = $1
+         AND o.shopify_customer_id = $2
+         AND i.product_type IS NOT NULL
+       GROUP BY i.product_type
+       ORDER BY qty DESC
+       LIMIT 5`,
+      [shopDomain, customer.shopify_customer_id]
+    );
+
+    return {
+      found: true,
+      data_window: 'last_60_days',
+      customer: {
+        email,
+        name: [customer.first_name, customer.last_name].filter(Boolean).join(' '),
+        total_spent: customer.total_spent,
+        orders_count: customer.orders_count
+      },
+      items: items.rows,
+      top_categories: categories.rows,
+      note: items.rows.length === 0
+        ? 'no items in the last 60 days (customer may have bought earlier - order history limited to 60 days)'
+        : undefined
+    };
+  });
+}
+
 module.exports = {
   getTopCustomers,
   getDormantCustomers,
@@ -293,5 +364,6 @@ module.exports = {
   getTopProducts,
   getRevenueStats,
   getTryFitInsights,
-  generateWhatsAppMessage
+  generateWhatsAppMessage,
+  getCustomerPurchases
 };
