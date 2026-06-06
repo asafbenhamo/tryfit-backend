@@ -41,7 +41,7 @@ async function shopifyGet(shopDomain, endpoint, retries = 3) {
   }
 
   const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
-  
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const response = await fetch(url, {
@@ -79,11 +79,11 @@ async function shopifyGet(shopDomain, endpoint, retries = 3) {
  */
 async function findCustomerByEmail(shopDomain, email) {
   if (!email) return null;
-  
+
   try {
     const query = encodeURIComponent(`email:${email}`);
     const data = await shopifyGet(shopDomain, `customers/search.json?query=${query}`);
-    
+
     if (data.customers && data.customers.length > 0) {
       return data.customers[0];
     }
@@ -99,11 +99,11 @@ async function findCustomerByEmail(shopDomain, email) {
  */
 async function findCustomerByPhone(shopDomain, phone) {
   if (!phone) return null;
-  
+
   try {
     const query = encodeURIComponent(`phone:${phone}`);
     const data = await shopifyGet(shopDomain, `customers/search.json?query=${query}`);
-    
+
     if (data.customers && data.customers.length > 0) {
       return data.customers[0];
     }
@@ -150,7 +150,7 @@ async function getCustomerOrders(shopDomain, customerId, limit = 250) {
  */
 async function saveStoreCustomer(shopDomain, shopifyCustomer) {
   if (!shopifyCustomer || !shopifyCustomer.id) return null;
-  
+
   try {
     const result = await db.query(`
       INSERT INTO store_customers (
@@ -200,7 +200,7 @@ async function saveStoreCustomer(shopDomain, shopifyCustomer) {
       shopifyCustomer.accepts_marketing_updated_at || null,
       JSON.stringify(shopifyCustomer)
     ]);
-    
+
     return result.rows[0]?.id || null;
   } catch (err) {
     console.error(`❌ [DB] saveStoreCustomer failed:`, err.message);
@@ -213,7 +213,7 @@ async function saveStoreCustomer(shopDomain, shopifyCustomer) {
  */
 async function saveStoreOrder(shopDomain, shopifyOrder) {
   if (!shopifyOrder || !shopifyOrder.id) return null;
-  
+
   try {
     // Save the order
     await db.query(`
@@ -248,7 +248,7 @@ async function saveStoreOrder(shopDomain, shopifyOrder) {
       shopifyOrder.created_at || null,
       JSON.stringify(shopifyOrder)
     ]);
-    
+
     // Save line items
     if (shopifyOrder.line_items && Array.isArray(shopifyOrder.line_items)) {
       // First delete existing items for this order (in case of update)
@@ -256,7 +256,7 @@ async function saveStoreOrder(shopDomain, shopifyOrder) {
         `DELETE FROM store_order_items WHERE shop_domain = $1 AND shopify_order_id = $2`,
         [shopDomain, shopifyOrder.id]
       );
-      
+
       // Then insert all items
       for (const item of shopifyOrder.line_items) {
         await db.query(`
@@ -283,7 +283,7 @@ async function saveStoreOrder(shopDomain, shopifyOrder) {
         ]);
       }
     }
-    
+
     return shopifyOrder.id;
   } catch (err) {
     console.error(`❌ [DB] saveStoreOrder failed:`, err.message);
@@ -294,7 +294,6 @@ async function saveStoreOrder(shopDomain, shopifyOrder) {
 /**
  * Mark a customer as consenting to TryFit data sharing.
  * Creates entry in tryfit_consenting_customers table (Tier 2).
- * This is the main entry point for "customer used TryFit + checked the consent box".
  */
 async function addTryFitConsent(shopDomain, params) {
   const {
@@ -307,9 +306,8 @@ async function addTryFitConsent(shopDomain, params) {
     ipAddress = null,
     userAgent = null
   } = params;
-  
+
   try {
-    // Upsert the consenting customer record
     const result = await db.query(`
       INSERT INTO tryfit_consenting_customers (
         shop_domain, shopify_customer_id, store_customer_id, 
@@ -331,9 +329,9 @@ async function addTryFitConsent(shopDomain, params) {
       identifier,
       email || null
     ]);
-    
+
     const tryfitCustomerId = result.rows[0]?.id;
-    
+
     // Log the consent action (audit trail)
     if (tryfitCustomerId) {
       await db.query(`
@@ -353,7 +351,7 @@ async function addTryFitConsent(shopDomain, params) {
         shopifyCustomerId || null
       ]);
     }
-    
+
     return tryfitCustomerId;
   } catch (err) {
     console.error(`❌ [DB] addTryFitConsent failed:`, err.message);
@@ -363,31 +361,23 @@ async function addTryFitConsent(shopDomain, params) {
 
 /**
  * The main "magic" function:
- * When a customer uses TryFit with consent, this is called.
- * It does the full backfill:
- *   1. Find the customer in Shopify (by email/phone)
- *   2. Save customer to store_customers (Tier 1)
- *   3. Mark as consenting in tryfit_consenting_customers (Tier 2)
- *   4. Fetch ALL their orders
- *   5. Save orders + line items
- * 
- * This runs in the background - doesn't block the try-on response.
+ * When a customer uses TryFit with consent, this does the full backfill.
  */
 async function backfillCustomerData(shopDomain, params) {
   const { email, phone, identifier, ipAddress, userAgent } = params;
-  
+
   if (!email && !phone) {
     console.log(`📊 [Backfill] No email/phone provided, skipping for ${identifier}`);
     return { success: false, reason: 'no_identifier' };
   }
-  
+
   if (!hasTokenForShop(shopDomain)) {
     console.log(`📊 [Backfill] No Shopify token for ${shopDomain}, skipping`);
     return { success: false, reason: 'no_token' };
   }
-  
+
   console.log(`📊 [Backfill] Starting for ${shopDomain} | email: ${email || 'none'} | phone: ${phone || 'none'}`);
-  
+
   try {
     // Step 1: Find customer in Shopify
     let shopifyCustomer = null;
@@ -397,24 +387,18 @@ async function backfillCustomerData(shopDomain, params) {
     if (!shopifyCustomer && phone) {
       shopifyCustomer = await findCustomerByPhone(shopDomain, phone);
     }
-    
+
     if (!shopifyCustomer) {
       console.log(`📊 [Backfill] Customer not found in Shopify for ${email || phone}`);
-      // Still record consent even if customer not yet in Shopify
-      await addTryFitConsent(shopDomain, {
-        identifier,
-        email,
-        ipAddress,
-        userAgent
-      });
+      await addTryFitConsent(shopDomain, { identifier, email, ipAddress, userAgent });
       return { success: false, reason: 'customer_not_in_shopify' };
     }
-    
+
     console.log(`📊 [Backfill] Found Shopify customer ID: ${shopifyCustomer.id}`);
-    
+
     // Step 2: Save to store_customers (Tier 1)
     const storeCustomerId = await saveStoreCustomer(shopDomain, shopifyCustomer);
-    
+
     // Step 3: Add to TryFit verified pool (Tier 2)
     const tryfitCustomerId = await addTryFitConsent(shopDomain, {
       storeCustomerId,
@@ -424,19 +408,19 @@ async function backfillCustomerData(shopDomain, params) {
       ipAddress,
       userAgent
     });
-    
+
     // Step 4: Fetch and save all orders
     const orders = await getCustomerOrders(shopDomain, shopifyCustomer.id);
     console.log(`📊 [Backfill] Fetched ${orders.length} orders for customer ${shopifyCustomer.id}`);
-    
+
     let savedOrders = 0;
     for (const order of orders) {
       const saved = await saveStoreOrder(shopDomain, order);
       if (saved) savedOrders++;
     }
-    
+
     console.log(`✅ [Backfill] Complete: ${savedOrders}/${orders.length} orders saved for ${shopifyCustomer.email || shopifyCustomer.id}`);
-    
+
     return {
       success: true,
       shopifyCustomerId: shopifyCustomer.id,
@@ -453,13 +437,12 @@ async function backfillCustomerData(shopDomain, params) {
 
 /**
  * Verify Shopify API connectivity on startup.
- * Tests that the token works.
  */
 async function verifyConnection(shopDomain) {
   if (!hasTokenForShop(shopDomain)) {
     return { connected: false, reason: 'no_token' };
   }
-  
+
   try {
     const data = await shopifyGet(shopDomain, 'shop.json');
     if (data.shop) {
@@ -474,24 +457,18 @@ async function verifyConnection(shopDomain) {
 }
 
 /**
- * Get all customers from a shop using pagination.
- * Returns array of customer objects.
+ * Get all customers from a shop using since_id pagination (reliable).
  */
 async function getAllCustomers(shopDomain, onProgress = null) {
   const customers = [];
-  let pageInfo = null;
+  let sinceId = 0;
   let page = 1;
-  
+  const token = getTokenForShop(shopDomain);
+  if (!token) throw new Error(`No token for ${shopDomain}`);
+
   while (true) {
     try {
-      let endpoint = `customers.json?limit=250`;
-      if (pageInfo) {
-        endpoint = `customers.json?limit=250&page_info=${pageInfo}`;
-      }
-      
-      const token = getTokenForShop(shopDomain);
-      if (!token) throw new Error(`No token for ${shopDomain}`);
-      
+      const endpoint = `customers.json?limit=250&order=id+asc&since_id=${sinceId}`;
       const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
       const response = await fetch(url, {
         headers: {
@@ -499,65 +476,56 @@ async function getAllCustomers(shopDomain, onProgress = null) {
           'Content-Type': 'application/json'
         }
       });
-      
+
       if (response.status === 429) {
         console.log(`⏳ [Shopify] Rate limited, waiting 2s...`);
         await new Promise(resolve => setTimeout(resolve, 2000));
         continue;
       }
-      
+
       if (!response.ok) {
         throw new Error(`Shopify API ${response.status}: ${await response.text()}`);
       }
-      
+
       const data = await response.json();
       const pageCustomers = data.customers || [];
+      if (pageCustomers.length === 0) break;
+
       customers.push(...pageCustomers);
-      
+      sinceId = pageCustomers[pageCustomers.length - 1].id;
+
       console.log(`📦 [Backfill] Customers page ${page}: ${pageCustomers.length} (total: ${customers.length})`);
       if (onProgress) onProgress({ phase: 'customers', page, count: customers.length });
-      
-      // Check for next page (Link header pagination)
-      const linkHeader = response.headers.get('Link') || response.headers.get('link');
-      const nextMatch = linkHeader && linkHeader.match(/<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"/);
-      
-      if (!nextMatch || pageCustomers.length === 0) {
-        break; // No more pages
-      }
-      
-      pageInfo = nextMatch[1];
+
+      if (pageCustomers.length < 250) break;
+
       page++;
-      
-      // Small delay between pages to be nice to Shopify
       await new Promise(resolve => setTimeout(resolve, 300));
     } catch (err) {
       console.error(`❌ [Backfill] getAllCustomers page ${page} failed:`, err.message);
       break;
     }
   }
-  
+
   return customers;
 }
 
 /**
- * Get all orders from a shop using pagination.
+ * Get all orders from a shop using since_id pagination (reliable).
  * Note: Limited to last 60 days unless read_all_orders scope is granted.
  */
 async function getAllOrders(shopDomain, onProgress = null) {
   const orders = [];
-  let pageInfo = null;
+  let sinceId = 0;
   let page = 1;
-  
+  const token = getTokenForShop(shopDomain);
+  if (!token) throw new Error(`No token for ${shopDomain}`);
+
   while (true) {
     try {
-      let endpoint = `orders.json?limit=250&status=any`;
-      if (pageInfo) {
-        endpoint = `orders.json?limit=250&status=any&page_info=${pageInfo}`;
-      }
-      
-      const token = getTokenForShop(shopDomain);
-      if (!token) throw new Error(`No token for ${shopDomain}`);
-      
+      // Use since_id pagination (reliable, not dependent on the Link header).
+      // Order ascending by id so since_id walks forward through ALL orders.
+      const endpoint = `orders.json?limit=250&status=any&order=id+asc&since_id=${sinceId}`;
       const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
       const response = await fetch(url, {
         headers: {
@@ -565,59 +533,51 @@ async function getAllOrders(shopDomain, onProgress = null) {
           'Content-Type': 'application/json'
         }
       });
-      
+
       if (response.status === 429) {
         console.log(`⏳ [Shopify] Rate limited, waiting 2s...`);
         await new Promise(resolve => setTimeout(resolve, 2000));
         continue;
       }
-      
+
       if (!response.ok) {
         throw new Error(`Shopify API ${response.status}: ${await response.text()}`);
       }
-      
+
       const data = await response.json();
       const pageOrders = data.orders || [];
+      if (pageOrders.length === 0) break; // no more orders
+
       orders.push(...pageOrders);
-      
+
+      // Advance the cursor to the highest id we just received.
+      sinceId = pageOrders[pageOrders.length - 1].id;
+
       console.log(`📦 [Backfill] Orders page ${page}: ${pageOrders.length} (total: ${orders.length})`);
       if (onProgress) onProgress({ phase: 'orders', page, count: orders.length });
-      
-      const linkHeader = response.headers.get('Link') || response.headers.get('link');
-      const nextMatch = linkHeader && linkHeader.match(/<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"/);
-      
-      if (!nextMatch || pageOrders.length === 0) {
-        break;
-      }
-      
-      pageInfo = nextMatch[1];
+
+      if (pageOrders.length < 250) break; // last (partial) page reached
+
       page++;
-      
       await new Promise(resolve => setTimeout(resolve, 300));
     } catch (err) {
       console.error(`❌ [Backfill] getAllOrders page ${page} failed:`, err.message);
       break;
     }
   }
-  
+
   return orders;
 }
 
 /**
  * THE BIG ONE - Backfill the entire shop.
- * 
  * Pulls ALL customers + ALL orders (last 60 days) and saves to Tier 1 tables.
- * Returns stats summary.
- * 
- * SAFETY: Only operates on shops with data collection enabled (feature flag check).
- * NOTE: This data goes ONLY to Tier 1 (store_customers, store_orders) - 
- *       never to Tier 2 (tryfit_consenting_customers) without explicit consent.
  */
 async function backfillEntireShop(shopDomain, onProgress = null) {
   if (!hasTokenForShop(shopDomain)) {
     return { success: false, reason: 'no_token' };
   }
-  
+
   const startTime = Date.now();
   const stats = {
     started_at: new Date().toISOString(),
@@ -631,17 +591,17 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     duration_seconds: 0,
     errors: []
   };
-  
+
   try {
     console.log(`\n🚀 [Backfill] Starting FULL backfill for ${shopDomain}\n`);
     if (onProgress) onProgress({ phase: 'starting', stats });
-    
+
     // Phase 1: Fetch all customers
     console.log(`📥 [Backfill] Phase 1: Fetching all customers...`);
     const customers = await getAllCustomers(shopDomain, onProgress);
     stats.customers_fetched = customers.length;
     console.log(`✅ [Backfill] Fetched ${customers.length} customers from Shopify`);
-    
+
     // Phase 2: Save customers to Tier 1
     console.log(`💾 [Backfill] Phase 2: Saving customers to database...`);
     for (let i = 0; i < customers.length; i++) {
@@ -652,20 +612,19 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
       } else {
         stats.customers_failed++;
       }
-      
       if (i % 50 === 0 && i > 0) {
         console.log(`   Saved ${stats.customers_saved}/${customers.length} customers...`);
         if (onProgress) onProgress({ phase: 'saving_customers', stats });
       }
     }
     console.log(`✅ [Backfill] Saved ${stats.customers_saved} customers (${stats.customers_failed} failed)`);
-    
+
     // Phase 3: Fetch all orders
     console.log(`📥 [Backfill] Phase 3: Fetching all orders...`);
     const orders = await getAllOrders(shopDomain, onProgress);
     stats.orders_fetched = orders.length;
     console.log(`✅ [Backfill] Fetched ${orders.length} orders from Shopify`);
-    
+
     // Phase 4: Save orders + line items to Tier 1
     console.log(`💾 [Backfill] Phase 4: Saving orders to database...`);
     for (let i = 0; i < orders.length; i++) {
@@ -676,18 +635,17 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
       } else {
         stats.orders_failed++;
       }
-      
       if (i % 50 === 0 && i > 0) {
         console.log(`   Saved ${stats.orders_saved}/${orders.length} orders...`);
         if (onProgress) onProgress({ phase: 'saving_orders', stats });
       }
     }
     console.log(`✅ [Backfill] Saved ${stats.orders_saved} orders (${stats.orders_failed} failed)`);
-    
+
     stats.duration_seconds = Math.round((Date.now() - startTime) / 1000);
     stats.success = true;
     stats.completed_at = new Date().toISOString();
-    
+
     // Log audit trail
     try {
       await db.query(`
@@ -703,13 +661,13 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     } catch (e) {
       console.log('⚠️  Could not log to data_access_log:', e.message);
     }
-    
+
     console.log(`\n🎉 [Backfill] COMPLETE in ${stats.duration_seconds}s`);
     console.log(`   Customers: ${stats.customers_saved}/${stats.customers_fetched}`);
     console.log(`   Orders: ${stats.orders_saved}/${stats.orders_fetched}\n`);
-    
+
     if (onProgress) onProgress({ phase: 'complete', stats });
-    
+
     return stats;
   } catch (err) {
     console.error(`❌ [Backfill] FATAL error:`, err.message);
@@ -719,25 +677,20 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     return stats;
   }
 }
+
 /**
- * Get all products from a shop using pagination.
- * Uses read_products scope. Returns array of product objects.
+ * Get all products from a shop using since_id pagination.
  */
 async function getAllProducts(shopDomain, onProgress = null) {
   const products = [];
-  let pageInfo = null;
+  let sinceId = 0;
   let page = 1;
+  const token = getTokenForShop(shopDomain);
+  if (!token) throw new Error(`No token for ${shopDomain}`);
 
   while (true) {
     try {
-      let endpoint = `products.json?limit=250`;
-      if (pageInfo) {
-        endpoint = `products.json?limit=250&page_info=${pageInfo}`;
-      }
-
-      const token = getTokenForShop(shopDomain);
-      if (!token) throw new Error(`No token for ${shopDomain}`);
-
+      const endpoint = `products.json?limit=250&order=id+asc&since_id=${sinceId}`;
       const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
       const response = await fetch(url, {
         headers: {
@@ -758,17 +711,16 @@ async function getAllProducts(shopDomain, onProgress = null) {
 
       const data = await response.json();
       const pageProducts = data.products || [];
+      if (pageProducts.length === 0) break;
+
       products.push(...pageProducts);
+      sinceId = pageProducts[pageProducts.length - 1].id;
 
       console.log(`📦 [Products] Page ${page}: ${pageProducts.length} (total: ${products.length})`);
       if (onProgress) onProgress({ phase: 'products', page, count: products.length });
 
-      const linkHeader = response.headers.get('Link') || response.headers.get('link');
-      const nextMatch = linkHeader && linkHeader.match(/<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"/);
+      if (pageProducts.length < 250) break;
 
-      if (!nextMatch || pageProducts.length === 0) break;
-
-      pageInfo = nextMatch[1];
       page++;
       await new Promise(resolve => setTimeout(resolve, 300));
     } catch (err) {
@@ -787,7 +739,6 @@ async function saveStoreProduct(shopDomain, product) {
   if (!product || !product.id) return null;
 
   try {
-    // Compute price range and inventory from variants.
     const variants = product.variants || [];
     const prices = variants.map(v => parseFloat(v.price || '0')).filter(p => p > 0);
     const minPrice = prices.length ? Math.min(...prices) : null;
@@ -849,7 +800,6 @@ async function saveStoreProduct(shopDomain, product) {
 
 /**
  * Sync the entire product catalog for a shop.
- * Fetches all products and upserts them into store_products.
  */
 async function syncProducts(shopDomain) {
   if (!hasTokenForShop(shopDomain)) {
@@ -889,7 +839,7 @@ module.exports = {
   backfillCustomerData,
   verifyConnection,
   getAllCustomers,
- getAllOrders,
+  getAllOrders,
   backfillEntireShop,
   getAllProducts,
   saveStoreProduct,
