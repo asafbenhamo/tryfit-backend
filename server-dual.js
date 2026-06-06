@@ -526,6 +526,25 @@ app.get("/chat", (req, res) => {
   res.sendFile(__dirname + "/chat.html");
 });
 
+// ======================
+// INSIGHTS: Proactive opportunities (shown on chat open)
+// ======================
+const insightsEngine = require("./insights-engine");
+
+app.get("/api/insights", async (req, res) => {
+  try {
+    if (req.query.password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "גישה נדחתה" });
+    }
+    const shop = "seven770.myshopify.com";
+    const result = await insightsEngine.getInsights(shop);
+    res.json(result);
+  } catch (err) {
+    console.error("Insights endpoint error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // PWA: manifest + icons
 app.get("/manifest.json", (req, res) => {
   res.sendFile(__dirname + "/manifest.json");
@@ -763,6 +782,73 @@ app.get("/admin/test-discounts", async (req, res) => {
   } catch (e) { out.granted_scopes = { error: e.message }; }
 
   res.json({ ok: true, diagnostics: out });
+});
+
+// ======================
+// TEMPORARY: Test WRITE access for coupons (creates + deletes a test coupon)
+// ======================
+app.get("/admin/test-coupon-write", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = "seven770.myshopify.com";
+  const token = process.env.SHOPIFY_770_TOKEN;
+  if (!token) return res.json({ ok: false, reason: "no token" });
+
+  const base = `https://${shop}/admin/api/2026-01`;
+  const headers = { "X-Shopify-Access-Token": token, "Content-Type": "application/json" };
+  const out = {};
+  let createdPriceRuleId = null;
+
+  // Step 1: Try to create a price rule (the actual write test)
+  try {
+    const priceRule = {
+      price_rule: {
+        title: "TRYFIT_WRITE_TEST_DELETE_ME",
+        target_type: "line_item",
+        target_selection: "all",
+        allocation_method: "across",
+        value_type: "percentage",
+        value: "-10.0",
+        customer_selection: "all",
+        starts_at: new Date().toISOString()
+      }
+    };
+    const r = await fetch(`${base}/price_rules.json`, {
+      method: "POST", headers, body: JSON.stringify(priceRule)
+    });
+    out.create_attempt = { status: r.status };
+    if (r.status === 201) {
+      const body = await r.json();
+      createdPriceRuleId = body.price_rule?.id;
+      out.create_attempt.access = "WRITE GRANTED ✅";
+      out.create_attempt.created_id = createdPriceRuleId;
+    } else {
+      const body = await r.text();
+      out.create_attempt.access = "WRITE DENIED ❌";
+      out.create_attempt.message = body.substring(0, 200);
+      out.create_attempt.likely_cause = (r.status === 403)
+        ? "Missing write_price_rules scope - need to add it to the app"
+        : "Other error";
+    }
+  } catch (e) {
+    out.create_attempt = { error: e.message };
+  }
+
+  // Step 2: Clean up - delete the test price rule if we created one
+  if (createdPriceRuleId) {
+    try {
+      const dr = await fetch(`${base}/price_rules/${createdPriceRuleId}.json`, {
+        method: "DELETE", headers
+      });
+      out.cleanup = { status: dr.status, deleted: dr.status === 200 || dr.status === 204 };
+    } catch (e) {
+      out.cleanup = { error: e.message, note: "test rule may remain - delete TRYFIT_WRITE_TEST_DELETE_ME manually" };
+    }
+  }
+
+  res.json({ ok: true, result: out });
 });
 app.get("/admin/test-checkouts", async (req, res) => {
   const password = req.query.password;
