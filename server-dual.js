@@ -663,6 +663,58 @@ app.get("/admin/sync-checkouts", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+// ======================
+// TEMPORARY: Diagnose checkout fetch limits
+// ======================
+app.get("/admin/diagnose-checkouts", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = "seven770.myshopify.com";
+  const token = process.env.SHOPIFY_770_TOKEN;
+  if (!token) return res.json({ ok: false, reason: "no token" });
+
+  const ver = "2026-01";
+  const base = `https://${shop}/admin/api/${ver}`;
+  const headers = { "X-Shopify-Access-Token": token, "Content-Type": "application/json" };
+  const out = {};
+
+  async function tryUrl(label, endpoint) {
+    try {
+      const r = await fetch(`${base}/${endpoint}`, { headers });
+      const status = r.status;
+      let body; try { body = await r.json(); } catch(e){ body = {}; }
+      out[label] = {
+        status,
+        endpoint,
+        count: body.count !== undefined ? body.count : (body.checkouts ? body.checkouts.length : null),
+        link_header: r.headers.get('Link') || r.headers.get('link') || null
+      };
+    } catch (e) {
+      out[label] = { error: e.message, endpoint };
+    }
+  }
+
+  await tryUrl("count_default", "checkouts/count.json");
+  await tryUrl("count_since_2020", "checkouts/count.json?created_at_min=2020-01-01");
+  await tryUrl("page_since_2020", "checkouts.json?limit=250&created_at_min=2020-01-01");
+
+  try {
+    const range = await db.query(
+      `SELECT COUNT(*)::int AS in_db,
+              MIN(shopify_created_at) AS oldest,
+              MAX(shopify_created_at) AS newest
+       FROM abandoned_checkouts WHERE shop_domain = $1`,
+      [shop]
+    );
+    out.db_state = range.rows[0];
+  } catch (e) {
+    out.db_state = { error: e.message };
+  }
+
+  res.json({ ok: true, diagnostics: out });
+});
 app.get("/admin/test-checkouts", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
