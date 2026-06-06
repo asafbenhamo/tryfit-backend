@@ -599,6 +599,12 @@ app.post("/api/chat", express.json(), async (req, res) => {
   }
 });
 // ======================
+// AI CHAT: Serve the chat UI page
+// ======================
+app.get("/chat", (req, res) => {
+  res.sendFile(__dirname + "/chat.html");
+});
+// ======================
 // FASHN FUNCTIONS
 // ======================
 function buildFashnBody(dataUri, garmentUrl, category) {
