@@ -58,16 +58,13 @@ function checkRateLimit(ip, limit) {
 }
 
 // === DATA PLATFORM: Save try-on event ===
-// Only saves if shop has data collection enabled (feature flag)
-// Wrapped in try/catch - never breaks try-on if DB fails
 async function saveTryOnEvent(shop, eventData) {
   if (!shop) return;
   if (!featureFlags.isDataCollectionEnabled(shop)) {
-    return; // Silently skip for non-enabled shops
+    return;
   }
-  
+
   try {
-    // Try to link to existing TryFit consenting customer
     let tryfitCustomerId = null;
     if (eventData.identifier) {
       const linkResult = await db.query(
@@ -106,8 +103,7 @@ async function saveTryOnEvent(shop, eventData) {
       eventData.user_agent || null,
       eventData.identifier || null
     ]);
-    
-    // Increment total_tryons counter if linked to a TryFit customer
+
     if (tryfitCustomerId) {
       await db.query(
         `UPDATE tryfit_consenting_customers 
@@ -116,17 +112,14 @@ async function saveTryOnEvent(shop, eventData) {
         [tryfitCustomerId]
       );
     }
-    
+
     console.log("📊 [DataPlatform] Try-on event saved for", shop, tryfitCustomerId ? `(linked to TryFit customer ${tryfitCustomerId})` : '(anonymous)');
   } catch (err) {
-    // Log error but don't throw - try-on must continue working
     console.error("⚠️  [DataPlatform] Failed to save try-on event:", err.message);
   }
 }
 
 // === DATA PLATFORM: Handle TryFit consent + customer backfill ===
-// Called when a customer provides consent (checkbox checked).
-// Triggers Shopify backfill in the background - does not block.
 function handleConsentAndBackfill(shop, params) {
   if (!shop) return;
   if (!featureFlags.isDataCollectionEnabled(shop)) return;
@@ -134,8 +127,7 @@ function handleConsentAndBackfill(shop, params) {
     console.log("📊 [DataPlatform] No Shopify token for", shop, "- skipping backfill");
     return;
   }
-  
-  // Fire and forget - runs in background
+
   setImmediate(async () => {
     try {
       const result = await shopify.backfillCustomerData(shop, params);
@@ -226,27 +218,23 @@ app.get("/api/credits/:shop", (req, res) => {
 // ======================
 // DATA PLATFORM: Consent endpoint
 // ======================
-// Called by frontend when customer checks the consent checkbox.
-// Triggers customer backfill in background.
 app.post("/api/consent", express.json(), async (req, res) => {
   try {
     const shop = getShopFromRequest(req);
     const { email, phone, identifier, consent_text_version } = req.body;
-    
+
     if (!shop) {
       return res.status(400).json({ error: "Shop not identified" });
     }
-    
+
     if (!featureFlags.isDataCollectionEnabled(shop)) {
-      // Silently succeed for non-enabled shops - they don't need this
       return res.json({ success: true, data_platform: "disabled" });
     }
-    
+
     const finalIdentifier = identifier || email || phone || getRealIP(req);
-    
+
     console.log(`📊 [DataPlatform] Consent received for ${shop} | ${email || phone || 'no contact'}`);
-    
-    // Trigger backfill in background (doesn't block response)
+
     handleConsentAndBackfill(shop, {
       email: email || null,
       phone: phone || null,
@@ -255,7 +243,7 @@ app.post("/api/consent", express.json(), async (req, res) => {
       userAgent: req.headers["user-agent"],
       consentTextVersion: consent_text_version || 'v1.0'
     });
-    
+
     res.json({ success: true });
   } catch (err) {
     console.error("Consent endpoint error:", err);
@@ -266,13 +254,10 @@ app.post("/api/consent", express.json(), async (req, res) => {
 // ======================
 // DATA PLATFORM: Admin backfill endpoint
 // ======================
-// Manually triggers full shop backfill (all customers + orders to Tier 1).
-// Protected by admin password. Runs in background, returns immediately.
 const ADMIN_PASSWORD = "tryfit2026";
-const backfillStatus = {}; // In-memory status per shop
+const backfillStatus = {};
 
 app.get("/admin/backfill", (req, res) => {
-  // Show backfill UI
   res.send(`<!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
@@ -295,7 +280,6 @@ button:disabled{background:#999;cursor:not-allowed}
 <div class="card">
   <h1>🚀 TryFit Data Backfill</h1>
   <p>טוען את כל הלקוחות וההזמנות של החנות לתוך מאגר Tier 1.</p>
-  
   <div class="warn">
     <strong>⚠️ שים לב:</strong><br>
     • זה ימשוך את כל הלקוחות וההזמנות של 60 הימים האחרונים מ-Shopify<br>
@@ -303,58 +287,41 @@ button:disabled{background:#999;cursor:not-allowed}
     • לא לתחילת Tier 2 — זה למאגר פנימי של 770 בלבד<br>
     • התהליך עשוי לקחת מספר דקות
   </div>
-  
   <h3>חנות לעיבוד:</h3>
   <p><span class="shop-tag">seven770.myshopify.com</span></p>
-  
   <h3>סיסמת אדמין:</h3>
   <input type="password" id="password" placeholder="הזן סיסמה" />
-  
   <button onclick="startBackfill()" id="startBtn">🚀 הפעל Backfill</button>
-  
   <div id="status" class="status" style="display:none">ממתין להפעלה...</div>
 </div>
-
 <script>
 async function startBackfill() {
   const password = document.getElementById('password').value;
   const statusEl = document.getElementById('status');
   const btnEl = document.getElementById('startBtn');
-  
-  if (!password) {
-    alert('הזן סיסמה');
-    return;
-  }
-  
+  if (!password) { alert('הזן סיסמה'); return; }
   btnEl.disabled = true;
   btnEl.textContent = '⏳ מבצע backfill...';
   statusEl.style.display = 'block';
   statusEl.textContent = '🚀 שולח בקשה...';
-  
   try {
     const response = await fetch('/admin/backfill/run', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({password, shop: 'seven770.myshopify.com'})
     });
-    
     const data = await response.json();
-    
     if (data.error) {
       statusEl.textContent = '❌ שגיאה: ' + data.error;
       btnEl.disabled = false;
       btnEl.textContent = '🚀 הפעל Backfill';
       return;
     }
-    
     statusEl.textContent = '✅ הופעל! בודק סטטוס...\\n';
-    
-    // Poll for status every 3 seconds
     const pollInterval = setInterval(async () => {
       try {
         const statusRes = await fetch('/admin/backfill/status?password=' + encodeURIComponent(password));
         const statusData = await statusRes.json();
-        
         if (statusData.status) {
           let text = '📊 סטטוס Backfill:\\n\\n';
           text += '   Phase: ' + (statusData.status.current_phase || 'מתחיל') + '\\n';
@@ -363,7 +330,6 @@ async function startBackfill() {
           text += '   הזמנות נמשכו: ' + (statusData.status.orders_fetched || 0) + '\\n';
           text += '   הזמנות נשמרו: ' + (statusData.status.orders_saved || 0) + '\\n';
           text += '   זמן שעבר: ' + (statusData.status.duration_seconds || 0) + 's\\n';
-          
           if (statusData.status.success === true) {
             text += '\\n🎉 הושלם בהצלחה!\\n';
             clearInterval(pollInterval);
@@ -375,14 +341,10 @@ async function startBackfill() {
             btnEl.disabled = false;
             btnEl.textContent = '🚀 נסה שוב';
           }
-          
           statusEl.textContent = text;
         }
-      } catch (e) {
-        console.error('Poll error:', e);
-      }
+      } catch (e) { console.error('Poll error:', e); }
     }, 3000);
-    
   } catch (err) {
     statusEl.textContent = '❌ שגיאה: ' + err.message;
     btnEl.disabled = false;
@@ -397,33 +359,21 @@ async function startBackfill() {
 app.post("/admin/backfill/run", express.json(), async (req, res) => {
   try {
     const { password, shop } = req.body;
-    
     if (password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "סיסמה שגויה" });
     }
-    
     if (!shop) {
       return res.status(400).json({ error: "Shop required" });
     }
-    
     if (!featureFlags.isDataCollectionEnabled(shop)) {
       return res.status(403).json({ error: "Data collection not enabled for this shop" });
     }
-    
     if (!shopify.hasTokenForShop(shop)) {
       return res.status(400).json({ error: "No Shopify token configured for this shop" });
     }
-    
-    // Check if already running for this shop
     if (backfillStatus[shop] && !backfillStatus[shop].success && !backfillStatus[shop].fatal_error) {
-      return res.json({ 
-        success: false, 
-        error: "Backfill already running for this shop",
-        status: backfillStatus[shop] 
-      });
+      return res.json({ success: false, error: "Backfill already running for this shop", status: backfillStatus[shop] });
     }
-    
-    // Initialize status
     backfillStatus[shop] = {
       current_phase: 'starting',
       customers_fetched: 0,
@@ -432,30 +382,16 @@ app.post("/admin/backfill/run", express.json(), async (req, res) => {
       orders_saved: 0,
       started_at: new Date().toISOString()
     };
-    
-    // Run in background
     setImmediate(async () => {
       try {
         const result = await shopify.backfillEntireShop(shop, (progress) => {
-          // Update status as backfill progresses
-          backfillStatus[shop] = {
-            ...backfillStatus[shop],
-            current_phase: progress.phase,
-            ...(progress.stats || {})
-          };
+          backfillStatus[shop] = { ...backfillStatus[shop], current_phase: progress.phase, ...(progress.stats || {}) };
         });
-        
-        // Final status
         backfillStatus[shop] = { ...backfillStatus[shop], ...result };
       } catch (err) {
-        backfillStatus[shop] = {
-          ...backfillStatus[shop],
-          success: false,
-          fatal_error: err.message
-        };
+        backfillStatus[shop] = { ...backfillStatus[shop], success: false, fatal_error: err.message };
       }
     });
-    
     res.json({ success: true, message: "Backfill started" });
   } catch (err) {
     console.error("Backfill run error:", err);
@@ -465,23 +401,16 @@ app.post("/admin/backfill/run", express.json(), async (req, res) => {
 
 app.get("/admin/backfill/status", (req, res) => {
   const password = req.query.password;
-  
   if (password !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
-  
   const shop = req.query.shop || 'seven770.myshopify.com';
-  
-  res.json({ 
-    shop, 
-    status: backfillStatus[shop] || null 
-  });
+  res.json({ shop, status: backfillStatus[shop] || null });
 });
+
 // ======================
-// DATA PLATFORM: Test tools endpoint (TEMPORARY - Phase B verification)
+// DATA PLATFORM: Test tools endpoint (TEMPORARY)
 // ======================
-// Runs all ai-tools functions against real data and returns JSON.
-// Protected by admin password. Remove after Phase B is verified.
 const aiTools = require("./ai-tools");
 
 app.get("/admin/test-tools", async (req, res) => {
@@ -489,10 +418,8 @@ app.get("/admin/test-tools", async (req, res) => {
   if (password !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
   }
-
   const shop = "seven770.myshopify.com";
   const results = {};
-
   try {
     results.getTopCustomers      = await aiTools.getTopCustomers(shop, { limit: 3 });
     results.getDormantCustomers  = await aiTools.getDormantCustomers(shop, { limit: 3, daysInactive: 30 });
@@ -502,12 +429,8 @@ app.get("/admin/test-tools", async (req, res) => {
     results.getTopProducts       = await aiTools.getTopProducts(shop, { limit: 5 });
     results.getRevenueStats      = await aiTools.getRevenueStats(shop, { days: 60 });
     results.getTryFitInsights    = await aiTools.getTryFitInsights(shop, { days: 30 });
-
     const top = results.getTopCustomers;
-    const sampleEmail = top.ok && top.customers && top.customers[0]
-      ? top.customers[0].email
-      : null;
-
+    const sampleEmail = top.ok && top.customers && top.customers[0] ? top.customers[0].email : null;
     if (sampleEmail) {
       results._sample_email_used = sampleEmail;
       results.getCustomerProfile       = await aiTools.getCustomerProfile(shop, { email: sampleEmail });
@@ -516,16 +439,15 @@ app.get("/admin/test-tools", async (req, res) => {
       results.getCustomerProfile = { skipped: "no sample email available" };
       results.generateWhatsAppMessage = { skipped: "no sample email available" };
     }
-
     res.json({ ok: true, shop, tested_at: new Date().toISOString(), results });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message, partial_results: results });
   }
 });
+
 // ======================
-// DATA PLATFORM: Test brain endpoint (TEMPORARY - Phase C verification)
+// DATA PLATFORM: Test brain endpoint (TEMPORARY)
 // ======================
-// Usage: /admin/test-brain?password=tryfit2026&q=מי הלקוחות הכי טובות שלי
 const aiBrain = require("./ai-brain");
 
 app.get("/admin/test-brain", async (req, res) => {
@@ -533,20 +455,16 @@ app.get("/admin/test-brain", async (req, res) => {
   if (password !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
   }
-
   const question = req.query.q;
   if (!question) {
     return res.status(400).json({ error: "חסרה שאלה - הוסף &q=השאלה שלך ל-URL" });
   }
-
   const shop = "seven770.myshopify.com";
   const shopName = "770";
-
   try {
     const start = Date.now();
     const result = await aiBrain.askBrain(shop, shopName, question);
     const duration = Date.now() - start;
-
     res.json({
       ok: result.ok,
       question,
@@ -560,33 +478,28 @@ app.get("/admin/test-brain", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
 // ======================
-// AI CHAT: Real chat endpoint (Phase C.5)
+// AI CHAT: Real chat endpoint
 // ======================
-// POST /api/chat  body: { message, history, password }
 app.post("/api/chat", express.json(), async (req, res) => {
   try {
     const { message, history, password } = req.body;
-
     if (password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     if (!message || !message.trim()) {
       return res.status(400).json({ error: "הודעה ריקה" });
     }
-
     const shop = "seven770.myshopify.com";
     const shopName = "770";
     const priorMessages = Array.isArray(history) ? history : [];
-
     const result = await aiBrain.askBrain(shop, shopName, message, priorMessages);
-
     const cleanHistory = [
       ...priorMessages,
       { role: "user", content: message },
       { role: "assistant", content: result.answer }
     ];
-
     res.json({
       ok: result.ok,
       answer: result.answer,
@@ -598,26 +511,115 @@ app.post("/api/chat", express.json(), async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
 // ======================
 // AI CHAT: Serve the chat UI page
 // ======================
 app.get("/chat", (req, res) => {
   res.sendFile(__dirname + "/chat.html");
 });
--- ============ CHAT CONVERSATIONS (advisor chat history) ============
 
-CREATE TABLE IF NOT EXISTS chat_conversations (
-  id BIGSERIAL PRIMARY KEY,
-  shop_domain VARCHAR(255) NOT NULL,
-  title VARCHAR(255),
-  messages JSONB NOT NULL DEFAULT '[]'::jsonb,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_chat_conversations_shop ON chat_conversations(shop_domain, updated_at DESC);
 // ======================
-// PRODUCTS: Manual sync trigger (TEMPORARY - for testing)
+// CHAT HISTORY: Persistent conversations (DB-backed)
+// ======================
+app.post("/api/chat/save", express.json(), async (req, res) => {
+  try {
+    const { id, title, messages, password } = req.body;
+    if (password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "גישה נדחתה" });
+    }
+    const shop = "seven770.myshopify.com";
+    const msgs = Array.isArray(messages) ? messages : [];
+    const safeTitle = (title || "שיחה חדשה").substring(0, 200);
+    if (id) {
+      const result = await db.query(
+        `UPDATE chat_conversations
+         SET title = $1, messages = $2, updated_at = NOW()
+         WHERE id = $3 AND shop_domain = $4
+         RETURNING id`,
+        [safeTitle, JSON.stringify(msgs), id, shop]
+      );
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "שיחה לא נמצאה" });
+      }
+      return res.json({ ok: true, id: result.rows[0].id });
+    } else {
+      const result = await db.query(
+        `INSERT INTO chat_conversations (shop_domain, title, messages)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [shop, safeTitle, JSON.stringify(msgs)]
+      );
+      return res.json({ ok: true, id: result.rows[0].id });
+    }
+  } catch (err) {
+    console.error("chat/save error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/chat/list", async (req, res) => {
+  try {
+    if (req.query.password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "גישה נדחתה" });
+    }
+    const shop = "seven770.myshopify.com";
+    const result = await db.query(
+      `SELECT id, title, updated_at
+       FROM chat_conversations
+       WHERE shop_domain = $1
+       ORDER BY updated_at DESC
+       LIMIT 100`,
+      [shop]
+    );
+    res.json({ ok: true, conversations: result.rows });
+  } catch (err) {
+    console.error("chat/list error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/chat/get/:id", async (req, res) => {
+  try {
+    if (req.query.password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "גישה נדחתה" });
+    }
+    const shop = "seven770.myshopify.com";
+    const result = await db.query(
+      `SELECT id, title, messages, updated_at
+       FROM chat_conversations
+       WHERE id = $1 AND shop_domain = $2`,
+      [req.params.id, shop]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "שיחה לא נמצאה" });
+    }
+    res.json({ ok: true, conversation: result.rows[0] });
+  } catch (err) {
+    console.error("chat/get error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.delete("/api/chat/delete/:id", async (req, res) => {
+  try {
+    if (req.query.password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "גישה נדחתה" });
+    }
+    const shop = "seven770.myshopify.com";
+    await db.query(
+      `DELETE FROM chat_conversations WHERE id = $1 AND shop_domain = $2`,
+      [req.params.id, shop]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("chat/delete error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ======================
+// PRODUCTS: Manual sync trigger (TEMPORARY)
 // ======================
 app.get("/admin/sync-products", async (req, res) => {
   const password = req.query.password;
@@ -631,6 +633,7 @@ app.get("/admin/sync-products", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
 // ======================
 // FASHN FUNCTIONS
 // ======================
@@ -678,7 +681,6 @@ async function pollFashn(predictionId) {
 async function submitAndWaitFashn(modelImage, garmentUrl, category) {
   const maxRetries = 3;
   let lastError;
-  
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const data = await submitFashn(modelImage, garmentUrl, category);
@@ -865,7 +867,6 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
     const ip = getRealIP(req);
     const dailyLimit = parseDailyLimit(req.body.daily_limit);
     console.log("User IP:", ip, "| Limit:", dailyLimit);
-
     const shop = getShopFromRequest(req);
     if (shop) {
       const creditCheck = creditsSystem.checkAndUseCredit(shop, ip);
@@ -878,7 +879,6 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
       }
       console.log("Shop:", shop, "| Credits remaining:", creditCheck.credits);
     }
-
     if (!checkRateLimit(ip, dailyLimit)) {
       if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
       return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
@@ -896,16 +896,10 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
     const dataUri = "data:" + mimeType + ";base64," + base64Image;
     console.log("Category:", category);
     console.log("Garment URL:", garmentImageUrl);
-
     if (BACKEND_MODE === "runpod") {
       const outputImage = await submitAndWaitRunPod(dataUri, garmentImageUrl, category);
       if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-      res.json({
-        status: "completed",
-        output: [outputImage],
-        prediction_id: "runpod-direct"
-      });
-      // Save try-on event (data platform - 770 only)
+      res.json({ status: "completed", output: [outputImage], prediction_id: "runpod-direct" });
       saveTryOnEvent(shop, {
         product_id: req.body.product_id,
         product_title: req.body.product_title,
@@ -924,7 +918,6 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
       console.log("FASHN response:", JSON.stringify(data));
       if (data.id) {
         res.json({ prediction_id: data.id });
-        // Save try-on event (data platform - 770 only)
         saveTryOnEvent(shop, {
           product_id: req.body.product_id,
           product_title: req.body.product_title,
@@ -976,7 +969,6 @@ app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, 
       var gUrl = garmentUrls[i];
       if (gUrl.startsWith("//")) gUrl = "https:" + gUrl;
       var cat = categories[i] || "auto";
-
       if (BACKEND_MODE === "runpod") {
         try {
           const outputImage = await submitAndWaitRunPod(dataUri, gUrl, cat);
@@ -994,8 +986,6 @@ app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, 
       }
     }
     if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-
-    // Save try-on event per garment (data platform - 770 only)
     const multiShop = getShopFromRequest(req);
     if (multiShop) {
       results.forEach((r, idx) => {
@@ -1011,7 +1001,6 @@ app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, 
         });
       });
     }
-
     res.json({ results: results });
   } catch (err) {
     console.error("Multi generate error:", err);
@@ -1025,7 +1014,6 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
     const ip = getRealIP(req);
     const dailyLimit = parseDailyLimit(req.body.daily_limit);
     console.log("User IP:", ip, "| Limit:", dailyLimit);
-
     const shop = getShopFromRequest(req);
     console.log("Shop detected:", shop);
     if (shop) {
@@ -1039,7 +1027,6 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
       }
       console.log("Shop:", shop, "| Credits remaining:", creditCheck.credits);
     }
-
     if (!checkRateLimit(ip, dailyLimit)) {
       if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
       return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
@@ -1056,7 +1043,6 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
     if (!garmentUrls.length) return res.status(400).json({ error: "No garment images" });
     garmentUrls = garmentUrls.map(u => u.startsWith("//") ? "https:" + u : u);
     console.log("Chain steps:", garmentUrls.length);
-
     let currentModelImage = dataUri;
     let stepResults = [];
     for (let i = 0; i < garmentUrls.length; i++) {
@@ -1073,14 +1059,11 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
     }
     if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
     const finalOutput = stepResults.filter(r => r.output_url).pop();
-
-    // Save try-on event per garment (data platform - 770 only)
     if (shop) {
       let productIds = [];
       let productTitles = [];
       try { if (req.body.product_ids) productIds = JSON.parse(req.body.product_ids); } catch(e) {}
       try { if (req.body.product_titles) productTitles = JSON.parse(req.body.product_titles); } catch(e) {}
-      
       stepResults.forEach((step, idx) => {
         saveTryOnEvent(shop, {
           product_id: productIds[idx] || null,
@@ -1097,7 +1080,6 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
         });
       });
     }
-
     res.json({
       steps: stepResults,
       final_output: finalOutput ? finalOutput.output_url : null,
@@ -1113,17 +1095,13 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
 app.get("/api/tryon/status/:id", async (req, res) => {
   try {
     const predictionId = req.params.id;
-
     if (BACKEND_MODE === "runpod") {
       const response = await fetch(RUNPOD_BASE_URL + "/status/" + predictionId, {
         headers: { "Authorization": "Bearer " + RUNPOD_API_KEY }
       });
       const data = await response.json();
       if (data.status === "COMPLETED") {
-        res.json({
-          status: "completed",
-          output: data.output?.image ? [data.output.image] : []
-        });
+        res.json({ status: "completed", output: data.output?.image ? [data.output.image] : [] });
       } else if (data.status === "FAILED") {
         res.json({ status: "failed", error: data.output?.error || "Failed" });
       } else {
@@ -1141,12 +1119,12 @@ app.get("/api/tryon/status/:id", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 app.post("/api/tryon/generate-video", async (req, res) => {
   try {
     console.log("=== VIDEO GENERATION REQUEST ===");
     const { image_url } = req.body;
     if (!image_url) return res.status(400).json({ error: "No image URL provided" });
-
     const shop = getShopFromRequest(req);
     if (shop) {
       const creditCheck = creditsSystem.checkAndUseCredit(shop, getRealIP(req), 3);
@@ -1154,7 +1132,6 @@ app.post("/api/tryon/generate-video", async (req, res) => {
         return res.status(403).json({ error: "אין מספיק קרדיטים לסרטון (3 קרדיטים)" });
       }
     }
-
     console.log("Sending to FASHN Image-to-Video...");
     const response = await fetch("https://api.fashn.ai/v1/run", {
       method: "POST",
@@ -1164,14 +1141,9 @@ app.post("/api/tryon/generate-video", async (req, res) => {
       },
       body: JSON.stringify({
         model_name: "image-to-video",
-        inputs: {
-          image: image_url,
-          duration: 5,
-          resolution: "720p"
-        }
+        inputs: { image: image_url, duration: 5, resolution: "720p" }
       })
     });
-
     const data = await response.json();
     if (!data.id) return res.status(500).json({ error: data.error || "No prediction ID" });
     console.log("Video prediction ID:", data.id);
@@ -1213,6 +1185,7 @@ app.get("/api/tryon/video-proxy", async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 // === COMPLIANCE WEBHOOKS (HMAC VERIFIED) ===
 app.post("/webhooks/compliance", verifyShopifyWebhook, (req, res) => {
   console.log("Compliance webhook received:", JSON.stringify(req.body).substring(0, 200));
@@ -1240,18 +1213,15 @@ app.listen(PORT, async () => {
   }
   console.log("Credits system: ACTIVE");
   console.log("Admin dashboard: /admin");
-  
+
   // ========== Data Platform Initialization ==========
   console.log("\n--- Data Platform Initialization ---");
   console.log("Data collection enabled for:", featureFlags.getDataCollectionShops().join(", "));
-  
   if (process.env.DATABASE_URL) {
     const connected = await db.testConnection();
     if (connected) {
       await db.initializeSchema();
       console.log("Data platform: READY");
-      
-      // Verify Shopify API connectivity for each enabled shop
       const enabledShops = featureFlags.getDataCollectionShops();
       for (const shop of enabledShops) {
         if (shopify.hasTokenForShop(shop)) {
@@ -1271,7 +1241,8 @@ app.listen(PORT, async () => {
   } else {
     console.log("⚠️  DATABASE_URL not configured, data platform disabled");
   }
-// ========== Product Catalog Sync (every 6 hours) ==========
+
+  // ========== Product Catalog Sync (every 6 hours) ==========
   if (process.env.DATABASE_URL) {
     const PRODUCT_SYNC_SHOP = "seven770.myshopify.com";
     const runProductSync = async () => {
@@ -1283,7 +1254,6 @@ app.listen(PORT, async () => {
         console.error("⚠️  [Products] Scheduled sync failed:", e.message);
       }
     };
-    // Run once at startup (delayed 30s so the server is fully up), then every 6h
     setTimeout(runProductSync, 30000);
     setInterval(runProductSync, 6 * 60 * 60 * 1000);
     console.log("🔄 Product catalog sync scheduled (every 6h)");
