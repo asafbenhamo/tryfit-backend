@@ -404,12 +404,20 @@ async function getStoreProducts(shopDomain, options = {}) {
       [shopDomain]
     );
 
+    // Build a ready-to-use public URL for each product from its handle.
+    // The store's public domain is 770store.co.il (not the myshopify domain).
+    const PUBLIC_DOMAIN = "https://770store.co.il";
+    const products = result.rows.map(p => ({
+      ...p,
+      product_url: p.handle ? `${PUBLIC_DOMAIN}/products/${p.handle}` : null
+    }));
+
     return {
       ok: true,
       total_available_in_store: countResult.rows[0]?.total_available || 0,
-      returned: result.rows.length,
+      returned: products.length,
       filters_applied: { search: search || null, minPrice: minPrice ?? null, maxPrice: maxPrice ?? null, availableOnly },
-      products: result.rows
+      products: products
     };
   });
 }
