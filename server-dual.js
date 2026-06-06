@@ -1272,5 +1272,36 @@ app.listen(PORT, async () => {
     setInterval(runProductSync, 6 * 60 * 60 * 1000);
     console.log("🔄 Product catalog sync scheduled (every 6h)");
   }
+
+  // ========== Orders + Customers Sync (every 3 hours) ==========
+  // Keeps store_orders / store_customers fresh so the advisor's numbers
+  // match Shopify. Reuses the existing backfillEntireShop (full upsert).
+  if (process.env.DATABASE_URL) {
+    const DATA_SYNC_SHOP = "seven770.myshopify.com";
+    let dataSyncRunning = false;
+    const runDataSync = async () => {
+      if (!shopify.hasTokenForShop(DATA_SYNC_SHOP)) return;
+      if (dataSyncRunning) {
+        console.log("🔄 [Data] Sync already running, skipping this cycle");
+        return;
+      }
+      if (!featureFlags.isDataCollectionEnabled(DATA_SYNC_SHOP)) return;
+      dataSyncRunning = true;
+      try {
+        const r = await shopify.backfillEntireShop(DATA_SYNC_SHOP);
+        console.log("🔄 [Data] Scheduled sync:",
+          `customers ${r.customers_saved}/${r.customers_fetched},`,
+          `orders ${r.orders_saved}/${r.orders_fetched} (${r.duration_seconds}s)`);
+      } catch (e) {
+        console.error("⚠️  [Data] Scheduled sync failed:", e.message);
+      } finally {
+        dataSyncRunning = false;
+      }
+    };
+    // First run 90s after startup (lets product sync go first), then every 3h.
+    setTimeout(runDataSync, 90000);
+    setInterval(runDataSync, 3 * 60 * 60 * 1000);
+    console.log("🔄 Orders + customers sync scheduled (every 3h)");
+  }
   console.log("---\n");
 });
