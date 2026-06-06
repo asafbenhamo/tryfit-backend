@@ -215,3 +215,30 @@ INSERT INTO shops (shop_domain, display_name, data_collection_enabled, installed
 VALUES ('seven770.myshopify.com', 'Seven770 (Demo)', TRUE, NOW())
 ON CONFLICT (shop_domain) DO UPDATE
 SET data_collection_enabled = TRUE;
+-- ============ STORE PRODUCTS (live catalog, synced periodically) ============
+
+CREATE TABLE IF NOT EXISTS store_products (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  shopify_product_id BIGINT NOT NULL,
+  title TEXT,
+  product_type VARCHAR(255),
+  vendor VARCHAR(255),
+  status VARCHAR(50),
+  tags TEXT[],
+  min_price NUMERIC(12,2),
+  max_price NUMERIC(12,2),
+  total_inventory INTEGER,
+  available BOOLEAN DEFAULT TRUE,
+  image_url TEXT,
+  handle VARCHAR(255),
+  shopify_created_at TIMESTAMP,
+  shopify_updated_at TIMESTAMP,
+  raw_data JSONB,
+  last_synced_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(shop_domain, shopify_product_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_products_shop ON store_products(shop_domain);
+CREATE INDEX IF NOT EXISTS idx_store_products_type ON store_products(product_type);
+CREATE INDEX IF NOT EXISTS idx_store_products_available ON store_products(available);

@@ -605,6 +605,21 @@ app.get("/chat", (req, res) => {
   res.sendFile(__dirname + "/chat.html");
 });
 // ======================
+// PRODUCTS: Manual sync trigger (TEMPORARY - for testing)
+// ======================
+app.get("/admin/sync-products", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
+  }
+  try {
+    const result = await shopify.syncProducts("seven770.myshopify.com");
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+// ======================
 // FASHN FUNCTIONS
 // ======================
 function buildFashnBody(dataUri, garmentUrl, category) {
@@ -1243,6 +1258,23 @@ app.listen(PORT, async () => {
     }
   } else {
     console.log("⚠️  DATABASE_URL not configured, data platform disabled");
+  }
+// ========== Product Catalog Sync (every 6 hours) ==========
+  if (process.env.DATABASE_URL) {
+    const PRODUCT_SYNC_SHOP = "seven770.myshopify.com";
+    const runProductSync = async () => {
+      if (!shopify.hasTokenForShop(PRODUCT_SYNC_SHOP)) return;
+      try {
+        const r = await shopify.syncProducts(PRODUCT_SYNC_SHOP);
+        console.log("🔄 [Products] Scheduled sync:", JSON.stringify(r));
+      } catch (e) {
+        console.error("⚠️  [Products] Scheduled sync failed:", e.message);
+      }
+    };
+    // Run once at startup (delayed 30s so the server is fully up), then every 6h
+    setTimeout(runProductSync, 30000);
+    setInterval(runProductSync, 6 * 60 * 60 * 1000);
+    console.log("🔄 Product catalog sync scheduled (every 6h)");
   }
   console.log("---\n");
 });

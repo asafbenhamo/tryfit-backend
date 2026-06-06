@@ -719,6 +719,162 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     return stats;
   }
 }
+/**
+ * Get all products from a shop using pagination.
+ * Uses read_products scope. Returns array of product objects.
+ */
+async function getAllProducts(shopDomain, onProgress = null) {
+  const products = [];
+  let pageInfo = null;
+  let page = 1;
+
+  while (true) {
+    try {
+      let endpoint = `products.json?limit=250`;
+      if (pageInfo) {
+        endpoint = `products.json?limit=250&page_info=${pageInfo}`;
+      }
+
+      const token = getTokenForShop(shopDomain);
+      if (!token) throw new Error(`No token for ${shopDomain}`);
+
+      const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
+      const response = await fetch(url, {
+        headers: {
+          'X-Shopify-Access-Token': token,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (response.status === 429) {
+        console.log(`⏳ [Shopify] Rate limited, waiting 2s...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Shopify API ${response.status}: ${await response.text()}`);
+      }
+
+      const data = await response.json();
+      const pageProducts = data.products || [];
+      products.push(...pageProducts);
+
+      console.log(`📦 [Products] Page ${page}: ${pageProducts.length} (total: ${products.length})`);
+      if (onProgress) onProgress({ phase: 'products', page, count: products.length });
+
+      const linkHeader = response.headers.get('Link') || response.headers.get('link');
+      const nextMatch = linkHeader && linkHeader.match(/<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"/);
+
+      if (!nextMatch || pageProducts.length === 0) break;
+
+      pageInfo = nextMatch[1];
+      page++;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    } catch (err) {
+      console.error(`❌ [Products] getAllProducts page ${page} failed:`, err.message);
+      break;
+    }
+  }
+
+  return products;
+}
+
+/**
+ * Save a single Shopify product to store_products (upsert).
+ */
+async function saveStoreProduct(shopDomain, product) {
+  if (!product || !product.id) return null;
+
+  try {
+    // Compute price range and inventory from variants.
+    const variants = product.variants || [];
+    const prices = variants.map(v => parseFloat(v.price || '0')).filter(p => p > 0);
+    const minPrice = prices.length ? Math.min(...prices) : null;
+    const maxPrice = prices.length ? Math.max(...prices) : null;
+    const totalInventory = variants.reduce((sum, v) => sum + (parseInt(v.inventory_quantity) || 0), 0);
+    const available = product.status === 'active' && totalInventory > 0;
+    const imageUrl = product.image?.src || (product.images && product.images[0]?.src) || null;
+    const tags = (product.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+
+    await db.query(`
+      INSERT INTO store_products (
+        shop_domain, shopify_product_id, title, product_type, vendor,
+        status, tags, min_price, max_price, total_inventory, available,
+        image_url, handle, shopify_created_at, shopify_updated_at, raw_data, last_synced_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW()
+      )
+      ON CONFLICT (shop_domain, shopify_product_id)
+      DO UPDATE SET
+        title = EXCLUDED.title,
+        product_type = EXCLUDED.product_type,
+        vendor = EXCLUDED.vendor,
+        status = EXCLUDED.status,
+        tags = EXCLUDED.tags,
+        min_price = EXCLUDED.min_price,
+        max_price = EXCLUDED.max_price,
+        total_inventory = EXCLUDED.total_inventory,
+        available = EXCLUDED.available,
+        image_url = EXCLUDED.image_url,
+        handle = EXCLUDED.handle,
+        shopify_updated_at = EXCLUDED.shopify_updated_at,
+        raw_data = EXCLUDED.raw_data,
+        last_synced_at = NOW()
+    `, [
+      shopDomain,
+      product.id,
+      product.title || null,
+      product.product_type || null,
+      product.vendor || null,
+      product.status || null,
+      tags,
+      minPrice,
+      maxPrice,
+      totalInventory,
+      available,
+      imageUrl,
+      product.handle || null,
+      product.created_at || null,
+      product.updated_at || null,
+      JSON.stringify(product)
+    ]);
+
+    return product.id;
+  } catch (err) {
+    console.error(`❌ [DB] saveStoreProduct failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Sync the entire product catalog for a shop.
+ * Fetches all products and upserts them into store_products.
+ */
+async function syncProducts(shopDomain) {
+  if (!hasTokenForShop(shopDomain)) {
+    return { success: false, reason: 'no_token' };
+  }
+
+  const startTime = Date.now();
+  try {
+    console.log(`🔄 [Products] Starting catalog sync for ${shopDomain}`);
+    const products = await getAllProducts(shopDomain);
+
+    let saved = 0, failed = 0;
+    for (const product of products) {
+      const ok = await saveStoreProduct(shopDomain, product);
+      if (ok) saved++; else failed++;
+    }
+
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    console.log(`✅ [Products] Sync complete: ${saved} saved, ${failed} failed (${duration}s)`);
+    return { success: true, fetched: products.length, saved, failed, duration_seconds: duration };
+  } catch (err) {
+    console.error(`❌ [Products] Sync failed:`, err.message);
+    return { success: false, error: err.message };
+  }
+}
 
 module.exports = {
   hasTokenForShop,
@@ -733,6 +889,9 @@ module.exports = {
   backfillCustomerData,
   verifyConnection,
   getAllCustomers,
-  getAllOrders,
-  backfillEntireShop
+ getAllOrders,
+  backfillEntireShop,
+  getAllProducts,
+  saveStoreProduct,
+  syncProducts
 };
