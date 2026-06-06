@@ -649,6 +649,62 @@ app.get("/admin/sync-products", async (req, res) => {
 });
 
 // ======================
+// TEMPORARY: Test abandoned checkouts API access
+// ======================
+app.get("/admin/test-checkouts", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
+  }
+  const shop = "seven770.myshopify.com";
+  const token = process.env.SHOPIFY_770_TOKEN;
+  if (!token) {
+    return res.json({ ok: false, reason: "no token configured" });
+  }
+  try {
+    // Try to fetch a single abandoned checkout to test access + scope.
+    const url = `https://${shop}/admin/api/2026-01/checkouts.json?limit=1`;
+    const r = await fetch(url, {
+      headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" }
+    });
+    const status = r.status;
+    let body;
+    try { body = await r.json(); } catch (e) { body = await r.text(); }
+
+    if (status === 200) {
+      const checkouts = body.checkouts || [];
+      const sample = checkouts[0] || null;
+      return res.json({
+        ok: true,
+        access: "GRANTED",
+        status,
+        checkouts_returned: checkouts.length,
+        sample_fields: sample ? Object.keys(sample) : [],
+        sample_line_items: sample && sample.line_items
+          ? sample.line_items.map(li => ({ title: li.title, quantity: li.quantity, price: li.price }))
+          : [],
+        sample_total: sample ? sample.total_price : null,
+        sample_email: sample ? (sample.email ? "present" : "none") : null,
+        sample_created: sample ? sample.created_at : null
+      });
+    } else {
+      // 401/403 = scope missing; anything else = other error
+      return res.json({
+        ok: false,
+        access: "DENIED_OR_ERROR",
+        status,
+        message: typeof body === "string" ? body.substring(0, 300) : JSON.stringify(body).substring(0, 300),
+        likely_cause: (status === 401 || status === 403)
+          ? "Missing read_checkouts / read_orders scope - need to add scope (permission popup)"
+          : "Other API error"
+      });
+    }
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ======================
 // FASHN FUNCTIONS
 // ======================
 function buildFashnBody(dataUri, garmentUrl, category) {
