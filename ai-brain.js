@@ -241,7 +241,22 @@ async function runTool(shopDomain, toolName, toolInput) {
 // Returns { ok, answer, toolsUsed, raw }.
 async function askBrain(shopDomain, shopName, userMessage, priorMessages = []) {
   const client = getClient();
-  const system = buildSystemPrompt(shopName || shopDomain);
+  const systemText = buildSystemPrompt(shopName || shopDomain);
+
+  // Wrap the system prompt as a cacheable block. The system prompt + tool
+  // definitions are identical on every call, so caching them cuts latency
+  // and cost significantly (they aren't re-processed each round).
+  const system = [
+    { type: "text", text: systemText, cache_control: { type: "ephemeral" } }
+  ];
+
+  // Mark the last tool definition with cache_control so the whole tools
+  // array is cached as one prefix.
+  const cachedTools = TOOL_DEFINITIONS.map((t, i) =>
+    i === TOOL_DEFINITIONS.length - 1
+      ? { ...t, cache_control: { type: "ephemeral" } }
+      : t
+  );
 
   // Build the running message list.
   const messages = [...priorMessages, { role: "user", content: userMessage }];
@@ -252,7 +267,7 @@ async function askBrain(shopDomain, shopName, userMessage, priorMessages = []) {
       model: MODEL,
       max_tokens: 2000,
       system,
-      tools: TOOL_DEFINITIONS,
+      tools: cachedTools,
       messages
     });
 
