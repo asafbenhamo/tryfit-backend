@@ -1292,6 +1292,26 @@ app.listen(PORT, async () => {
         console.log("🔄 [Data] Scheduled sync:",
           `customers ${r.customers_saved}/${r.customers_fetched},`,
           `orders ${r.orders_saved}/${r.orders_fetched} (${r.duration_seconds}s)`);
+
+        // Recompute last_order_date for each customer from their orders,
+        // so "dormant customer" analysis stays accurate after every sync.
+        try {
+          const upd = await db.query(`
+            UPDATE store_customers sc
+            SET last_order_date = sub.last_order
+            FROM (
+              SELECT shopify_customer_id, MAX(ordered_at) AS last_order
+              FROM store_orders
+              WHERE shop_domain = $1 AND shopify_customer_id IS NOT NULL
+              GROUP BY shopify_customer_id
+            ) sub
+            WHERE sc.shop_domain = $1
+              AND sc.shopify_customer_id = sub.shopify_customer_id
+          `, [DATA_SYNC_SHOP]);
+          console.log("🔄 [Data] last_order_date refreshed for", upd.rowCount, "customers");
+        } catch (e) {
+          console.error("⚠️  [Data] last_order_date refresh failed:", e.message);
+        }
       } catch (e) {
         console.error("⚠️  [Data] Scheduled sync failed:", e.message);
       } finally {
