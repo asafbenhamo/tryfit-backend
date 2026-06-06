@@ -405,8 +405,8 @@ async function getStoreProducts(shopDomain, options = {}) {
     );
 
     // Build a ready-to-use public URL for each product from its handle.
-    // The store's public domain is 770store.co.il (not the myshopify domain).
-    const PUBLIC_DOMAIN = "https://770store.co.il";
+    // The store's public domain is sevenseventy.co.il.
+    const PUBLIC_DOMAIN = "https://sevenseventy.co.il";
     const products = result.rows.map(p => ({
       ...p,
       product_url: p.handle ? `${PUBLIC_DOMAIN}/products/${p.handle}` : null
