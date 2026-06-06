@@ -77,6 +77,7 @@
   .row.ai .bubble th, .row.ai .bubble td { border:1px solid var(--border-strong); padding:6px 9px; text-align:right; }
   .row.ai .bubble th { background: rgba(11,138,255,0.10); font-weight:700; }
   .row.ai .bubble strong { color: #0a6fe0; font-weight: 700; }
+  .row.ai .bubble .h { font-size: 16px; font-weight: 700; margin: 10px 0 4px; }
   .row.ai .bubble code { background: rgba(0,0,0,0.06); padding: 2px 6px; border-radius: 5px; font-size: 13px; }
   .welcome {
     flex: 1; display: flex; flex-direction: column;
@@ -203,7 +204,7 @@
     const lines = html.split('\n');
     let out = [], inTable = false;
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+      let line = lines[i];
       const isRow = /^\s*\|.*\|\s*$/.test(line);
       const isSep = /^\s*\|[\s:|-]+\|\s*$/.test(line);
       if (isRow && isSep) continue;
@@ -215,7 +216,9 @@
         out.push('<tr>' + cells.map(c=>'<'+tag+'>'+c+'</'+tag+'>').join('') + '</tr>');
       } else {
         if (inTable) { out.push('</table>'); inTable = false; }
-        out.push(line);
+        const h = line.match(/^\s*#{1,4}\s*(.+)$/);
+        if (h) { out.push('<div class="h">' + h[1] + '</div>'); }
+        else { out.push(line); }
       }
     }
     if (inTable) out.push('</table>');
