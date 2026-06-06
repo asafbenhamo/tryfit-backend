@@ -165,6 +165,20 @@ const TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "getStoreProducts",
+    description: "קטלוג המוצרים החי של החנות (מתעדכן מ-Shopify כל 6 שעות) - מה קיים במלאי עכשיו. שימושי כשרוצים להמליץ על מוצר ספציפי ללקוחה, לבדוק מה יש במלאי, או למצוא מוצרים בטווח מחיר. חיפוש לפי טקסט חופשי בשם המוצר (search), טווח מחיר (minPrice/maxPrice), ורק זמינים (availableOnly, ברירת מחדל true). חשוב: לחיפוש לפי סוג בגד, השתמש ב-search עם מילה בעברית (למשל 'שמלה', 'ג'ינס', 'אוברול') כי לרוב המוצרים אין קטגוריה מוגדרת.",
+    input_schema: {
+      type: "object",
+      properties: {
+        search: { type: "string", description: "טקסט חופשי לחיפוש בשם המוצר, בעברית (אופציונלי)" },
+        minPrice: { type: "number", description: "מחיר מינימלי (אופציונלי)" },
+        maxPrice: { type: "number", description: "מחיר מקסימלי (אופציונלי)" },
+        availableOnly: { type: "boolean", description: "רק מוצרים במלאי (ברירת מחדל true)" },
+        limit: { type: "integer", description: "כמה מוצרים להחזיר (ברירת מחדל 20, מקסימום 50)" }
+      }
+    }
+  },
+  {
     name: "generateWhatsAppMessage",
     description: "מכין טקסט WhatsApp בעברית מותאם ללקוחה ולמטרה. intent יכול להיות: comeback, first_order, vip, winback_big. מחזיר טקסט בלבד - לא שולח.",
     input_schema: {
@@ -189,6 +203,7 @@ const TOOL_IMPL = {
   searchCustomers: aiTools.searchCustomers,
   getTopProducts: aiTools.getTopProducts,
   getRevenueStats: aiTools.getRevenueStats,
+  getStoreProducts: aiTools.getStoreProducts,
   generateWhatsAppMessage: aiTools.generateWhatsAppMessage
 };
 

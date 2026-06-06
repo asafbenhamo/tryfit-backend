@@ -354,6 +354,66 @@ async function getCustomerPurchases(shopDomain, options = {}) {
   });
 }
 
+// ---------- 12. getStoreProducts ----------
+// Live catalog (synced from Shopify every 6h). Search by free text in title,
+// filter by price and availability. Does NOT rely on product_type (mostly empty in 770).
+async function getStoreProducts(shopDomain, options = {}) {
+  return safe('getStoreProducts', async () => {
+    const { search, minPrice, maxPrice, availableOnly = true, limit = 20 } = options;
+
+    const where = ['shop_domain = $1'];
+    const params = [shopDomain];
+    let p = 1;
+
+    if (availableOnly) {
+      where.push('available = TRUE');
+    }
+    if (search && search.trim()) {
+      p++;
+      where.push(`title ILIKE $${p}`);
+      params.push('%' + search.trim() + '%');
+    }
+    if (minPrice != null) {
+      p++;
+      where.push(`min_price >= $${p}`);
+      params.push(minPrice);
+    }
+    if (maxPrice != null) {
+      p++;
+      where.push(`max_price <= $${p}`);
+      params.push(maxPrice);
+    }
+
+    const lim = Math.min(parseInt(limit) || 20, 50);
+
+    const result = await db.query(
+      `SELECT title, product_type, vendor, tags,
+              min_price, max_price, total_inventory, available, handle
+       FROM store_products
+       WHERE ${where.join(' AND ')}
+       ORDER BY available DESC, total_inventory DESC
+       LIMIT ${lim}`,
+      params
+    );
+
+    // Also give a total count of available products for context.
+    const countResult = await db.query(
+      `SELECT COUNT(*)::int AS total_available
+       FROM store_products
+       WHERE shop_domain = $1 AND available = TRUE`,
+      [shopDomain]
+    );
+
+    return {
+      ok: true,
+      total_available_in_store: countResult.rows[0]?.total_available || 0,
+      returned: result.rows.length,
+      filters_applied: { search: search || null, minPrice: minPrice ?? null, maxPrice: maxPrice ?? null, availableOnly },
+      products: result.rows
+    };
+  });
+}
+
 module.exports = {
   getTopCustomers,
   getDormantCustomers,
@@ -365,5 +425,6 @@ module.exports = {
   getRevenueStats,
   getTryFitInsights,
   generateWhatsAppMessage,
-  getCustomerPurchases
+  getCustomerPurchases,
+  getStoreProducts
 };
