@@ -422,6 +422,72 @@ async function getStoreProducts(shopDomain, options = {}) {
   });
 }
 
+// ---------- 13. getAbandonedCheckouts ----------
+// Abandoned carts (started but not completed). Only rows where completed_at IS NULL
+// are truly abandoned. Returns summary stats, most-abandoned products, and a sample
+// of recoverable carts (those with an email/phone to reach out to).
+async function getAbandonedCheckouts(shopDomain, options = {}) {
+  return safe('getAbandonedCheckouts', async () => {
+    const { days = 30, limit = 10 } = options;
+    const lim = Math.min(parseInt(limit) || 10, 50);
+    const dayNum = parseInt(days) || 30;
+
+    // Summary: count + total money stuck, within the time window, not completed.
+    const summary = await db.query(
+      `SELECT
+         COUNT(*)::int AS abandoned_count,
+         COALESCE(SUM(total_price), 0)::numeric(12,2) AS total_value_stuck,
+         COALESCE(AVG(total_price), 0)::numeric(12,2) AS avg_cart_value,
+         COUNT(*) FILTER (WHERE email IS NOT NULL AND email <> '')::int AS recoverable_with_email
+       FROM abandoned_checkouts
+       WHERE shop_domain = $1
+         AND completed_at IS NULL
+         AND shopify_created_at >= NOW() - ($2 || ' days')::interval`,
+      [shopDomain, dayNum]
+    );
+
+    // Most-abandoned products: unnest the JSONB line_items and count.
+    const topProducts = await db.query(
+      `SELECT
+         li->>'title' AS product_title,
+         SUM((li->>'quantity')::int)::int AS times_abandoned,
+         COUNT(DISTINCT ac.id)::int AS in_carts
+       FROM abandoned_checkouts ac,
+            LATERAL jsonb_array_elements(ac.line_items) li
+       WHERE ac.shop_domain = $1
+         AND ac.completed_at IS NULL
+         AND ac.shopify_created_at >= NOW() - ($2 || ' days')::interval
+         AND li->>'title' IS NOT NULL
+       GROUP BY li->>'title'
+       ORDER BY times_abandoned DESC
+       FETCH FIRST ${lim} ROWS ONLY`,
+      [shopDomain, dayNum]
+    );
+
+    // Recoverable carts: have an email, highest value first.
+    const recoverable = await db.query(
+      `SELECT email, phone, total_price, item_count,
+              line_items, abandoned_checkout_url, shopify_created_at
+       FROM abandoned_checkouts
+       WHERE shop_domain = $1
+         AND completed_at IS NULL
+         AND email IS NOT NULL AND email <> ''
+         AND shopify_created_at >= NOW() - ($2 || ' days')::interval
+       ORDER BY total_price DESC
+       FETCH FIRST ${lim} ROWS ONLY`,
+      [shopDomain, dayNum]
+    );
+
+    return {
+      ok: true,
+      data_window: `${dayNum} days`,
+      summary: summary.rows[0] || {},
+      most_abandoned_products: topProducts.rows,
+      recoverable_carts: recoverable.rows
+    };
+  });
+}
+
 module.exports = {
   getTopCustomers,
   getDormantCustomers,
@@ -434,5 +500,6 @@ module.exports = {
   getTryFitInsights,
   generateWhatsAppMessage,
   getCustomerPurchases,
-  getStoreProducts
+  getStoreProducts,
+  getAbandonedCheckouts
 };

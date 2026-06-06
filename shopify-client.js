@@ -826,6 +826,153 @@ async function syncProducts(shopDomain) {
   }
 }
 
+/**
+ * Get all abandoned checkouts from a shop using since_id pagination.
+ * Abandoned checkouts = carts that were started but not completed.
+ */
+async function getAllAbandonedCheckouts(shopDomain, onProgress = null) {
+  const checkouts = [];
+  let sinceId = 0;
+  let page = 1;
+  const token = getTokenForShop(shopDomain);
+  if (!token) throw new Error(`No token for ${shopDomain}`);
+
+  while (true) {
+    try {
+      const endpoint = `checkouts.json?limit=250&since_id=${sinceId}`;
+      const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
+      const response = await fetch(url, {
+        headers: {
+          'X-Shopify-Access-Token': token,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (response.status === 429) {
+        console.log(`⏳ [Shopify] Rate limited, waiting 2s...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+
+      if (!response.ok) {
+        throw new Error(`Shopify API ${response.status}: ${await response.text()}`);
+      }
+
+      const data = await response.json();
+      const pageCheckouts = data.checkouts || [];
+      if (pageCheckouts.length === 0) break;
+
+      checkouts.push(...pageCheckouts);
+      sinceId = pageCheckouts[pageCheckouts.length - 1].id;
+
+      console.log(`📦 [Checkouts] Page ${page}: ${pageCheckouts.length} (total: ${checkouts.length})`);
+      if (onProgress) onProgress({ phase: 'checkouts', page, count: checkouts.length });
+
+      if (pageCheckouts.length < 250) break;
+
+      page++;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    } catch (err) {
+      console.error(`❌ [Checkouts] getAllAbandonedCheckouts page ${page} failed:`, err.message);
+      break;
+    }
+  }
+
+  return checkouts;
+}
+
+/**
+ * Save a single abandoned checkout to abandoned_checkouts (upsert).
+ */
+async function saveAbandonedCheckout(shopDomain, checkout) {
+  if (!checkout || !checkout.id) return null;
+
+  try {
+    const lineItems = (checkout.line_items || []).map(li => ({
+      title: li.title || null,
+      product_id: li.product_id || null,
+      variant_title: li.variant_title || null,
+      quantity: li.quantity || 0,
+      price: parseFloat(li.price || '0')
+    }));
+    const itemCount = lineItems.reduce((sum, li) => sum + (li.quantity || 0), 0);
+
+    await db.query(`
+      INSERT INTO abandoned_checkouts (
+        shop_domain, shopify_checkout_id, token, email, phone,
+        shopify_customer_id, total_price, subtotal_price, currency,
+        item_count, line_items, abandoned_checkout_url, completed_at,
+        shopify_created_at, shopify_updated_at, raw_data, last_synced_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW()
+      )
+      ON CONFLICT (shop_domain, shopify_checkout_id)
+      DO UPDATE SET
+        email = EXCLUDED.email,
+        phone = EXCLUDED.phone,
+        total_price = EXCLUDED.total_price,
+        subtotal_price = EXCLUDED.subtotal_price,
+        item_count = EXCLUDED.item_count,
+        line_items = EXCLUDED.line_items,
+        abandoned_checkout_url = EXCLUDED.abandoned_checkout_url,
+        completed_at = EXCLUDED.completed_at,
+        shopify_updated_at = EXCLUDED.shopify_updated_at,
+        raw_data = EXCLUDED.raw_data,
+        last_synced_at = NOW()
+    `, [
+      shopDomain,
+      checkout.id,
+      checkout.token || null,
+      checkout.email || null,
+      checkout.phone || null,
+      checkout.customer?.id || null,
+      parseFloat(checkout.total_price || '0'),
+      parseFloat(checkout.subtotal_price || '0'),
+      checkout.currency || null,
+      itemCount,
+      JSON.stringify(lineItems),
+      checkout.abandoned_checkout_url || null,
+      checkout.completed_at || null,
+      checkout.created_at || null,
+      checkout.updated_at || null,
+      JSON.stringify(checkout)
+    ]);
+
+    return checkout.id;
+  } catch (err) {
+    console.error(`❌ [DB] saveAbandonedCheckout failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Sync all abandoned checkouts for a shop.
+ */
+async function syncAbandonedCheckouts(shopDomain) {
+  if (!hasTokenForShop(shopDomain)) {
+    return { success: false, reason: 'no_token' };
+  }
+
+  const startTime = Date.now();
+  try {
+    console.log(`🔄 [Checkouts] Starting abandoned-checkout sync for ${shopDomain}`);
+    const checkouts = await getAllAbandonedCheckouts(shopDomain);
+
+    let saved = 0, failed = 0;
+    for (const checkout of checkouts) {
+      const ok = await saveAbandonedCheckout(shopDomain, checkout);
+      if (ok) saved++; else failed++;
+    }
+
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    console.log(`✅ [Checkouts] Sync complete: ${saved} saved, ${failed} failed (${duration}s)`);
+    return { success: true, fetched: checkouts.length, saved, failed, duration_seconds: duration };
+  } catch (err) {
+    console.error(`❌ [Checkouts] Sync failed:`, err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 module.exports = {
   hasTokenForShop,
   getTokenForShop,
@@ -843,5 +990,8 @@ module.exports = {
   backfillEntireShop,
   getAllProducts,
   saveStoreProduct,
-  syncProducts
+  syncProducts,
+  getAllAbandonedCheckouts,
+  saveAbandonedCheckout,
+  syncAbandonedCheckouts
 };

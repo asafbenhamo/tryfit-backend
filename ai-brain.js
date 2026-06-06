@@ -198,6 +198,17 @@ const TOOL_DEFINITIONS = [
       },
       required: ["email"]
     }
+  },
+  {
+    name: "getAbandonedCheckouts",
+    description: "עגלות נטושות - לקוחות שהוסיפו מוצרים לעגלה והתחילו תשלום אבל לא השלימו את הרכישה. מחזיר: סיכום (כמה עגלות ננטשו, כמה כסף 'תקוע', ערך עגלה ממוצע, כמה ניתנות לשחזור עם אימייל), המוצרים שהכי ננטשים, ורשימת עגלות לשחזור (עם אימייל, ערך, וקישור ישיר להשלמת הרכישה). שימושי לשאלות כמו 'איזה מוצר הכי ננטש', 'כמה כסף תקוע בעגלות', 'למי כדאי לפנות כדי להשלים רכישה'. אפשר לבקש חלון זמן (days, ברירת מחדל 30).",
+    input_schema: {
+      type: "object",
+      properties: {
+        days: { type: "integer", description: "חלון זמן בימים (ברירת מחדל 30)" },
+        limit: { type: "integer", description: "כמה תוצאות להחזיר (ברירת מחדל 10, מקסימום 50)" }
+      }
+    }
   }
 ];
 
@@ -213,7 +224,8 @@ const TOOL_IMPL = {
   getTopProducts: aiTools.getTopProducts,
   getRevenueStats: aiTools.getRevenueStats,
   getStoreProducts: aiTools.getStoreProducts,
-  generateWhatsAppMessage: aiTools.generateWhatsAppMessage
+  generateWhatsAppMessage: aiTools.generateWhatsAppMessage,
+  getAbandonedCheckouts: aiTools.getAbandonedCheckouts
 };
 
 // Recursively strip heavy/PII-laden fields before sending to Claude.

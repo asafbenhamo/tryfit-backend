@@ -649,8 +649,20 @@ app.get("/admin/sync-products", async (req, res) => {
 });
 
 // ======================
-// TEMPORARY: Test abandoned checkouts API access
+// TEMPORARY: Manual abandoned-checkout sync trigger
 // ======================
+app.get("/admin/sync-checkouts", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  try {
+    const result = await shopify.syncAbandonedCheckouts("seven770.myshopify.com");
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 app.get("/admin/test-checkouts", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
@@ -1367,6 +1379,18 @@ app.listen(PORT, async () => {
           console.log("🔄 [Data] last_order_date refreshed for", upd.rowCount, "customers");
         } catch (e) {
           console.error("⚠️  [Data] last_order_date refresh failed:", e.message);
+        }
+
+        // Sync abandoned checkouts (carts not completed) for cart-recovery insights.
+        try {
+          const ac = await shopify.syncAbandonedCheckouts(DATA_SYNC_SHOP);
+          if (ac.success) {
+            console.log("🔄 [Data] Abandoned checkouts:", `${ac.saved}/${ac.fetched} (${ac.duration_seconds}s)`);
+          } else {
+            console.log("🔄 [Data] Abandoned checkouts sync skipped:", ac.reason || ac.error);
+          }
+        } catch (e) {
+          console.error("⚠️  [Data] Abandoned checkouts sync failed:", e.message);
         }
       } catch (e) {
         console.error("⚠️  [Data] Scheduled sync failed:", e.message);

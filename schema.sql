@@ -1,609 +1,242 @@
-const express = require("express");
-const cors = require("cors");
-const multer = require("multer");
-const fs = require("fs");
-const crypto = require("crypto");
-require("dotenv").config();
-const creditsSystem = require("./credits");
-const adminRouter = require("./admin");
-const db = require("./database");
-const featureFlags = require("./feature-flags");
-const shopify = require("./shopify-client");
+-- =====================================================
+-- TryFit Data Platform Schema
+-- Tier 1: Store Insights (all customers)
+-- Tier 2: TryFit Verified Pool (consented customers)
+-- =====================================================
 
-const app = express();
-const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
-app.set("trust proxy", 1);
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"]
-}));
-app.use(express.json());
+-- ============ INFRASTRUCTURE ============
 
-// ======================
-// BACKEND MODE: "fashn" or "runpod"
-// ======================
-const BACKEND_MODE = process.env.BACKEND_MODE || "fashn";
+CREATE TABLE IF NOT EXISTS shops (
+  shop_domain VARCHAR(255) PRIMARY KEY,
+  display_name VARCHAR(255),
+  data_collection_enabled BOOLEAN DEFAULT FALSE,
+  contract_signed_at TIMESTAMP,
+  shopify_access_token TEXT,
+  installed_at TIMESTAMP DEFAULT NOW(),
+  last_sync_at TIMESTAMP,
+  total_customers INTEGER DEFAULT 0,
+  total_consenting_customers INTEGER DEFAULT 0,
+  metadata JSONB DEFAULT '{}'::jsonb
+);
 
-// RunPod config
-const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY || "rpa_94NQI07B7J69J3A25963D9RH0R0FSILF9DFEPEAEwc2qnz";
-const RUNPOD_ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID || "4nxbizcdhfxobd";
-const RUNPOD_BASE_URL = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
+-- ============ TIER 1: STORE INSIGHTS POOL ============
 
-// === RATE LIMIT ===
-const userLimits = new Map();
-const DEFAULT_DAILY_LIMIT = 3;
+CREATE TABLE IF NOT EXISTS store_customers (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL REFERENCES shops(shop_domain),
+  shopify_customer_id BIGINT NOT NULL,
+  email VARCHAR(255),
+  first_name VARCHAR(255),
+  last_name VARCHAR(255),
+  phone VARCHAR(50),
+  city VARCHAR(255),
+  province VARCHAR(255),
+  country VARCHAR(255),
+  shopify_created_at TIMESTAMP,
+  shopify_updated_at TIMESTAMP,
+  total_spent NUMERIC(12,2) DEFAULT 0,
+  orders_count INTEGER DEFAULT 0,
+  last_order_date TIMESTAMP,
+  shopify_tags TEXT[],
+  marketing_consent BOOLEAN DEFAULT FALSE,
+  marketing_consent_updated_at TIMESTAMP,
+  raw_data JSONB,
+  first_seen_at TIMESTAMP DEFAULT NOW(),
+  last_synced_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(shop_domain, shopify_customer_id)
+);
 
-function getRealIP(req) {
-  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
-}
+CREATE INDEX IF NOT EXISTS idx_store_customers_shop ON store_customers(shop_domain);
+CREATE INDEX IF NOT EXISTS idx_store_customers_email ON store_customers(email);
+CREATE INDEX IF NOT EXISTS idx_store_customers_total_spent ON store_customers(total_spent DESC);
 
-function parseDailyLimit(val) {
-  if (val === "0" || val === 0) return -1;
-  var n = parseInt(val);
-  return (isNaN(n) || n < 1) ? DEFAULT_DAILY_LIMIT : n;
-}
+CREATE TABLE IF NOT EXISTS store_orders (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL REFERENCES shops(shop_domain),
+  shopify_order_id BIGINT NOT NULL,
+  shopify_customer_id BIGINT,
+  order_number VARCHAR(50),
+  total_price NUMERIC(12,2),
+  subtotal_price NUMERIC(12,2),
+  total_discounts NUMERIC(12,2) DEFAULT 0,
+  currency VARCHAR(10),
+  financial_status VARCHAR(50),
+  fulfillment_status VARCHAR(50),
+  discount_codes TEXT[],
+  source_name VARCHAR(100),
+  ordered_at TIMESTAMP,
+  raw_data JSONB,
+  synced_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(shop_domain, shopify_order_id)
+);
 
-function checkRateLimit(ip, limit) {
-  if (limit === -1) return true;
-  const today = new Date().toDateString();
-  const user = userLimits.get(ip);
-  if (!user || user.date !== today) {
-    userLimits.set(ip, { count: 1, date: today });
-    return true;
-  }
-  if (user.count >= limit) return false;
-  user.count++;
-  return true;
-}
+CREATE INDEX IF NOT EXISTS idx_store_orders_customer ON store_orders(shop_domain, shopify_customer_id);
+CREATE INDEX IF NOT EXISTS idx_store_orders_date ON store_orders(ordered_at DESC);
 
-// === DATA PLATFORM: Save try-on event ===
-// Only saves if shop has data collection enabled (feature flag)
-// Wrapped in try/catch - never breaks try-on if DB fails
-async function saveTryOnEvent(shop, eventData) {
-  if (!shop) return;
-  if (!featureFlags.isDataCollectionEnabled(shop)) {
-    return; // Silently skip for non-enabled shops
-  }
-  
-  try {
-    // Try to link to existing TryFit consenting customer
-    let tryfitCustomerId = null;
-    if (eventData.identifier) {
-      const linkResult = await db.query(
-        `SELECT id FROM tryfit_consenting_customers 
-         WHERE shop_domain = $1 AND identifier = $2 AND consent_active = TRUE
-         LIMIT 1`,
-        [shop, eventData.identifier]
-      );
-      if (linkResult.rows.length > 0) {
-        tryfitCustomerId = linkResult.rows[0].id;
-      }
-    }
+CREATE TABLE IF NOT EXISTS store_order_items (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  shopify_order_id BIGINT NOT NULL,
+  shopify_product_id BIGINT,
+  shopify_variant_id BIGINT,
+  title TEXT,
+  variant_title TEXT,
+  vendor VARCHAR(255),
+  product_type VARCHAR(255),
+  quantity INTEGER,
+  price NUMERIC(12,2),
+  total_discount NUMERIC(12,2) DEFAULT 0,
+  sku VARCHAR(255),
+  tags TEXT[],
+  raw_data JSONB
+);
 
-    await db.query(`
-      INSERT INTO tryon_events (
-        shop_domain, tryfit_customer_id, session_id, product_id, product_title, 
-        product_category, product_price, garment_url, result_url,
-        backend_mode, category_detected, success, error_message,
-        ip_address, user_agent, identifier, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
-    `, [
-      shop,
-      tryfitCustomerId,
-      eventData.session_id || null,
-      eventData.product_id || null,
-      eventData.product_title || null,
-      eventData.product_category || null,
-      eventData.product_price || null,
-      eventData.garment_url || null,
-      eventData.result_url || null,
-      eventData.backend_mode || BACKEND_MODE,
-      eventData.category_detected || null,
-      eventData.success !== false,
-      eventData.error_message || null,
-      eventData.ip_address || null,
-      eventData.user_agent || null,
-      eventData.identifier || null
-    ]);
-    
-    // Increment total_tryons counter if linked to a TryFit customer
-    if (tryfitCustomerId) {
-      await db.query(
-        `UPDATE tryfit_consenting_customers 
-         SET total_tryons = total_tryons + 1 
-         WHERE id = $1`,
-        [tryfitCustomerId]
-      );
-    }
-    
-    console.log("📊 [DataPlatform] Try-on event saved for", shop, tryfitCustomerId ? `(linked to TryFit customer ${tryfitCustomerId})` : '(anonymous)');
-  } catch (err) {
-    // Log error but don't throw - try-on must continue working
-    console.error("⚠️  [DataPlatform] Failed to save try-on event:", err.message);
-  }
-}
+CREATE INDEX IF NOT EXISTS idx_order_items_order ON store_order_items(shop_domain, shopify_order_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_product ON store_order_items(shopify_product_id);
 
-// === DATA PLATFORM: Handle TryFit consent + customer backfill ===
-// Called when a customer provides consent (checkbox checked).
-// Triggers Shopify backfill in the background - does not block.
-function handleConsentAndBackfill(shop, params) {
-  if (!shop) return;
-  if (!featureFlags.isDataCollectionEnabled(shop)) return;
-  if (!shopify.hasTokenForShop(shop)) {
-    console.log("📊 [DataPlatform] No Shopify token for", shop, "- skipping backfill");
-    return;
-  }
-  
-  // Fire and forget - runs in background
-  setImmediate(async () => {
-    try {
-      const result = await shopify.backfillCustomerData(shop, params);
-      if (result.success) {
-        console.log(`✅ [DataPlatform] Backfill complete for ${params.email || params.identifier}: ${result.ordersSaved} orders`);
-      } else {
-        console.log(`⚠️  [DataPlatform] Backfill skipped: ${result.reason}`);
-      }
-    } catch (err) {
-      console.error("⚠️  [DataPlatform] Backfill error:", err.message);
-    }
-  });
-}
+-- ============ TIER 2: TRYFIT VERIFIED POOL ============
 
-function getShopFromRequest(req) {
-  if (req.body.shop) return req.body.shop;
-  if (req.headers["x-shop-domain"]) return req.headers["x-shop-domain"];
-  try {
-    if (req.headers.referer) return new URL(req.headers.referer).hostname;
-  } catch (e) {}
-  return "";
-}
+CREATE TABLE IF NOT EXISTS tryfit_consenting_customers (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL REFERENCES shops(shop_domain),
+  shopify_customer_id BIGINT,
+  store_customer_id BIGINT REFERENCES store_customers(id),
+  identifier VARCHAR(255),
+  email VARCHAR(255),
+  first_consent_at TIMESTAMP DEFAULT NOW(),
+  latest_consent_at TIMESTAMP DEFAULT NOW(),
+  consent_active BOOLEAN DEFAULT TRUE,
+  revoked_at TIMESTAMP,
+  total_tryons INTEGER DEFAULT 0,
+  metadata JSONB DEFAULT '{}'::jsonb,
+  UNIQUE(shop_domain, identifier)
+);
 
-// === WEBHOOK HMAC VERIFICATION ===
-function verifyShopifyWebhook(req, res, next) {
-  const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-  if (!hmacHeader) {
-    return res.status(401).json({ error: "Unauthorized - No HMAC" });
-  }
-  const secret = process.env.SHOPIFY_API_SECRET || "";
-  const rawBody = JSON.stringify(req.body);
-  const hash = crypto.createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
-  if (hash !== hmacHeader) {
-    return res.status(401).json({ error: "Unauthorized - Invalid HMAC" });
-  }
-  next();
-}
+CREATE INDEX IF NOT EXISTS idx_tryfit_customers_shop ON tryfit_consenting_customers(shop_domain);
+CREATE INDEX IF NOT EXISTS idx_tryfit_customers_email ON tryfit_consenting_customers(email);
+CREATE INDEX IF NOT EXISTS idx_tryfit_customers_active ON tryfit_consenting_customers(consent_active);
 
-// ======================
-// STATIC PAGES
-// ======================
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", mode: BACKEND_MODE });
-});
+CREATE TABLE IF NOT EXISTS consent_records (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  tryfit_customer_id BIGINT REFERENCES tryfit_consenting_customers(id),
+  identifier VARCHAR(255),
+  action VARCHAR(50) NOT NULL,
+  consent_text_version VARCHAR(50),
+  consent_text TEXT,
+  ip_address INET,
+  user_agent TEXT,
+  shopify_customer_id BIGINT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
 
-app.get("/privacy", (req, res) => {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TryFit - Privacy Policy</title>
-<style>
-body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:40px 20px;color:#333;line-height:1.6}
-h1{color:#E94560}h2{color:#2D3436;margin-top:30px}
-</style>
-</head>
-<body>
-<h1>TryFit Privacy Policy</h1>
-<p>Last updated: March 2026</p>
-<h2>What We Collect</h2>
-<p>TryFit processes photos that customers voluntarily upload to use the virtual try-on feature. These photos are sent to our processing servers solely to generate the try-on result.</p>
-<h2>How We Use Your Data</h2>
-<p>Uploaded photos are used only to generate virtual try-on images. Photos are not stored permanently and are automatically deleted after processing is complete.</p>
-<h2>Data Sharing</h2>
-<p>We do not sell, rent, or share customer photos or personal data with third parties. Photos are processed by our AI servers and deleted immediately after the result is generated.</p>
-<h2>Data Retention</h2>
-<p>Customer photos are temporarily processed and not retained after the try-on result is delivered. No personal data is stored on our servers.</p>
-<h2>Cookies</h2>
-<p>TryFit does not use cookies or tracking technologies.</p>
-<h2>Merchant Data</h2>
-<p>We access product images and product information from your Shopify store solely to provide the virtual try-on feature. We do not access customer personal information, order data, or payment information.</p>
-<h2>Contact</h2>
-<p>For privacy questions, contact us at support@tryfit.app</p>
-</body>
-</html>`);
-});
+CREATE INDEX IF NOT EXISTS idx_consent_records_customer ON consent_records(tryfit_customer_id);
+CREATE INDEX IF NOT EXISTS idx_consent_records_shop ON consent_records(shop_domain);
 
-// ======================
-// ADMIN + CREDITS
-// ======================
-app.use("/admin", adminRouter);
+CREATE TABLE IF NOT EXISTS tryon_events (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  tryfit_customer_id BIGINT REFERENCES tryfit_consenting_customers(id),
+  shopify_customer_id BIGINT,
+  identifier VARCHAR(255),
+  session_id VARCHAR(255),
+  product_id VARCHAR(255),
+  product_title TEXT,
+  product_category VARCHAR(100),
+  product_price NUMERIC(12,2),
+  garment_url TEXT,
+  result_url TEXT,
+  backend_mode VARCHAR(50),
+  category_detected VARCHAR(100),
+  success BOOLEAN DEFAULT TRUE,
+  error_message TEXT,
+  ip_address INET,
+  user_agent TEXT,
+  added_to_cart BOOLEAN DEFAULT FALSE,
+  resulted_in_purchase BOOLEAN DEFAULT FALSE,
+  resulting_order_id BIGINT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
 
-app.get("/api/credits/:shop", (req, res) => {
-  res.json(creditsSystem.getStoreCredits(req.params.shop));
-});
+CREATE INDEX IF NOT EXISTS idx_tryon_events_shop ON tryon_events(shop_domain);
+CREATE INDEX IF NOT EXISTS idx_tryon_events_customer ON tryon_events(tryfit_customer_id);
+CREATE INDEX IF NOT EXISTS idx_tryon_events_session ON tryon_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_tryon_events_date ON tryon_events(created_at DESC);
 
-// ======================
-// DATA PLATFORM: Consent endpoint
-// ======================
-// Called by frontend when customer checks the consent checkbox.
-// Triggers customer backfill in background.
-app.post("/api/consent", express.json(), async (req, res) => {
-  try {
-    const shop = getShopFromRequest(req);
-    const { email, phone, identifier, consent_text_version } = req.body;
-    
-    if (!shop) {
-      return res.status(400).json({ error: "Shop not identified" });
-    }
-    
-    if (!featureFlags.isDataCollectionEnabled(shop)) {
-      // Silently succeed for non-enabled shops - they don't need this
-      return res.json({ success: true, data_platform: "disabled" });
-    }
-    
-    const finalIdentifier = identifier || email || phone || getRealIP(req);
-    
-    console.log(`📊 [DataPlatform] Consent received for ${shop} | ${email || phone || 'no contact'}`);
-    
-    // Trigger backfill in background (doesn't block response)
-    handleConsentAndBackfill(shop, {
-      email: email || null,
-      phone: phone || null,
-      identifier: finalIdentifier,
-      ipAddress: getRealIP(req),
-      userAgent: req.headers["user-agent"],
-      consentTextVersion: consent_text_version || 'v1.0'
-    });
-    
-    res.json({ success: true });
-  } catch (err) {
-    console.error("Consent endpoint error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
+-- ============ TIER 3: AI PROFILES ============
 
-// ======================
-// DATA PLATFORM: Admin backfill endpoint
-// ======================
-// Manually triggers full shop backfill (all customers + orders to Tier 1).
-// Protected by admin password. Runs in background, returns immediately.
-const ADMIN_PASSWORD = "tryfit2026";
-const backfillStatus = {}; // In-memory status per shop
+CREATE TABLE IF NOT EXISTS customer_profiles (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  store_customer_id BIGINT REFERENCES store_customers(id),
+  tryfit_customer_id BIGINT REFERENCES tryfit_consenting_customers(id),
+  style_preference VARCHAR(100),
+  estimated_budget_range VARCHAR(50),
+  price_sensitivity NUMERIC(3,2),
+  loyalty_score NUMERIC(3,2),
+  trendsetter_score NUMERIC(3,2),
+  return_risk_score NUMERIC(3,2),
+  favorite_categories TEXT[],
+  seasonal_pattern VARCHAR(100),
+  ai_description TEXT,
+  ai_description_en TEXT,
+  brand_match_scores JSONB,
+  generated_by VARCHAR(50),
+  model_version VARCHAR(50),
+  generated_at TIMESTAMP DEFAULT NOW(),
+  expires_at TIMESTAMP
+);
 
-app.get("/admin/backfill", (req, res) => {
-  // Show backfill UI
-  res.send(`<!DOCTYPE html>
-<html lang="he" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<title>TryFit Data Platform - Backfill</title>
-<style>
-body{font-family:Arial,sans-serif;max-width:700px;margin:40px auto;padding:20px;background:#f5f5f5;direction:rtl}
-.card{background:white;padding:30px;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.08);margin-bottom:20px}
-h1{color:#E94560;margin:0 0 10px}
-.warn{background:#fff3cd;border:1px solid #ffc107;padding:15px;border-radius:8px;margin:15px 0}
-input{padding:10px;font-size:16px;border:1px solid #ddd;border-radius:6px;width:100%;box-sizing:border-box;margin-bottom:10px}
-button{background:#E94560;color:white;padding:12px 24px;border:none;border-radius:6px;font-size:16px;cursor:pointer;width:100%}
-button:hover{background:#c9354c}
-button:disabled{background:#999;cursor:not-allowed}
-.status{background:#f0f8ff;padding:15px;border-radius:8px;margin-top:15px;font-family:monospace;font-size:13px;white-space:pre-wrap;max-height:400px;overflow-y:auto}
-.shop-tag{display:inline-block;background:#E94560;color:white;padding:4px 10px;border-radius:4px;font-size:13px}
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>🚀 TryFit Data Backfill</h1>
-  <p>טוען את כל הלקוחות וההזמנות של החנות לתוך מאגר Tier 1.</p>
-  
-  <div class="warn">
-    <strong>⚠️ שים לב:</strong><br>
-    • זה ימשוך את כל הלקוחות וההזמנות של 60 הימים האחרונים מ-Shopify<br>
-    • הנתונים נשמרים ל-<code>store_customers</code> ו-<code>store_orders</code> בלבד (Tier 1)<br>
-    • לא לתחילת Tier 2 — זה למאגר פנימי של 770 בלבד<br>
-    • התהליך עשוי לקחת מספר דקות
-  </div>
-  
-  <h3>חנות לעיבוד:</h3>
-  <p><span class="shop-tag">seven770.myshopify.com</span></p>
-  
-  <h3>סיסמת אדמין:</h3>
-  <input type="password" id="password" placeholder="הזן סיסמה" />
-  
-  <button onclick="startBackfill()" id="startBtn">🚀 הפעל Backfill</button>
-  
-  <div id="status" class="status" style="display:none">ממתין להפעלה...</div>
-</div>
+CREATE INDEX IF NOT EXISTS idx_profiles_shop ON customer_profiles(shop_domain);
+CREATE INDEX IF NOT EXISTS idx_profiles_store_customer ON customer_profiles(store_customer_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_tryfit_customer ON customer_profiles(tryfit_customer_id);
 
-<script>
-async function startBackfill() {
-  const password = document.getElementById('password').value;
-  const statusEl = document.getElementById('status');
-  const btnEl = document.getElementById('startBtn');
-  
-  if (!password) {
-    alert('הזן סיסמה');
-    return;
-  }
-  
-  btnEl.disabled = true;
-  btnEl.textContent = '⏳ מבצע backfill...';
-  statusEl.style.display = 'block';
-  statusEl.textContent = '🚀 שולח בקשה...';
-  
-  try {
-    const response = await fetch('/admin/backfill/run', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({password, shop: 'seven770.myshopify.com'})
-    });
-    
-    const data = await response.json();
-    
-    if (data.error) {
-      statusEl.textContent = '❌ שגיאה: ' + data.error;
-      btnEl.disabled = false;
-      btnEl.textContent = '🚀 הפעל Backfill';
-      return;
-    }
-    
-    statusEl.textContent = '✅ הופעל! בודק סטטוס...\\n';
-    
-    // Poll for status every 3 seconds
-    const pollInterval = setInterval(async () => {
-      try {
-        const statusRes = await fetch('/admin/backfill/status?password=' + encodeURIComponent(password));
-        const statusData = await statusRes.json();
-        
-        if (statusData.status) {
-          let text = '📊 סטטוס Backfill:\\n\\n';
-          text += '   Phase: ' + (statusData.status.current_phase || 'מתחיל') + '\\n';
-          text += '   לקוחות נמשכו: ' + (statusData.status.customers_fetched || 0) + '\\n';
-          text += '   לקוחות נשמרו: ' + (statusData.status.customers_saved || 0) + '\\n';
-          text += '   הזמנות נמשכו: ' + (statusData.status.orders_fetched || 0) + '\\n';
-          text += '   הזמנות נשמרו: ' + (statusData.status.orders_saved || 0) + '\\n';
-          text += '   זמן שעבר: ' + (statusData.status.duration_seconds || 0) + 's\\n';
-          
-          if (statusData.status.success === true) {
-            text += '\\n🎉 הושלם בהצלחה!\\n';
-            clearInterval(pollInterval);
-            btnEl.disabled = false;
-            btnEl.textContent = '✅ הושלם — הפעל שוב';
-          } else if (statusData.status.success === false) {
-            text += '\\n❌ נכשל: ' + (statusData.status.fatal_error || 'שגיאה לא ידועה');
-            clearInterval(pollInterval);
-            btnEl.disabled = false;
-            btnEl.textContent = '🚀 נסה שוב';
-          }
-          
-          statusEl.textContent = text;
-        }
-      } catch (e) {
-        console.error('Poll error:', e);
-      }
-    }, 3000);
-    
-  } catch (err) {
-    statusEl.textContent = '❌ שגיאה: ' + err.message;
-    btnEl.disabled = false;
-    btnEl.textContent = '🚀 הפעל Backfill';
-  }
-}
-</script>
-</body>
-</html>`);
-});
+-- ============ AUDIT & GOVERNANCE ============
 
-app.post("/admin/backfill/run", express.json(), async (req, res) => {
-  try {
-    const { password, shop } = req.body;
-    
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: "סיסמה שגויה" });
-    }
-    
-    if (!shop) {
-      return res.status(400).json({ error: "Shop required" });
-    }
-    
-    if (!featureFlags.isDataCollectionEnabled(shop)) {
-      return res.status(403).json({ error: "Data collection not enabled for this shop" });
-    }
-    
-    if (!shopify.hasTokenForShop(shop)) {
-      return res.status(400).json({ error: "No Shopify token configured for this shop" });
-    }
-    
-    // Check if already running for this shop
-    if (backfillStatus[shop] && !backfillStatus[shop].success && !backfillStatus[shop].fatal_error) {
-      return res.json({ 
-        success: false, 
-        error: "Backfill already running for this shop",
-        status: backfillStatus[shop] 
-      });
-    }
-    
-    // Initialize status
-    backfillStatus[shop] = {
-      current_phase: 'starting',
-      customers_fetched: 0,
-      customers_saved: 0,
-      orders_fetched: 0,
-      orders_saved: 0,
-      started_at: new Date().toISOString()
-    };
-    
-    // Run in background
-    setImmediate(async () => {
-      try {
-        const result = await shopify.backfillEntireShop(shop, (progress) => {
-          // Update status as backfill progresses
-          backfillStatus[shop] = {
-            ...backfillStatus[shop],
-            current_phase: progress.phase,
-            ...(progress.stats || {})
-          };
-        });
-        
-        // Final status
-        backfillStatus[shop] = { ...backfillStatus[shop], ...result };
-      } catch (err) {
-        backfillStatus[shop] = {
-          ...backfillStatus[shop],
-          success: false,
-          fatal_error: err.message
-        };
-      }
-    });
-    
-    res.json({ success: true, message: "Backfill started" });
-  } catch (err) {
-    console.error("Backfill run error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
+CREATE TABLE IF NOT EXISTS data_access_log (
+  id BIGSERIAL PRIMARY KEY,
+  endpoint VARCHAR(255),
+  shop_domain VARCHAR(255),
+  accessor_type VARCHAR(50),
+  accessor_id VARCHAR(255),
+  purpose VARCHAR(255),
+  records_accessed INTEGER,
+  filters JSONB,
+  ip_address INET,
+  created_at TIMESTAMP DEFAULT NOW()
+);
 
-app.get("/admin/backfill/status", (req, res) => {
-  const password = req.query.password;
-  
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה" });
-  }
-  
-  const shop = req.query.shop || 'seven770.myshopify.com';
-  
-  res.json({ 
-    shop, 
-    status: backfillStatus[shop] || null 
-  });
-});
-// ======================
-// DATA PLATFORM: Test tools endpoint (TEMPORARY - Phase B verification)
-// ======================
-// Runs all ai-tools functions against real data and returns JSON.
-// Protected by admin password. Remove after Phase B is verified.
-const aiTools = require("./ai-tools");
+CREATE INDEX IF NOT EXISTS idx_access_log_shop ON data_access_log(shop_domain);
+CREATE INDEX IF NOT EXISTS idx_access_log_date ON data_access_log(created_at DESC);
 
-app.get("/admin/test-tools", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
-  }
+-- ============ STORE PRODUCTS (live catalog, synced periodically) ============
 
-  const shop = "seven770.myshopify.com";
-  const results = {};
+CREATE TABLE IF NOT EXISTS store_products (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  shopify_product_id BIGINT NOT NULL,
+  title TEXT,
+  product_type VARCHAR(255),
+  vendor VARCHAR(255),
+  status VARCHAR(50),
+  tags TEXT[],
+  min_price NUMERIC(12,2),
+  max_price NUMERIC(12,2),
+  total_inventory INTEGER,
+  available BOOLEAN DEFAULT TRUE,
+  image_url TEXT,
+  handle VARCHAR(255),
+  shopify_created_at TIMESTAMP,
+  shopify_updated_at TIMESTAMP,
+  raw_data JSONB,
+  last_synced_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(shop_domain, shopify_product_id)
+);
 
-  try {
-    results.getTopCustomers      = await aiTools.getTopCustomers(shop, { limit: 3 });
-    results.getDormantCustomers  = await aiTools.getDormantCustomers(shop, { limit: 3, daysInactive: 30 });
-    results.getNeverPurchased    = await aiTools.getNeverPurchased(shop, { limit: 3 });
-    results.getRepeatCustomers   = await aiTools.getRepeatCustomers(shop, { limit: 3 });
-    results.searchCustomers      = await aiTools.searchCustomers(shop, { query: "a" });
-    results.getTopProducts       = await aiTools.getTopProducts(shop, { limit: 5 });
-    results.getRevenueStats      = await aiTools.getRevenueStats(shop, { days: 60 });
-    results.getTryFitInsights    = await aiTools.getTryFitInsights(shop, { days: 30 });
+CREATE INDEX IF NOT EXISTS idx_store_products_shop ON store_products(shop_domain);
+CREATE INDEX IF NOT EXISTS idx_store_products_type ON store_products(product_type);
+CREATE INDEX IF NOT EXISTS idx_store_products_available ON store_products(available);
 
-    const top = results.getTopCustomers;
-    const sampleEmail = top.ok && top.customers && top.customers[0]
-      ? top.customers[0].email
-      : null;
-
-    if (sampleEmail) {
-      results._sample_email_used = sampleEmail;
-      results.getCustomerProfile       = await aiTools.getCustomerProfile(shop, { email: sampleEmail });
-      results.generateWhatsAppMessage  = await aiTools.generateWhatsAppMessage(shop, { email: sampleEmail, intent: "comeback" });
-    } else {
-      results.getCustomerProfile = { skipped: "no sample email available" };
-      results.generateWhatsAppMessage = { skipped: "no sample email available" };
-    }
-
-    res.json({ ok: true, shop, tested_at: new Date().toISOString(), results });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message, partial_results: results });
-  }
-});
-// ======================
-// DATA PLATFORM: Test brain endpoint (TEMPORARY - Phase C verification)
-// ======================
-// Usage: /admin/test-brain?password=tryfit2026&q=מי הלקוחות הכי טובות שלי
-const aiBrain = require("./ai-brain");
-
-app.get("/admin/test-brain", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
-  }
-
-  const question = req.query.q;
-  if (!question) {
-    return res.status(400).json({ error: "חסרה שאלה - הוסף &q=השאלה שלך ל-URL" });
-  }
-
-  const shop = "seven770.myshopify.com";
-  const shopName = "770";
-
-  try {
-    const start = Date.now();
-    const result = await aiBrain.askBrain(shop, shopName, question);
-    const duration = Date.now() - start;
-
-    res.json({
-      ok: result.ok,
-      question,
-      answer: result.answer,
-      tools_used: result.toolsUsed,
-      duration_seconds: (duration / 1000).toFixed(1),
-      model: aiBrain.MODEL
-    });
-  } catch (err) {
-    console.error("test-brain error:", err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-// ======================
-// AI CHAT: Real chat endpoint (Phase C.5)
-// ======================
-// POST /api/chat  body: { message, history, password }
-app.post("/api/chat", express.json(), async (req, res) => {
-  try {
-    const { message, history, password } = req.body;
-
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: "גישה נדחתה" });
-    }
-    if (!message || !message.trim()) {
-      return res.status(400).json({ error: "הודעה ריקה" });
-    }
-
-    const shop = "seven770.myshopify.com";
-    const shopName = "770";
-    const priorMessages = Array.isArray(history) ? history : [];
-
-    const result = await aiBrain.askBrain(shop, shopName, message, priorMessages);
-
-    const cleanHistory = [
-      ...priorMessages,
-      { role: "user", content: message },
-      { role: "assistant", content: result.answer }
-    ];
-
-    res.json({
-      ok: result.ok,
-      answer: result.answer,
-      history: cleanHistory,
-      tools_used: result.toolsUsed
-    });
-  } catch (err) {
-    console.error("Chat endpoint error:", err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-// ======================
-// AI CHAT: Serve the chat UI page
-// ======================
-app.get("/chat", (req, res) => {
-  res.sendFile(__dirname + "/chat.html");
-});
 -- ============ CHAT CONVERSATIONS (advisor chat history) ============
 
 CREATE TABLE IF NOT EXISTS chat_conversations (
@@ -616,677 +249,38 @@ CREATE TABLE IF NOT EXISTS chat_conversations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_conversations_shop ON chat_conversations(shop_domain, updated_at DESC);
-// ======================
-// PRODUCTS: Manual sync trigger (TEMPORARY - for testing)
-// ======================
-app.get("/admin/sync-products", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
-  }
-  try {
-    const result = await shopify.syncProducts("seven770.myshopify.com");
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-// ======================
-// FASHN FUNCTIONS
-// ======================
-function buildFashnBody(dataUri, garmentUrl, category) {
-  console.log("Building FASHN body with category:", category);
-  return {
-    model_name: "tryon-v1.6",
-    inputs: {
-      model_image: dataUri,
-      garment_image: garmentUrl,
-      category: category || "auto",
-      mode: "balanced",
-      garment_photo_type: "auto"
-    },
-    num_samples: 1
-  };
-}
 
-async function submitFashn(dataUri, garmentUrl, category) {
-  const body = buildFashnBody(dataUri, garmentUrl, category);
-  const response = await fetch("https://api.fashn.ai/v1/run", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + process.env.FASHN_API_KEY
-    },
-    body: JSON.stringify(body)
-  });
-  return await response.json();
-}
+-- ============ INITIAL DATA ============
 
-async function pollFashn(predictionId) {
-  for (let i = 0; i < 60; i++) {
-    const response = await fetch("https://api.fashn.ai/v1/status/" + predictionId, {
-      headers: { "Authorization": "Bearer " + process.env.FASHN_API_KEY }
-    });
-    const data = await response.json();
-    if (data.status === "completed") return data;
-    if (data.status === "failed") throw new Error(data.error?.message || "FASHN failed");
-    await new Promise(resolve => setTimeout(resolve, 3000));
-  }
-  throw new Error("Timeout");
-}
+-- ============ ABANDONED CHECKOUTS (carts not completed) ============
 
-async function submitAndWaitFashn(modelImage, garmentUrl, category) {
-  const maxRetries = 3;
-  let lastError;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const data = await submitFashn(modelImage, garmentUrl, category);
-      if (!data.id) throw new Error(data.message || data.error || "No prediction ID");
-      console.log("  FASHN submitted, ID:", data.id, "(attempt " + attempt + "/" + maxRetries + ")");
-      const result = await pollFashn(data.id);
-      if (result.output && result.output[0]) return result.output[0];
-      throw new Error("No output image");
-    } catch (err) {
-      lastError = err;
-      if (attempt < maxRetries) {
-        console.log("  Attempt " + attempt + " failed:", err.message);
-        console.log("  Retrying in 2 seconds...");
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastError;
-}
+CREATE TABLE IF NOT EXISTS abandoned_checkouts (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  shopify_checkout_id BIGINT NOT NULL,
+  token VARCHAR(255),
+  email VARCHAR(255),
+  phone VARCHAR(100),
+  shopify_customer_id BIGINT,
+  total_price NUMERIC(12,2),
+  subtotal_price NUMERIC(12,2),
+  currency VARCHAR(10),
+  item_count INTEGER DEFAULT 0,
+  line_items JSONB DEFAULT '[]'::jsonb,
+  abandoned_checkout_url TEXT,
+  completed_at TIMESTAMP,
+  shopify_created_at TIMESTAMP,
+  shopify_updated_at TIMESTAMP,
+  raw_data JSONB,
+  last_synced_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE (shop_domain, shopify_checkout_id)
+);
 
-// ======================
-// RUNPOD FUNCTIONS
-// ======================
-async function submitRunPod(dataUri, garmentUrl, category) {
-  let rpCategory = category;
-  const categoryMap = {
-    "tops": "upper_body", "top": "upper_body",
-    "shirts": "upper_body", "shirt": "upper_body",
-    "blouses": "upper_body", "blouse": "upper_body",
-    "sweaters": "upper_body", "sweater": "upper_body",
-    "vest": "upper_body", "vests": "upper_body",
-    "jackets": "upper_body", "jacket": "upper_body",
-    "coats": "upper_body", "coat": "upper_body",
-    "hoodies": "upper_body", "hoodie": "upper_body",
-    "blazer": "upper_body", "blazers": "upper_body",
-    "cardigan": "upper_body", "cardigans": "upper_body",
-    "t-shirt": "upper_body", "t-shirts": "upper_body",
-    "tshirt": "upper_body", "tshirts": "upper_body",
-    "tee": "upper_body", "tees": "upper_body",
-    "polo": "upper_body", "polos": "upper_body",
-    "tank top": "upper_body", "tank tops": "upper_body",
-    "tank": "upper_body", "tanks": "upper_body",
-    "camisole": "upper_body", "cami": "upper_body",
-    "crop top": "upper_body", "crop tops": "upper_body",
-    "tunic": "upper_body", "tunics": "upper_body",
-    "henley": "upper_body", "henleys": "upper_body",
-    "pullover": "upper_body", "pullovers": "upper_body",
-    "sweatshirt": "upper_body", "sweatshirts": "upper_body",
-    "fleece": "upper_body",
-    "parka": "upper_body", "parkas": "upper_body",
-    "windbreaker": "upper_body", "windbreakers": "upper_body",
-    "bomber": "upper_body", "bombers": "upper_body",
-    "denim jacket": "upper_body",
-    "leather jacket": "upper_body",
-    "puffer": "upper_body", "puffer jacket": "upper_body",
-    "down jacket": "upper_body",
-    "trench": "upper_body", "trench coat": "upper_body",
-    "poncho": "upper_body",
-    "cape": "upper_body",
-    "bolero": "upper_body",
-    "shrug": "upper_body",
-    "kimono": "upper_body",
-    "bodysuit": "upper_body", "bodysuits": "upper_body",
-    "corset": "upper_body",
-    "bustier": "upper_body",
-    "bralette": "upper_body",
-    "bottoms": "lower_body", "bottom": "lower_body",
-    "pants": "lower_body", "pant": "lower_body",
-    "jeans": "lower_body", "jean": "lower_body",
-    "denim": "lower_body",
-    "trousers": "lower_body", "trouser": "lower_body",
-    "shorts": "lower_body", "short": "lower_body",
-    "skirts": "lower_body", "skirt": "lower_body",
-    "leggings": "lower_body", "legging": "lower_body",
-    "joggers": "lower_body", "jogger": "lower_body",
-    "sweatpants": "lower_body", "sweatpant": "lower_body",
-    "chinos": "lower_body", "chino": "lower_body",
-    "khakis": "lower_body", "khaki": "lower_body",
-    "cargo pants": "lower_body", "cargo": "lower_body",
-    "culottes": "lower_body",
-    "capris": "lower_body", "capri": "lower_body",
-    "palazzo": "lower_body", "palazzo pants": "lower_body",
-    "wide leg pants": "lower_body",
-    "skinny jeans": "lower_body",
-    "straight jeans": "lower_body",
-    "flare pants": "lower_body",
-    "mini skirt": "lower_body",
-    "midi skirt": "lower_body",
-    "maxi skirt": "lower_body",
-    "pencil skirt": "lower_body",
-    "pleated skirt": "lower_body",
-    "bike shorts": "lower_body",
-    "bermuda": "lower_body", "bermudas": "lower_body",
-    "board shorts": "lower_body",
-    "swim trunks": "lower_body",
-    "dresses": "overall", "dress": "overall",
-    "one-piece": "overall", "onepiece": "overall",
-    "set": "overall", "sets": "overall",
-    "jumpsuit": "overall", "jumpsuits": "overall",
-    "romper": "overall", "rompers": "overall",
-    "overalls": "overall", "overall": "overall",
-    "playsuit": "overall", "playsuits": "overall",
-    "gown": "overall", "gowns": "overall",
-    "maxi dress": "overall",
-    "midi dress": "overall",
-    "mini dress": "overall",
-    "cocktail dress": "overall",
-    "evening dress": "overall",
-    "sundress": "overall", "sundresses": "overall",
-    "wrap dress": "overall",
-    "shirt dress": "overall",
-    "bodycon dress": "overall",
-    "a-line dress": "overall",
-    "suit": "overall", "suits": "overall",
-    "two-piece": "overall", "two piece": "overall",
-    "matching set": "overall",
-    "co-ord": "overall", "coord": "overall",
-    "tracksuit": "overall", "tracksuits": "overall",
-    "onesie": "overall",
-    "catsuit": "overall",
-    "unitard": "overall",
-    "auto": "upper_body"
-  };
-  rpCategory = categoryMap[(rpCategory || "").toLowerCase()] || "upper_body";
-  const body = {
-    input: {
-      model_image: dataUri,
-      garment_image: garmentUrl,
-      category: rpCategory
-    }
-  };
-  const response = await fetch(RUNPOD_BASE_URL + "/run", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + RUNPOD_API_KEY
-    },
-    body: JSON.stringify(body)
-  });
-  return await response.json();
-}
+CREATE INDEX IF NOT EXISTS idx_abandoned_shop ON abandoned_checkouts(shop_domain);
+CREATE INDEX IF NOT EXISTS idx_abandoned_date ON abandoned_checkouts(shopify_created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_abandoned_completed ON abandoned_checkouts(completed_at);
 
-async function pollRunPod(jobId) {
-  for (let i = 0; i < 120; i++) {
-    const response = await fetch(RUNPOD_BASE_URL + "/status/" + jobId, {
-      headers: { "Authorization": "Bearer " + RUNPOD_API_KEY }
-    });
-    const data = await response.json();
-    if (data.status === "COMPLETED") return data;
-    if (data.status === "FAILED") throw new Error(data.output?.error || "RunPod job failed");
-    await new Promise(resolve => setTimeout(resolve, 2000));
-  }
-  throw new Error("Timeout waiting for RunPod");
-}
-
-async function submitAndWaitRunPod(modelImage, garmentUrl, category) {
-  const data = await submitRunPod(modelImage, garmentUrl, category);
-  if (!data.id) throw new Error(data.error || "No job ID from RunPod");
-  console.log("  RunPod submitted, ID:", data.id);
-  const result = await pollRunPod(data.id);
-  if (result.output?.image) return result.output.image;
-  throw new Error("No output image from RunPod");
-}
-
-// === UNIFIED ===
-async function submitJob(dataUri, garmentUrl, category) {
-  if (BACKEND_MODE === "runpod") return await submitRunPod(dataUri, garmentUrl, category);
-  return await submitFashn(dataUri, garmentUrl, category);
-}
-
-async function submitAndWait(modelImage, garmentUrl, category) {
-  if (BACKEND_MODE === "runpod") return await submitAndWaitRunPod(modelImage, garmentUrl, category);
-  return await submitAndWaitFashn(modelImage, garmentUrl, category);
-}
-
-// ======================
-// TRY-ON ROUTES
-// ======================
-app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) => {
-  try {
-    console.log("=== NEW TRY-ON REQUEST [" + BACKEND_MODE + "] ===");
-    const ip = getRealIP(req);
-    const dailyLimit = parseDailyLimit(req.body.daily_limit);
-    console.log("User IP:", ip, "| Limit:", dailyLimit);
-
-    const shop = getShopFromRequest(req);
-    if (shop) {
-      const creditCheck = creditsSystem.checkAndUseCredit(shop, ip);
-      if (!creditCheck.allowed) {
-        if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-        if (creditCheck.reason === "not_found") {
-          return res.status(403).json({ error: "החנות לא רשומה במערכת. צרו קשר עם TryFit." });
-        }
-        return res.status(403).json({ error: "נגמרו הקרדיטים! צרו קשר לחידוש המנוי.", credits: 0 });
-      }
-      console.log("Shop:", shop, "| Credits remaining:", creditCheck.credits);
-    }
-
-    if (!checkRateLimit(ip, dailyLimit)) {
-      if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-      return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
-    }
-    let garmentImageUrl = req.body.garment_image_url;
-    if (garmentImageUrl && garmentImageUrl.startsWith("//")) {
-      garmentImageUrl = "https:" + garmentImageUrl;
-    }
-    const category = req.body.garment_category || req.body.category || "auto";
-    if (!req.file) return res.status(400).json({ error: "No model image uploaded" });
-    if (!garmentImageUrl) return res.status(400).json({ error: "No garment image URL" });
-    const imageBuffer = fs.readFileSync(req.file.path);
-    const base64Image = imageBuffer.toString("base64");
-    const mimeType = req.file.mimetype || "image/jpeg";
-    const dataUri = "data:" + mimeType + ";base64," + base64Image;
-    console.log("Category:", category);
-    console.log("Garment URL:", garmentImageUrl);
-
-    if (BACKEND_MODE === "runpod") {
-      const outputImage = await submitAndWaitRunPod(dataUri, garmentImageUrl, category);
-      if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-      res.json({
-        status: "completed",
-        output: [outputImage],
-        prediction_id: "runpod-direct"
-      });
-      // Save try-on event (data platform - 770 only)
-      saveTryOnEvent(shop, {
-        product_id: req.body.product_id,
-        product_title: req.body.product_title,
-        product_category: category,
-        product_price: req.body.product_price ? parseFloat(req.body.product_price) : null,
-        garment_url: garmentImageUrl,
-        result_url: outputImage,
-        ip_address: ip,
-        user_agent: req.headers["user-agent"],
-        identifier: req.body.identifier || ip,
-        session_id: req.body.session_id,
-        success: true
-      });
-    } else {
-      const data = await submitFashn(dataUri, garmentImageUrl, category);
-      console.log("FASHN response:", JSON.stringify(data));
-      if (data.id) {
-        res.json({ prediction_id: data.id });
-        // Save try-on event (data platform - 770 only)
-        saveTryOnEvent(shop, {
-          product_id: req.body.product_id,
-          product_title: req.body.product_title,
-          product_category: category,
-          product_price: req.body.product_price ? parseFloat(req.body.product_price) : null,
-          garment_url: garmentImageUrl,
-          ip_address: ip,
-          user_agent: req.headers["user-agent"],
-          identifier: req.body.identifier || ip,
-          session_id: req.body.session_id,
-          success: true
-        });
-      } else if (data.error) {
-        res.status(500).json({ error: data.error });
-      } else {
-        res.status(500).json({ error: "No prediction ID returned", details: data });
-      }
-      if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-    }
-  } catch (err) {
-    console.error("Generate error:", err);
-    if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, res) => {
-  try {
-    console.log("=== MULTI-IMAGE TRY-ON [" + BACKEND_MODE + "] ===");
-    const ip = getRealIP(req);
-    const dailyLimit = parseDailyLimit(req.body.daily_limit);
-    if (!checkRateLimit(ip, dailyLimit)) {
-      if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-      return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
-    }
-    if (!req.file) return res.status(400).json({ error: "No model image uploaded" });
-    const imageBuffer = fs.readFileSync(req.file.path);
-    const base64Image = imageBuffer.toString("base64");
-    const mimeType = req.file.mimetype || "image/jpeg";
-    const dataUri = "data:" + mimeType + ";base64," + base64Image;
-    let garmentUrls = [];
-    try { garmentUrls = JSON.parse(req.body.garment_image_urls); } catch(e) {}
-    let categories = [];
-    try { categories = JSON.parse(req.body.categories); } catch(e) {}
-    if (!garmentUrls.length) return res.status(400).json({ error: "No garment images provided" });
-    console.log("Garment URLs:", garmentUrls.length);
-    var results = [];
-    for (var i = 0; i < garmentUrls.length; i++) {
-      var gUrl = garmentUrls[i];
-      if (gUrl.startsWith("//")) gUrl = "https:" + gUrl;
-      var cat = categories[i] || "auto";
-
-      if (BACKEND_MODE === "runpod") {
-        try {
-          const outputImage = await submitAndWaitRunPod(dataUri, gUrl, cat);
-          results.push({ status: "completed", output: [outputImage], garment_url: gUrl, category: cat });
-        } catch (err) {
-          results.push({ error: err.message, garment_url: gUrl, category: cat });
-        }
-      } else {
-        var data = await submitFashn(dataUri, gUrl, cat);
-        if (data.id) {
-          results.push({ prediction_id: data.id, garment_url: gUrl, category: cat });
-        } else {
-          results.push({ error: data.error || "Failed", garment_url: gUrl, category: cat });
-        }
-      }
-    }
-    if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-
-    // Save try-on event per garment (data platform - 770 only)
-    const multiShop = getShopFromRequest(req);
-    if (multiShop) {
-      results.forEach((r, idx) => {
-        saveTryOnEvent(multiShop, {
-          product_category: categories[idx] || "auto",
-          garment_url: r.garment_url,
-          ip_address: ip,
-          user_agent: req.headers["user-agent"],
-          identifier: req.body.identifier || ip,
-          session_id: req.body.session_id,
-          success: !r.error,
-          error_message: r.error || null
-        });
-      });
-    }
-
-    res.json({ results: results });
-  } catch (err) {
-    console.error("Multi generate error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, res) => {
-  try {
-    console.log("=== CHAIN TRY-ON [" + BACKEND_MODE + "] ===");
-    const ip = getRealIP(req);
-    const dailyLimit = parseDailyLimit(req.body.daily_limit);
-    console.log("User IP:", ip, "| Limit:", dailyLimit);
-
-    const shop = getShopFromRequest(req);
-    console.log("Shop detected:", shop);
-    if (shop) {
-      const creditCheck = creditsSystem.checkAndUseCredit(shop, ip);
-      if (!creditCheck.allowed) {
-        if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-        if (creditCheck.reason === "not_found") {
-          return res.status(403).json({ error: "החנות לא רשומה במערכת. צרו קשר עם TryFit." });
-        }
-        return res.status(403).json({ error: "נגמרו הקרדיטים! צרו קשר לחידוש המנוי.", credits: 0 });
-      }
-      console.log("Shop:", shop, "| Credits remaining:", creditCheck.credits);
-    }
-
-    if (!checkRateLimit(ip, dailyLimit)) {
-      if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-      return res.status(429).json({ error: "הגעתם למגבלה היומית. חזרו מחר!" });
-    }
-    if (!req.file) return res.status(400).json({ error: "No model image" });
-    const imageBuffer = fs.readFileSync(req.file.path);
-    const base64Image = imageBuffer.toString("base64");
-    const mimeType = req.file.mimetype || "image/jpeg";
-    const dataUri = "data:" + mimeType + ";base64," + base64Image;
-    let garmentUrls = [];
-    try { garmentUrls = JSON.parse(req.body.garment_image_urls); } catch(e) {}
-    let categories = [];
-    try { categories = JSON.parse(req.body.categories); } catch(e) {}
-    if (!garmentUrls.length) return res.status(400).json({ error: "No garment images" });
-    garmentUrls = garmentUrls.map(u => u.startsWith("//") ? "https:" + u : u);
-    console.log("Chain steps:", garmentUrls.length);
-
-    let currentModelImage = dataUri;
-    let stepResults = [];
-    for (let i = 0; i < garmentUrls.length; i++) {
-      const cat = categories[i] || "auto";
-      console.log("--- Step", i + 1, "/", garmentUrls.length, "---");
-      try {
-        const outputUrl = await submitAndWait(currentModelImage, garmentUrls[i], cat);
-        stepResults.push({ step: i + 1, output_url: outputUrl, garment_url: garmentUrls[i] });
-        currentModelImage = outputUrl;
-      } catch (err) {
-        console.error("  Step", i + 1, "failed:", err.message);
-        stepResults.push({ step: i + 1, error: err.message, garment_url: garmentUrls[i] });
-      }
-    }
-    if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-    const finalOutput = stepResults.filter(r => r.output_url).pop();
-
-    // Save try-on event per garment (data platform - 770 only)
-    if (shop) {
-      let productIds = [];
-      let productTitles = [];
-      try { if (req.body.product_ids) productIds = JSON.parse(req.body.product_ids); } catch(e) {}
-      try { if (req.body.product_titles) productTitles = JSON.parse(req.body.product_titles); } catch(e) {}
-      
-      stepResults.forEach((step, idx) => {
-        saveTryOnEvent(shop, {
-          product_id: productIds[idx] || null,
-          product_title: productTitles[idx] || null,
-          product_category: categories[idx] || "auto",
-          garment_url: step.garment_url,
-          result_url: step.output_url || null,
-          ip_address: ip,
-          user_agent: req.headers["user-agent"],
-          identifier: req.body.identifier || ip,
-          session_id: req.body.session_id,
-          success: !!step.output_url,
-          error_message: step.error || null
-        });
-      });
-    }
-
-    res.json({
-      steps: stepResults,
-      final_output: finalOutput ? finalOutput.output_url : null,
-      total_steps: garmentUrls.length,
-      successful_steps: stepResults.filter(r => r.output_url).length
-    });
-  } catch (err) {
-    console.error("Chain error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/api/tryon/status/:id", async (req, res) => {
-  try {
-    const predictionId = req.params.id;
-
-    if (BACKEND_MODE === "runpod") {
-      const response = await fetch(RUNPOD_BASE_URL + "/status/" + predictionId, {
-        headers: { "Authorization": "Bearer " + RUNPOD_API_KEY }
-      });
-      const data = await response.json();
-      if (data.status === "COMPLETED") {
-        res.json({
-          status: "completed",
-          output: data.output?.image ? [data.output.image] : []
-        });
-      } else if (data.status === "FAILED") {
-        res.json({ status: "failed", error: data.output?.error || "Failed" });
-      } else {
-        res.json({ status: "processing" });
-      }
-    } else {
-      const response = await fetch("https://api.fashn.ai/v1/status/" + predictionId, {
-        headers: { "Authorization": "Bearer " + process.env.FASHN_API_KEY }
-      });
-      const data = await response.json();
-      res.json(data);
-    }
-  } catch (err) {
-    console.error("Status error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-app.post("/api/tryon/generate-video", async (req, res) => {
-  try {
-    console.log("=== VIDEO GENERATION REQUEST ===");
-    const { image_url } = req.body;
-    if (!image_url) return res.status(400).json({ error: "No image URL provided" });
-
-    const shop = getShopFromRequest(req);
-    if (shop) {
-      const creditCheck = creditsSystem.checkAndUseCredit(shop, getRealIP(req), 3);
-      if (!creditCheck.allowed) {
-        return res.status(403).json({ error: "אין מספיק קרדיטים לסרטון (3 קרדיטים)" });
-      }
-    }
-
-    console.log("Sending to FASHN Image-to-Video...");
-    const response = await fetch("https://api.fashn.ai/v1/run", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + process.env.FASHN_API_KEY
-      },
-      body: JSON.stringify({
-        model_name: "image-to-video",
-        inputs: {
-          image: image_url,
-          duration: 5,
-          resolution: "720p"
-        }
-      })
-    });
-
-    const data = await response.json();
-    if (!data.id) return res.status(500).json({ error: data.error || "No prediction ID" });
-    console.log("Video prediction ID:", data.id);
-    res.json({ prediction_id: data.id });
-  } catch (err) {
-    console.error("Video generation error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/api/tryon/video-status/:id", async (req, res) => {
-  try {
-    const statusRes = await fetch(`https://api.fashn.ai/v1/status/${req.params.id}`, {
-      headers: { Authorization: `Bearer ${process.env.FASHN_API_KEY}` },
-    });
-    const data = await statusRes.json();
-    if (data.status === "completed" && data.output) {
-      const videoUrl = Array.isArray(data.output) ? data.output[0] : (typeof data.output === "string" ? data.output : data.output.video);
-      res.json({ status: "completed", video_url: videoUrl });
-    } else {
-      res.json({ status: data.status || "processing", error: data.error });
-    }
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get("/api/tryon/video-proxy", async (req, res) => {
-  try {
-    const url = req.query.url;
-    if (!url) return res.status(400).json({ error: "Missing url" });
-    const videoRes = await fetch(url);
-    if (!videoRes.ok) return res.status(502).json({ error: "Failed to fetch video" });
-    res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    const buffer = await videoRes.arrayBuffer();
-    res.send(Buffer.from(buffer));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-// === COMPLIANCE WEBHOOKS (HMAC VERIFIED) ===
-app.post("/webhooks/compliance", verifyShopifyWebhook, (req, res) => {
-  console.log("Compliance webhook received:", JSON.stringify(req.body).substring(0, 200));
-  res.status(200).json({ success: true });
-});
-
-app.post("/webhooks/app/uninstalled", verifyShopifyWebhook, (req, res) => {
-  console.log("App uninstalled:", req.body?.shop_domain || "unknown");
-  res.status(200).json({ success: true });
-});
-
-app.post("/webhooks/app/scopes_update", verifyShopifyWebhook, (req, res) => {
-  console.log("Scopes update:", req.body?.shop_domain || "unknown");
-  res.status(200).json({ success: true });
-});
-
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, async () => {
-  console.log("Server running on port " + PORT);
-  console.log("Backend mode:", BACKEND_MODE.toUpperCase());
-  if (BACKEND_MODE === "fashn") {
-    console.log("FASHN API Key loaded:", process.env.FASHN_API_KEY ? "YES" : "NO");
-  } else {
-    console.log("RunPod Endpoint:", RUNPOD_ENDPOINT_ID);
-  }
-  console.log("Credits system: ACTIVE");
-  console.log("Admin dashboard: /admin");
-  
-  // ========== Data Platform Initialization ==========
-  console.log("\n--- Data Platform Initialization ---");
-  console.log("Data collection enabled for:", featureFlags.getDataCollectionShops().join(", "));
-  
-  if (process.env.DATABASE_URL) {
-    const connected = await db.testConnection();
-    if (connected) {
-      await db.initializeSchema();
-      console.log("Data platform: READY");
-      
-      // Verify Shopify API connectivity for each enabled shop
-      const enabledShops = featureFlags.getDataCollectionShops();
-      for (const shop of enabledShops) {
-        if (shopify.hasTokenForShop(shop)) {
-          const verify = await shopify.verifyConnection(shop);
-          if (verify.connected) {
-            console.log(`✅ Shopify API: Connected to ${shop} (${verify.shopName})`);
-          } else {
-            console.log(`⚠️  Shopify API: Failed for ${shop} - ${verify.reason}`);
-          }
-        } else {
-          console.log(`⚠️  Shopify API: No token configured for ${shop}`);
-        }
-      }
-    } else {
-      console.log("⚠️  Data platform: DISABLED (DB connection failed, TryFit continues working normally)");
-    }
-  } else {
-    console.log("⚠️  DATABASE_URL not configured, data platform disabled");
-  }
-// ========== Product Catalog Sync (every 6 hours) ==========
-  if (process.env.DATABASE_URL) {
-    const PRODUCT_SYNC_SHOP = "seven770.myshopify.com";
-    const runProductSync = async () => {
-      if (!shopify.hasTokenForShop(PRODUCT_SYNC_SHOP)) return;
-      try {
-        const r = await shopify.syncProducts(PRODUCT_SYNC_SHOP);
-        console.log("🔄 [Products] Scheduled sync:", JSON.stringify(r));
-      } catch (e) {
-        console.error("⚠️  [Products] Scheduled sync failed:", e.message);
-      }
-    };
-    // Run once at startup (delayed 30s so the server is fully up), then every 6h
-    setTimeout(runProductSync, 30000);
-    setInterval(runProductSync, 6 * 60 * 60 * 1000);
-    console.log("🔄 Product catalog sync scheduled (every 6h)");
-  }
-  console.log("---\n");
-});
+INSERT INTO shops (shop_domain, display_name, data_collection_enabled, installed_at)
+VALUES ('seven770.myshopify.com', 'Seven770 (Demo)', TRUE, NOW())
+ON CONFLICT (shop_domain) DO UPDATE
+SET data_collection_enabled = TRUE;
