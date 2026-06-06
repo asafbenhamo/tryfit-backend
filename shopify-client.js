@@ -973,6 +973,86 @@ async function syncAbandonedCheckouts(shopDomain) {
   }
 }
 
+/**
+ * Create a real discount code in Shopify.
+ * Creates a price_rule (the discount logic) + a discount_code (the code customers type).
+ * percentage: e.g. 10 for 10% off. days_valid: how long the code is active.
+ * Returns { ok, code, price_rule_id, discount_code_id } or { ok:false, error }.
+ */
+async function createDiscountCode(shopDomain, opts = {}) {
+  if (!hasTokenForShop(shopDomain)) {
+    return { ok: false, error: 'no_token' };
+  }
+  const token = getTokenForShop(shopDomain);
+  const base = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}`;
+  const headers = { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' };
+
+  const code = (opts.code || `SAVE${Math.floor(Math.random() * 9000 + 1000)}`).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const percentage = Math.min(Math.max(parseFloat(opts.percentage) || 10, 1), 90);
+  const daysValid = parseInt(opts.days_valid) || 30;
+  const startsAt = new Date();
+  const endsAt = new Date(Date.now() + daysValid * 24 * 60 * 60 * 1000);
+
+  let priceRuleId = null;
+  try {
+    // Step 1: create the price rule (the discount definition)
+    const prBody = {
+      price_rule: {
+        title: opts.title || `יועץ: ${code}`,
+        target_type: 'line_item',
+        target_selection: 'all',
+        allocation_method: 'across',
+        value_type: 'percentage',
+        value: `-${percentage}.0`,
+        customer_selection: 'all',
+        once_per_customer: true,
+        usage_limit: opts.usage_limit || null,
+        starts_at: startsAt.toISOString(),
+        ends_at: endsAt.toISOString()
+      }
+    };
+    const prRes = await fetch(`${base}/price_rules.json`, {
+      method: 'POST', headers, body: JSON.stringify(prBody)
+    });
+    if (prRes.status !== 201) {
+      const txt = await prRes.text();
+      return { ok: false, error: `price_rule failed (${prRes.status}): ${txt.substring(0, 150)}`,
+               needs_scope: prRes.status === 403 };
+    }
+    const prData = await prRes.json();
+    priceRuleId = prData.price_rule.id;
+
+    // Step 2: attach the actual code to the price rule
+    const dcRes = await fetch(`${base}/price_rules/${priceRuleId}/discount_codes.json`, {
+      method: 'POST', headers, body: JSON.stringify({ discount_code: { code } })
+    });
+    if (dcRes.status !== 201) {
+      const txt = await dcRes.text();
+      // Roll back the price rule so we don't leave an orphan
+      try { await fetch(`${base}/price_rules/${priceRuleId}.json`, { method: 'DELETE', headers }); } catch (e) {}
+      return { ok: false, error: `discount_code failed (${dcRes.status}): ${txt.substring(0, 150)}` };
+    }
+    const dcData = await dcRes.json();
+
+    console.log(`🎟️  [Coupon] Created ${code} (${percentage}% off, ${daysValid}d) for ${shopDomain}`);
+    return {
+      ok: true,
+      code,
+      percentage,
+      days_valid: daysValid,
+      ends_at: endsAt.toISOString(),
+      price_rule_id: priceRuleId,
+      discount_code_id: dcData.discount_code.id
+    };
+  } catch (err) {
+    if (priceRuleId) {
+      try { await fetch(`${base}/price_rules/${priceRuleId}.json`, { method: 'DELETE', headers }); } catch (e) {}
+    }
+    console.error(`❌ [Coupon] createDiscountCode failed:`, err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   hasTokenForShop,
   getTokenForShop,
@@ -993,5 +1073,6 @@ module.exports = {
   syncProducts,
   getAllAbandonedCheckouts,
   saveAbandonedCheckout,
-  syncAbandonedCheckouts
+  syncAbandonedCheckouts,
+  createDiscountCode
 };

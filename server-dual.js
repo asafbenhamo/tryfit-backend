@@ -545,6 +545,58 @@ app.get("/api/insights", async (req, res) => {
   }
 });
 
+// ======================
+// ACTIONS: Create a real discount coupon (merchant-approved)
+// ======================
+app.post("/api/coupon/create", express.json(), async (req, res) => {
+  try {
+    const { password, percentage, code, days_valid, title, usage_limit } = req.body;
+    if (password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "גישה נדחתה" });
+    }
+    const shop = "seven770.myshopify.com";
+    const result = await shopify.createDiscountCode(shop, {
+      percentage, code, days_valid, title, usage_limit
+    });
+    if (!result.ok) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err) {
+    console.error("Coupon create error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ======================
+// ACTIONS: Send an email (merchant-approved)
+// ======================
+const mailer = require("./mailer");
+
+app.post("/api/send-email", express.json(), async (req, res) => {
+  try {
+    const { password, to, subject, body, cta_url, cta_label } = req.body;
+    if (password !== ADMIN_PASSWORD) {
+      return res.status(401).json({ error: "גישה נדחתה" });
+    }
+    if (!mailer.isConfigured()) {
+      return res.status(400).json({ ok: false, error: "שירות המייל לא מוגדר עדיין (חסר RESEND_API_KEY)" });
+    }
+    if (!to || !subject || !body) {
+      return res.status(400).json({ ok: false, error: "חסר נמען / נושא / תוכן" });
+    }
+    const html = mailer.buildHtmlEmail(body, { cta_url, cta_label, brand: "770" });
+    const result = await mailer.sendEmail({ to, subject, html, text: body });
+    if (!result.ok) {
+      return res.status(400).json(result);
+    }
+    res.json(result);
+  } catch (err) {
+    console.error("Send email error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // PWA: manifest + icons
 app.get("/manifest.json", (req, res) => {
   res.sendFile(__dirname + "/manifest.json");
