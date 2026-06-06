@@ -95,7 +95,8 @@
   .typing .dots span:nth-child(2){ animation-delay: 0.18s; }
   .typing .dots span:nth-child(3){ animation-delay: 0.36s; }
   @keyframes bounce { 0%,60%,100%{transform:translateY(0); opacity:0.5;} 30%{transform:translateY(-6px); opacity:1;} }
-  .typing .txt { font-size: 13px; color: var(--text-dim); }
+  .typing .txt { font-size: 13px; color: var(--text-dim); transition: opacity 0.3s; animation: fadeStage 0.4s ease; }
+  @keyframes fadeStage { from { opacity: 0.3; } to { opacity: 1; } }
   .composer {
     padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
     background: var(--bg); border-top: 1px solid var(--border);
@@ -237,15 +238,41 @@
     scrollDown();
     return bubble;
   }
+  let typingTimer = null;
+  const THINKING_STAGES = [
+    'קורא את השאלה...',
+    'שולף נתונים מהחנות...',
+    'מנתח לקוחות והזמנות...',
+    'בודק מה במלאי...',
+    'מחבר את התובנות...',
+    'מנסח לך תשובה...'
+  ];
   function showTyping() {
     const row = document.createElement('div');
     row.className = 'row ai';
     row.id = 'typing-msg';
-    row.innerHTML = '<div class="bubble"><div class="typing"><div class="dots"><span></span><span></span><span></span></div><div class="txt">חושב על זה...</div></div></div>';
+    row.innerHTML = '<div class="bubble"><div class="typing"><div class="dots"><span></span><span></span><span></span></div><div class="txt" id="typing-txt">' + THINKING_STAGES[0] + '</div></div></div>';
     $('messages').appendChild(row);
     scrollDown();
+    // Advance through stages: first few quickly, then linger on the last.
+    let stage = 0;
+    const advance = () => {
+      stage++;
+      const txt = $('typing-txt');
+      if (!txt) return;
+      if (stage < THINKING_STAGES.length) {
+        txt.textContent = THINKING_STAGES[stage];
+        // Earlier stages move faster; later ones slower so it doesn't race ahead.
+        const delay = stage < 3 ? 1100 : 2200;
+        typingTimer = setTimeout(advance, delay);
+      }
+    };
+    typingTimer = setTimeout(advance, 1100);
   }
-  function removeTyping() { const t = $('typing-msg'); if (t) t.remove(); }
+  function removeTyping() {
+    if (typingTimer) { clearTimeout(typingTimer); typingTimer = null; }
+    const t = $('typing-msg'); if (t) t.remove();
+  }
   function scrollDown() {
     const m = $('messages');
     requestAnimationFrame(() => { m.scrollTop = m.scrollHeight; });
