@@ -254,7 +254,7 @@ app.post("/api/consent", express.json(), async (req, res) => {
 // ======================
 // DATA PLATFORM: Admin backfill endpoint
 // ======================
-const ADMIN_PASSWORD = "tryfit2026";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "tryfit2026";
 const backfillStatus = {};
 
 app.get("/admin/backfill", (req, res) => {
