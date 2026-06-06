@@ -722,6 +722,48 @@ app.get("/admin/diagnose-checkouts", async (req, res) => {
 
   res.json({ ok: true, diagnostics: out });
 });
+
+// ======================
+// TEMPORARY: Test discount/coupon API access
+// ======================
+app.get("/admin/test-discounts", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = "seven770.myshopify.com";
+  const token = process.env.SHOPIFY_770_TOKEN;
+  if (!token) return res.json({ ok: false, reason: "no token" });
+
+  const base = `https://${shop}/admin/api/2026-01`;
+  const headers = { "X-Shopify-Access-Token": token, "Content-Type": "application/json" };
+  const out = {};
+
+  // READ test: list existing price rules (needs read_price_rules)
+  try {
+    const r = await fetch(`${base}/price_rules.json?limit=1`, { headers });
+    out.read_price_rules = {
+      status: r.status,
+      access: r.status === 200 ? "GRANTED" : "DENIED",
+      count: r.status === 200 ? ((await r.json()).price_rules || []).length : null
+    };
+  } catch (e) { out.read_price_rules = { error: e.message }; }
+
+  // WRITE capability is inferred: if read works, write usually shares the scope,
+  // but the true test is creating one. We do NOT create here to avoid junk data.
+  // Instead we report what scopes the token reports (if the endpoint allows).
+  try {
+    const r = await fetch(`${base}/oauth/access_scopes.json`, { headers });
+    if (r.status === 200) {
+      const body = await r.json();
+      out.granted_scopes = (body.access_scopes || []).map(s => s.handle);
+    } else {
+      out.granted_scopes = `could not read scopes (status ${r.status})`;
+    }
+  } catch (e) { out.granted_scopes = { error: e.message }; }
+
+  res.json({ ok: true, diagnostics: out });
+});
 app.get("/admin/test-checkouts", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
