@@ -18,7 +18,14 @@ app.use(cors({
   methods: ["GET", "POST", "OPTIONS", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"]
 }));
-app.use(express.json());
+// Global JSON parser — but SKIP checkout webhook paths, which need the raw
+// body for HMAC verification (handled by express.raw on those routes).
+app.use((req, res, next) => {
+  if (req.path === "/webhooks/checkouts/create" || req.path === "/webhooks/checkouts/update") {
+    return next();
+  }
+  return express.json()(req, res, next);
+});
 
 // ======================
 // BACKEND MODE: "fashn" or "runpod"
@@ -1334,6 +1341,103 @@ app.post("/webhooks/app/uninstalled", verifyShopifyWebhook, (req, res) => {
 app.post("/webhooks/app/scopes_update", verifyShopifyWebhook, (req, res) => {
   console.log("Scopes update:", req.body?.shop_domain || "unknown");
   res.status(200).json({ success: true });
+});
+
+// === CHECKOUT WEBHOOKS (abandoned cart capture, real-time, saved forever) ===
+// Uses express.raw so we can verify the HMAC against the EXACT bytes Shopify
+// signed (JSON.stringify would re-serialize and break verification).
+function handleCheckoutWebhook(req, res) {
+  try {
+    const hmacHeader = req.headers["x-shopify-hmac-sha256"];
+    const secret = process.env.SHOPIFY_API_SECRET || "";
+    const rawBody = req.body; // Buffer (from express.raw)
+
+    if (!hmacHeader || !secret) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const hash = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
+    if (hash !== hmacHeader) {
+      console.log("⚠️  [Webhook] Checkout HMAC mismatch - rejected");
+      return res.status(401).json({ error: "Invalid HMAC" });
+    }
+
+    // Respond 200 immediately (Shopify requires fast ack), then save in background.
+    res.status(200).json({ success: true });
+
+    const shopDomain = req.headers["x-shopify-shop-domain"] || "seven770.myshopify.com";
+    let checkout;
+    try {
+      checkout = JSON.parse(rawBody.toString("utf8"));
+    } catch (e) {
+      console.error("⚠️  [Webhook] Could not parse checkout body:", e.message);
+      return;
+    }
+
+    setImmediate(async () => {
+      try {
+        const saved = await shopify.saveAbandonedCheckout(shopDomain, checkout);
+        if (saved) {
+          console.log(`🛒 [Webhook] Abandoned checkout saved: ${checkout.id} (${checkout.email || 'no email'}, ${checkout.total_price || '?'} ${checkout.currency || ''})`);
+        }
+      } catch (err) {
+        console.error("⚠️  [Webhook] Failed to save checkout:", err.message);
+      }
+    });
+  } catch (err) {
+    console.error("Checkout webhook error:", err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+}
+
+app.post("/webhooks/checkouts/create", express.raw({ type: "application/json" }), handleCheckoutWebhook);
+app.post("/webhooks/checkouts/update", express.raw({ type: "application/json" }), handleCheckoutWebhook);
+
+// === Register checkout webhooks with Shopify (TEMPORARY - call once) ===
+app.get("/admin/register-webhooks", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = "seven770.myshopify.com";
+  const token = process.env.SHOPIFY_770_TOKEN;
+  if (!token) return res.json({ ok: false, reason: "no token" });
+
+  const baseUrl = "https://tryfit-backend-production.up.railway.app";
+  const topics = [
+    { topic: "checkouts/create", address: `${baseUrl}/webhooks/checkouts/create` },
+    { topic: "checkouts/update", address: `${baseUrl}/webhooks/checkouts/update` }
+  ];
+
+  const results = [];
+  for (const t of topics) {
+    try {
+      const r = await fetch(`https://${shop}/admin/api/2026-01/webhooks.json`, {
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ webhook: { topic: t.topic, address: t.address, format: "json" } })
+      });
+      const body = await r.json();
+      results.push({
+        topic: t.topic,
+        status: r.status,
+        result: r.status === 201 ? "created" : (body.errors || body)
+      });
+    } catch (err) {
+      results.push({ topic: t.topic, error: err.message });
+    }
+  }
+
+  // Also list all currently registered webhooks for confirmation.
+  let existing = [];
+  try {
+    const lr = await fetch(`https://${shop}/admin/api/2026-01/webhooks.json`, {
+      headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" }
+    });
+    const lb = await lr.json();
+    existing = (lb.webhooks || []).map(w => ({ id: w.id, topic: w.topic, address: w.address }));
+  } catch (e) {}
+
+  res.json({ ok: true, registered: results, all_webhooks: existing });
 });
 
 const PORT = process.env.PORT || 3001;
