@@ -89,9 +89,9 @@ async function detectLowStockBestsellers(shop) {
     );
     return r.rows.map(p => ({
       type: 'low_stock_bestseller',
-      priority: 2,
-      title: `מוצר חם עומד להיגמר: ${p.title}`,
-      detail: `נמכרו ${p.units_sold} יחידות ב-30 יום, נשארו רק ${p.total_inventory} במלאי. שווה להזמין לפני שייגמר.`,
+      priority: 3,
+      title: `מוכר חזק ועומד להיגמר: ${p.title}`,
+      detail: `נמכרו ${p.units_sold} יחידות ב-30 יום (קצב מהיר), נשארו רק ${p.total_inventory}. כל יום שאזל = מכירות שאתה מפסיד. שווה לחדש מלאי עכשיו.`,
       action_hint: 'reorder',
       data: {
         title: p.title, units_sold: p.units_sold,
@@ -181,8 +181,13 @@ async function getInsights(shop) {
     detectSalesShift(shop)
   ]);
 
-  // Merge, sort by priority (1 = most important), cap to top 6.
-  const all = [...vips, ...lowStock, ...abandoned, ...shift]
+  // Balance: lead with money-direct opportunities (abandoned carts, dormant VIPs),
+  // which are about recovering/closing revenue NOW - not just inventory info.
+  // Cap inventory alerts so they don't flood the list.
+  const moneyDirect = [...abandoned, ...vips];          // recover/close revenue now
+  const supporting = [...shift, ...lowStock.slice(0, 2)]; // context + at most 2 stock alerts
+
+  const all = [...moneyDirect, ...supporting]
     .sort((a, b) => a.priority - b.priority)
     .slice(0, 6);
 
