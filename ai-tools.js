@@ -625,6 +625,41 @@ async function getProductVariants(shopDomain, options = {}) {
   });
 }
 
+// ---------- 17. getCustomerSizes ----------
+// What sizes/variants a customer actually bought before. Critical for building
+// a personalized cart that only includes items in HER size that are in stock.
+async function getCustomerSizes(shopDomain, options = {}) {
+  return safe('getCustomerSizes', async () => {
+    const { email } = options;
+    if (!email) return { found: false, reason: 'no email' };
+    const cust = await db.query(
+      `SELECT shopify_customer_id FROM store_customers
+       WHERE shop_domain = $1 AND email = $2 LIMIT 1`,
+      [shopDomain, email]
+    );
+    if (cust.rows.length === 0) return { found: false };
+
+    const sizes = await db.query(
+      `SELECT i.variant_title, COUNT(*)::int AS times_bought
+       FROM store_order_items i
+       JOIN store_orders o
+         ON o.shopify_order_id = i.shopify_order_id AND o.shop_domain = i.shop_domain
+       WHERE i.shop_domain = $1
+         AND o.shopify_customer_id = $2
+         AND i.variant_title IS NOT NULL AND i.variant_title <> ''
+       GROUP BY i.variant_title
+       ORDER BY times_bought DESC`,
+      [shopDomain, cust.rows[0].shopify_customer_id]
+    );
+    // Extract just the size tokens (e.g. "M / שחור" -> "M", "L" etc.) for guidance
+    return {
+      found: true,
+      purchased_variants: sizes.rows,
+      note: 'these are the exact variant labels (size/color) the customer bought before. Only add items to her cart in a size she has bought, and only if that variant is in stock (check getProductVariants).'
+    };
+  });
+}
+
 module.exports = {
   getTopCustomers,
   getDormantCustomers,
@@ -641,5 +676,6 @@ module.exports = {
   getAbandonedCheckouts,
   getCrossSellData,
   getCampaignPerformance,
-  getProductVariants
+  getProductVariants,
+  getCustomerSizes
 };

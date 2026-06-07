@@ -878,10 +878,34 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
       return res.status(400).json({ ok: false, error: "בניית העגלה נכשלה: " + draft.error, needs_scope: draft.needs_scope });
     }
 
-    const payUrl = draft.invoice_url;
-    let finalBody = (message_body || "") + `\n\nלחצי כאן לתשלום מהיר ומאובטח:\n${payUrl}`;
+    // Create a personal coupon so the discount works on the EDITABLE cart link too,
+    // and so we can close the loop by code when she buys. Build a unique code.
+    let cartCoupon = null;
+    if (discount_percentage) {
+      const namePart = (customer_name || (email ? email.split("@")[0] : "") || "VIP").replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8) || "VIP";
+      const suffix = Math.floor(Math.random() * 900 + 100);
+      const c = await shopify.createDiscountCode(shop, {
+        percentage: discount_percentage,
+        code: `${namePart}${discount_percentage}${suffix}`,
+        days_valid: 14,
+        title: `יועץ: עגלה מותאמת - ${customer_name || email || ''}`
+      });
+      if (c.ok) cartCoupon = c.code;
+    }
 
-    const result = { ok: true, steps: { cart: { ok: true, total: draft.total, pay_url: payUrl } } };
+    const payUrl = draft.invoice_url;
+    // Also build an EDITABLE cart permalink (customer can change items/sizes/add more).
+    let editableCartUrl = null;
+    try {
+      const cartParts = items.map(it => `${it.variant_id}:${it.quantity || 1}`).join(',');
+      editableCartUrl = `https://sevenseventy.co.il/cart/${cartParts}`;
+      if (cartCoupon) editableCartUrl += `?discount=${encodeURIComponent(cartCoupon)}`;
+    } catch (e) {}
+
+    const linkForMessage = editableCartUrl || payUrl;
+    let finalBody = (message_body || "") + `\n\nהעגלה מחכה לך - אפשר לשנות, להוסיף, ולסיים את ההזמנה כאן:\n${linkForMessage}`;
+
+    const result = { ok: true, steps: { cart: { ok: true, total: draft.total, pay_url: payUrl, editable_url: editableCartUrl, coupon: cartCoupon } } };
 
     // 2. Send via WhatsApp (if phone) else email
     const hasPhone = phone && String(phone).trim().length >= 8;
@@ -896,7 +920,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
         return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
       }
       const html = mailer.buildHtmlEmail(message_body || "הכנו לך עגלה אישית!", {
-        cta_url: payUrl, cta_label: "לתשלום מהיר", brand: "770", to: email
+        cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: "770", to: email
       });
       const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
       if (!sent.ok) return res.status(400).json({ ok: false, error: "שליחת המייל נכשלה: " + sent.error });
@@ -907,9 +931,9 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
 
     // 3. Log
     await db.query(
-      `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details)
-       VALUES ($1, 'personalized_cart', $2, $3, $4)`,
-      [shop, email || null, phone || null, JSON.stringify({ draft_order_id: draft.draft_order_id, total: draft.total })]
+      `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+       VALUES ($1, 'personalized_cart', $2, $3, $4, $5)`,
+      [shop, email || null, phone || null, JSON.stringify({ draft_order_id: draft.draft_order_id, total: draft.total }), cartCoupon]
     ).catch(e => console.error("log:", e.message));
 
     res.json(result);
@@ -1929,6 +1953,31 @@ function handleOrderWebhook(req, res) {
           if (r.rows.length > 0) {
             closedByCoupon = true;
             console.log(`💰 [Loop closed - coupon] ${code} converted! +${orderTotal}₪ (action ${r.rows[0].id})`);
+          }
+        }
+
+        // --- Attribution 1.5: by draft order id (personalized carts) ---
+        // Orders created from our draft order carry source/draft info.
+        const draftId = order.source_identifier || (order.note_attributes || []).find(a => a.name === 'draft_order_id')?.value || null;
+        if (!closedByCoupon && order.source_name === 'draft_order') {
+          // Match a pending personalized_cart action by the buyer's email/phone
+          const r = await db.query(
+            `UPDATE advisor_actions
+             SET outcome = 'converted', attributed_revenue = $4, closed_at = NOW(),
+                 details = details || '{"attribution":"draft_order"}'::jsonb
+             WHERE id = (
+               SELECT id FROM advisor_actions
+               WHERE shop_domain = $1 AND action_type = 'personalized_cart' AND outcome = 'pending'
+                 AND ( ($2::text IS NOT NULL AND lower(target_email) = $2)
+                    OR ($3::text IS NOT NULL AND regexp_replace(target_phone,'[^0-9]','','g') = $3) )
+               ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
+             )
+             RETURNING id`,
+            [shopDomain, buyerEmail, buyerPhone, orderTotal]
+          );
+          if (r.rows.length > 0) {
+            closedByCoupon = true; // mark handled
+            console.log(`💰 [Loop closed - draft cart] +${orderTotal}₪ (action ${r.rows[0].id})`);
           }
         }
 
