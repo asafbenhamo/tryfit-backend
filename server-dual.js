@@ -21,7 +21,7 @@ app.use(cors({
 // Global JSON parser — but SKIP checkout webhook paths, which need the raw
 // body for HMAC verification (handled by express.raw on those routes).
 app.use((req, res, next) => {
-  if (req.path === "/webhooks/checkouts/create" || req.path === "/webhooks/checkouts/update") {
+  if (req.path === "/webhooks/checkouts/create" || req.path === "/webhooks/checkouts/update" || req.path === "/webhooks/orders/create") {
     return next();
   }
   return express.json()(req, res, next);
@@ -675,6 +675,38 @@ app.get("/unsubscribe", async (req, res) => {
 app.get("/api/working-hours", (req, res) => {
   if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
   res.json(compliance.workingHoursStatus());
+});
+
+// ======================
+// STATS: how much money the advisor has made (live counter)
+// Only counts CONVERTED actions - credit only for what the advisor truly closed.
+// ======================
+app.get("/api/advisor-stats", async (req, res) => {
+  try {
+    if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const r = await db.query(
+      `SELECT
+         COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome = 'converted'), 0)::numeric(12,2) AS total_revenue,
+         COUNT(*) FILTER (WHERE outcome = 'converted')::int AS conversions,
+         COUNT(*)::int AS total_actions,
+         COUNT(*) FILTER (WHERE outcome = 'pending')::int AS pending
+       FROM advisor_actions
+       WHERE shop_domain = $1`,
+      [shop]
+    );
+    const row = r.rows[0] || {};
+    res.json({
+      ok: true,
+      total_revenue: Math.round(parseFloat(row.total_revenue || 0)),
+      conversions: row.conversions || 0,
+      total_actions: row.total_actions || 0,
+      pending: row.pending || 0
+    });
+  } catch (err) {
+    console.error("Advisor stats error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // ======================
@@ -1750,6 +1782,62 @@ function handleCheckoutWebhook(req, res) {
 app.post("/webhooks/checkouts/create", express.raw({ type: "application/json" }), handleCheckoutWebhook);
 app.post("/webhooks/checkouts/update", express.raw({ type: "application/json" }), handleCheckoutWebhook);
 
+// === ORDER WEBHOOK: close the loop on advisor-created coupons ===
+// When an order comes in that used a coupon the advisor created, mark that
+// action as converted and attribute the revenue. This powers the live counter.
+function handleOrderWebhook(req, res) {
+  try {
+    const hmacHeader = req.headers["x-shopify-hmac-sha256"];
+    const secret = process.env.SHOPIFY_API_SECRET || "";
+    const rawBody = req.body;
+    if (!hmacHeader || !secret) return res.status(401).json({ error: "Unauthorized" });
+    const hash = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
+    if (hash !== hmacHeader) {
+      console.log("⚠️  [Webhook] Order HMAC mismatch - rejected");
+      return res.status(401).json({ error: "Invalid HMAC" });
+    }
+    res.status(200).json({ success: true });
+
+    const shopDomain = req.headers["x-shopify-shop-domain"] || "seven770.myshopify.com";
+    let order;
+    try { order = JSON.parse(rawBody.toString("utf8")); } catch (e) { return; }
+
+    setImmediate(async () => {
+      try {
+        // Collect discount codes used on this order
+        const codes = (order.discount_codes || []).map(d => (d.code || "").toUpperCase()).filter(Boolean);
+        if (codes.length === 0) return;
+
+        const orderTotal = parseFloat(order.total_price || order.current_total_price || 0);
+
+        // Find any advisor action with a matching coupon that's still pending
+        for (const code of codes) {
+          const r = await db.query(
+            `UPDATE advisor_actions
+             SET outcome = 'converted',
+                 attributed_revenue = $3,
+                 closed_at = NOW()
+             WHERE shop_domain = $1
+               AND coupon_code = $2
+               AND outcome = 'pending'
+             RETURNING id`,
+            [shopDomain, code, orderTotal]
+          );
+          if (r.rows.length > 0) {
+            console.log(`💰 [Loop closed] Coupon ${code} converted! +${orderTotal}₪ attributed to advisor (action ${r.rows[0].id})`);
+          }
+        }
+      } catch (err) {
+        console.error("⚠️  [Webhook] Order loop-close failed:", err.message);
+      }
+    });
+  } catch (err) {
+    console.error("Order webhook error:", err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
+}
+app.post("/webhooks/orders/create", express.raw({ type: "application/json" }), handleOrderWebhook);
+
 // === Register checkout webhooks with Shopify (TEMPORARY - call once) ===
 app.get("/admin/register-webhooks", async (req, res) => {
   const password = req.query.password;
@@ -1763,7 +1851,8 @@ app.get("/admin/register-webhooks", async (req, res) => {
   const baseUrl = "https://tryfit-backend-production.up.railway.app";
   const topics = [
     { topic: "checkouts/create", address: `${baseUrl}/webhooks/checkouts/create` },
-    { topic: "checkouts/update", address: `${baseUrl}/webhooks/checkouts/update` }
+    { topic: "checkouts/update", address: `${baseUrl}/webhooks/checkouts/update` },
+    { topic: "orders/create", address: `${baseUrl}/webhooks/orders/create` }
   ];
 
   const results = [];
