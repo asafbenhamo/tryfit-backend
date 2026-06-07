@@ -527,6 +527,23 @@ app.get("/chat", (req, res) => {
 });
 
 // ======================
+// DAILY SUMMARY: the advisor's morning briefing (principle 5)
+// ======================
+const dailySummary = require("./daily-summary");
+
+app.get("/api/daily-summary", async (req, res) => {
+  try {
+    if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const result = await dailySummary.getDailySummary(shop);
+    res.json(result);
+  } catch (err) {
+    console.error("Daily summary error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ======================
 // INSIGHTS: Proactive opportunities (shown on chat open)
 // ======================
 const insightsEngine = require("./insights-engine");

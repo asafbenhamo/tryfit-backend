@@ -155,6 +155,22 @@
   .welcome p { font-size: 14.5px; color: var(--text-dim); line-height: 1.6; max-width: 300px; }
   .insights-wrap { width: 100%; max-width: 620px; margin: 0 auto; padding: 8px 14px 4px; }
   .insights-head { font-size: 15px; font-weight: 700; color: var(--text); margin: 6px 4px 12px; display: flex; align-items: center; gap: 7px; }
+  .summary-card {
+    width: 100%; max-width: 620px; margin: 0 auto 6px; padding: 18px 18px 14px;
+    background: linear-gradient(160deg, #f8faff, #eef4ff);
+    border: 1px solid #dbe6fb; border-radius: 18px;
+    animation: rise 0.4s cubic-bezier(0.16,1,0.3,1);
+  }
+  .summary-greeting { font-size: 16px; font-weight: 800; color: #0a2540; margin-bottom: 4px; }
+  .summary-sub { font-size: 12.5px; color: var(--text-dim); margin-bottom: 14px; }
+  .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 6px; }
+  .summary-stat {
+    background: #fff; border: 1px solid #e8eefb; border-radius: 12px; padding: 10px 12px;
+  }
+  .summary-stat .num { font-size: 19px; font-weight: 800; color: #0a6fe0; line-height: 1.1; }
+  .summary-stat .num.green { color: #16a34a; }
+  .summary-stat .lbl { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+  .summary-line { font-size: 13px; color: #44505f; margin-top: 8px; line-height: 1.5; }
   .insight-card {
     background: var(--bg-soft); border: 1px solid var(--border-strong);
     border-radius: 16px; padding: 14px 16px; margin-bottom: 10px;
@@ -354,9 +370,48 @@
     $('main').style.display = 'flex';
     $('input').focus();
     loadConvoList();
+    loadDailySummary();
     loadInsights();
     loadMoneyCounter();
     setInterval(loadMoneyCounter, 60000);
+  }
+
+  /* ===== DAILY SUMMARY (principle 5) ===== */
+  async function loadDailySummary() {
+    if (!$('welcome')) return;
+    try {
+      const res = await fetch('/api/daily-summary?password=' + encodeURIComponent(PASSWORD));
+      const data = await res.json();
+      if (!data.ok || !$('welcome')) return;
+      renderDailySummary(data);
+    } catch (err) { /* silent */ }
+  }
+  function renderDailySummary(d) {
+    const w = $('welcome');
+    if (!w) return;
+    const hour = new Date().getHours();
+    const greet = hour < 12 ? 'בוקר טוב' : (hour < 18 ? 'צהריים טובים' : 'ערב טוב');
+    const c = d.changed, did = d.did, ach = d.achieved;
+
+    const card = document.createElement('div');
+    card.className = 'summary-card';
+    let html = '<div class="summary-greeting">' + greet + '! 👋 הנה הסיכום שלך</div>';
+    html += '<div class="summary-sub">מה קרה ב-24 השעות האחרונות</div>';
+    html += '<div class="summary-grid">';
+    html += '<div class="summary-stat"><div class="num">' + c.orders_today + '</div><div class="lbl">הזמנות היום (' + (c.orders_yesterday) + ' אתמול)</div></div>';
+    html += '<div class="summary-stat"><div class="num">₪' + c.revenue_today.toLocaleString() + '</div><div class="lbl">מכירות היום</div></div>';
+    if (did.actions > 0) {
+      html += '<div class="summary-stat"><div class="num">' + did.actions + '</div><div class="lbl">פעולות שביצעתי</div></div>';
+    }
+    if (ach.total_revenue > 0 || ach.total_conversions > 0) {
+      html += '<div class="summary-stat"><div class="num green">₪' + ach.total_revenue.toLocaleString() + '</div><div class="lbl">הכנסתי לך סה"כ (' + ach.total_conversions + ' המרות)</div></div>';
+    }
+    html += '</div>';
+    if (ach.pending > 0) {
+      html += '<div class="summary-line">⏳ ' + ach.pending + ' פעולות ממתינות לתוצאה. אני עוקב ואעדכן ברגע שייסגרו.</div>';
+    }
+    card.innerHTML = html;
+    w.parentNode.insertBefore(card, w);
   }
 
   /* ===== LIVE MONEY COUNTER ===== */
@@ -511,6 +566,7 @@
     history = [];
     $('messages').innerHTML = '<div class="welcome" id="welcome"><h2>איך אפשר לעזור?</h2><p>שאלי אותי כל דבר על החנות — לקוחות, מכירות, מוצרים, או רעיונות לקמפיינים.</p></div>';
     loadConvoList();
+    loadDailySummary();
     loadInsights();
     closeSidebar();
     $('input').focus();
@@ -652,6 +708,7 @@
   function addMessageDom(role, text) {
     const w = $('welcome'); if (w) w.remove();
     const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
+    const sc = document.querySelector('.summary-card'); if (sc) sc.remove();
     const row = document.createElement('div');
     row.className = 'row ' + role;
     const bubble = document.createElement('div');
@@ -790,6 +847,7 @@
 
       const w = $('welcome'); if (w) w.remove();
       const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
+    const sc = document.querySelector('.summary-card'); if (sc) sc.remove();
       const row = document.createElement('div');
       row.className = 'row ai';
       const bubble = document.createElement('div');
