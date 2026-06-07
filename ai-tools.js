@@ -488,6 +488,99 @@ async function getAbandonedCheckouts(shopDomain, options = {}) {
   });
 }
 
+// ---------- 14. getCrossSellData ----------
+// "Customers who bought X also bought Y" - frequently co-purchased products.
+// Powers smart cross-sell offers. Based on orders within the data window.
+async function getCrossSellData(shopDomain, options = {}) {
+  return safe('getCrossSellData', async () => {
+    const productTitle = (options.productTitle || '').trim();
+    const limit = Math.min(parseInt(options.limit) || 8, 20);
+
+    if (productTitle) {
+      // Co-purchase: products that appear in the same orders as the given product
+      const result = await db.query(
+        `WITH target_orders AS (
+           SELECT DISTINCT shopify_order_id
+           FROM store_order_items
+           WHERE shop_domain = $1 AND title ILIKE $2
+         )
+         SELECT oi.title, COUNT(DISTINCT oi.shopify_order_id)::int AS co_purchases,
+                SUM(oi.quantity)::int AS units
+         FROM store_order_items oi
+         JOIN target_orders t ON t.shopify_order_id = oi.shopify_order_id
+         WHERE oi.shop_domain = $1
+           AND oi.title NOT ILIKE $2
+         GROUP BY oi.title
+         ORDER BY co_purchases DESC
+         FETCH FIRST ${limit} ROWS ONLY`,
+        [shopDomain, `%${productTitle}%`]
+      );
+      return {
+        anchor_product: productTitle,
+        also_bought: result.rows,
+        data_window: 'last_60_days'
+      };
+    }
+
+    // No specific product: return the strongest product PAIRS overall
+    const pairs = await db.query(
+      `WITH pairs AS (
+         SELECT a.title AS product_a, b.title AS product_b,
+                COUNT(*)::int AS times_together
+         FROM store_order_items a
+         JOIN store_order_items b
+           ON a.shopify_order_id = b.shopify_order_id
+          AND a.shop_domain = b.shop_domain
+          AND a.title < b.title
+         WHERE a.shop_domain = $1
+         GROUP BY a.title, b.title
+         HAVING COUNT(*) >= 2
+       )
+       SELECT * FROM pairs
+       ORDER BY times_together DESC
+       FETCH FIRST ${limit} ROWS ONLY`,
+      [shopDomain]
+    );
+    return { top_pairs: pairs.rows, data_window: 'last_60_days' };
+  });
+}
+
+// ---------- 15. getCampaignPerformance ----------
+// What the advisor has done and what worked - powers learning.
+// Reads advisor_actions to show which action types / coupons converted best.
+async function getCampaignPerformance(shopDomain, options = {}) {
+  return safe('getCampaignPerformance', async () => {
+    const summary = await db.query(
+      `SELECT action_type,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE outcome = 'converted')::int AS converted,
+              COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome = 'converted'),0)::numeric(12,2) AS revenue
+       FROM advisor_actions
+       WHERE shop_domain = $1
+       GROUP BY action_type
+       ORDER BY revenue DESC`,
+      [shopDomain]
+    );
+    const totals = await db.query(
+      `SELECT COUNT(*)::int AS total_actions,
+              COUNT(*) FILTER (WHERE outcome = 'converted')::int AS total_converted,
+              COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome = 'converted'),0)::numeric(12,2) AS total_revenue
+       FROM advisor_actions WHERE shop_domain = $1`,
+      [shopDomain]
+    );
+    const t = totals.rows[0] || {};
+    const convRate = t.total_actions > 0 ? Math.round((t.total_converted / t.total_actions) * 100) : 0;
+    return {
+      by_type: summary.rows,
+      total_actions: t.total_actions || 0,
+      total_converted: t.total_converted || 0,
+      conversion_rate_pct: convRate,
+      total_revenue: Math.round(parseFloat(t.total_revenue || 0)),
+      note: 'use this to learn which campaign types convert best and recommend accordingly'
+    };
+  });
+}
+
 module.exports = {
   getTopCustomers,
   getDormantCustomers,
@@ -501,5 +594,7 @@ module.exports = {
   generateWhatsAppMessage,
   getCustomerPurchases,
   getStoreProducts,
-  getAbandonedCheckouts
+  getAbandonedCheckouts,
+  getCrossSellData,
+  getCampaignPerformance
 };
