@@ -581,6 +581,50 @@ async function getCampaignPerformance(shopDomain, options = {}) {
   });
 }
 
+// ---------- 16. getProductVariants ----------
+// Extracts purchasable variants (variant_id, size/color, price, stock) from
+// the products' raw_data JSON. Needed to build personalized carts (draft orders).
+async function getProductVariants(shopDomain, options = {}) {
+  return safe('getProductVariants', async () => {
+    const search = (options.search || '').trim();
+    const limit = Math.min(parseInt(options.limit) || 10, 30);
+
+    const where = ['shop_domain = $1', 'available = TRUE', 'raw_data IS NOT NULL'];
+    const params = [shopDomain];
+    if (search) {
+      params.push('%' + search + '%');
+      where.push(`title ILIKE $${params.length}`);
+    }
+
+    const result = await db.query(
+      `SELECT title, handle, raw_data
+       FROM store_products
+       WHERE ${where.join(' AND ')}
+       ORDER BY total_inventory DESC
+       FETCH FIRST ${limit} ROWS ONLY`,
+      params
+    );
+
+    const products = result.rows.map(row => {
+      let variants = [];
+      try {
+        const raw = typeof row.raw_data === 'string' ? JSON.parse(row.raw_data) : row.raw_data;
+        variants = (raw.variants || [])
+          .filter(v => (parseInt(v.inventory_quantity) || 0) > 0 || v.inventory_management === null)
+          .map(v => ({
+            variant_id: v.id,
+            label: v.title,        // e.g. "M / שחור"
+            price: v.price,
+            in_stock: parseInt(v.inventory_quantity) || 0
+          }));
+      } catch (e) { /* skip malformed */ }
+      return { title: row.title, handle: row.handle, variants };
+    }).filter(p => p.variants.length > 0);
+
+    return { ok: true, returned: products.length, products };
+  });
+}
+
 module.exports = {
   getTopCustomers,
   getDormantCustomers,
@@ -596,5 +640,6 @@ module.exports = {
   getStoreProducts,
   getAbandonedCheckouts,
   getCrossSellData,
-  getCampaignPerformance
+  getCampaignPerformance,
+  getProductVariants
 };

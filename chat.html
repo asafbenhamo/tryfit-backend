@@ -633,6 +633,77 @@
     });
     return { fields, cleanText: text.replace(m[0], '').trim() };
   }
+  function parseCart(text) {
+    const m = text.match(/\[\[CART:([\s\S]*?)\]\]/);
+    if (!m) return null;
+    const fields = {};
+    m[1].split('|').forEach(part => {
+      const idx = part.indexOf('=');
+      if (idx > -1) fields[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+    });
+    return { fields, cleanText: text.replace(m[0], '').trim() };
+  }
+  function renderCartCard(cart, container) {
+    const f = cart.fields;
+    const card = document.createElement('div');
+    card.className = 'action-card';
+    const channel = (f.phone && f.phone.length >= 8) ? 'WhatsApp' : 'מייל';
+    const itemCount = (f.items || '').split(',').filter(Boolean).length;
+    let html = '<div class="action-head">🛍️ עגלה מותאמת מוכנה לאישור</div>';
+    html += '<div class="action-row"><span>נמען:</span> ' + esc(f.name || f.email || f.phone || '—') + '</div>';
+    html += '<div class="action-row"><span>ערוץ:</span> ' + channel + '</div>';
+    html += '<div class="action-row"><span>פריטים בעגלה:</span> ' + itemCount + '</div>';
+    if (f.discount) html += '<div class="action-row"><span>הנחה:</span> ' + esc(f.discount) + '%</div>';
+    if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\n/g,'<br>') + '</div>';
+    html += '<div class="action-btns"><button class="action-approve">בנה עגלה ושלח ←</button><button class="action-cancel">בטל</button></div>';
+    html += '<div class="action-result" style="display:none"></div>';
+    card.innerHTML = html;
+    container.appendChild(card);
+
+    const approveBtn = card.querySelector('.action-approve');
+    const cancelBtn = card.querySelector('.action-cancel');
+    const resultDiv = card.querySelector('.action-result');
+    cancelBtn.onclick = () => card.remove();
+    approveBtn.onclick = async () => {
+      approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'בונה...';
+      try {
+        const items = (f.items || '').split(',').filter(Boolean).map(pair => {
+          const [vid, qty] = pair.split(':');
+          return { variant_id: parseInt(vid.trim()), quantity: parseInt(qty || '1') };
+        });
+        const res = await fetch('/api/action/build-cart', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            password: PASSWORD, email: f.email || null, phone: f.phone || null,
+            customer_name: f.name || null, items,
+            discount_percentage: f.discount ? parseInt(f.discount) : null,
+            message_subject: f.subject || 'הכנו לך משהו מיוחד', message_body: f.body || ''
+          })
+        });
+        const data = await res.json();
+        card.querySelector('.action-btns').style.display = 'none';
+        resultDiv.style.display = 'block';
+        if (data.ok) {
+          let msg = '✅ העגלה נבנתה! ';
+          if (data.steps.cart) msg += 'סכום: ₪' + data.steps.cart.total + '. ';
+          if (data.steps.message && data.steps.message.channel === 'whatsapp') {
+            msg += '<br><a href="' + data.steps.message.ready_link + '" target="_blank" class="wa-link">📱 שלח ב-WhatsApp</a>';
+          } else if (data.steps.message && data.steps.message.ok) {
+            msg += 'הלינק נשלח במייל.';
+          }
+          resultDiv.innerHTML = msg; resultDiv.className = 'action-result success';
+          loadMoneyCounter();
+        } else if (data.blocked) {
+          resultDiv.innerHTML = '🚫 ' + (data.detail || 'נחסם'); resultDiv.className = 'action-result blocked';
+        } else {
+          resultDiv.innerHTML = '❌ ' + (data.error || 'שגיאה'); resultDiv.className = 'action-result error';
+        }
+      } catch (err) {
+        resultDiv.style.display = 'block';
+        resultDiv.innerHTML = '❌ שגיאה: ' + err.message; resultDiv.className = 'action-result error';
+      }
+    };
+  }
   function renderActionCard(action, container) {
     const f = action.fields;
     const card = document.createElement('div');
@@ -715,11 +786,17 @@
     bubble.className = 'bubble';
     if (role === 'ai') {
       const action = parseAction(text);
-      const displayText = action ? action.cleanText : text;
+      const cart = parseCart(text);
+      const displayText = cart ? cart.cleanText : (action ? action.cleanText : text);
       bubble.innerHTML = render(displayText);
       row.appendChild(bubble);
       $('messages').appendChild(row);
-      if (action) {
+      if (cart) {
+        const cardRow = document.createElement('div');
+        cardRow.className = 'action-row-wrap';
+        renderCartCard(cart, cardRow);
+        $('messages').appendChild(cardRow);
+      } else if (action) {
         const cardRow = document.createElement('div');
         cardRow.className = 'action-row-wrap';
         renderActionCard(action, cardRow);
@@ -843,7 +920,8 @@
   function streamAnswer(fullText) {
     return new Promise(resolve => {
       const action = parseAction(fullText);
-      const displayText = action ? action.cleanText : fullText;
+      const cart = parseCart(fullText);
+      const displayText = cart ? cart.cleanText : (action ? action.cleanText : fullText);
 
       const w = $('welcome'); if (w) w.remove();
       const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
@@ -862,7 +940,12 @@
       function step() {
         if (i >= tokens.length) {
           bubble.innerHTML = render(displayText);
-          if (action) {
+          if (cart) {
+            const cardRow = document.createElement('div');
+            cardRow.className = 'action-row-wrap';
+            renderCartCard(cart, cardRow);
+            $('messages').appendChild(cardRow);
+          } else if (action) {
             const cardRow = document.createElement('div');
             cardRow.className = 'action-row-wrap';
             renderActionCard(action, cardRow);

@@ -842,9 +842,81 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
   }
 });
 
-// PWA: manifest + icons
-app.get("/manifest.json", (req, res) => {
-  res.sendFile(__dirname + "/manifest.json");
+// ======================
+// ACTIONS: Build a personalized cart (draft order) + send payment link.
+// The aggressive move: advisor pre-builds a cart for a customer and sends a
+// direct pay link. Channel priority: WhatsApp (if phone) else email.
+// ======================
+app.post("/api/action/build-cart", express.json(), async (req, res) => {
+  try {
+    const {
+      password, email, phone, customer_name,
+      items, discount_percentage,
+      message_subject, message_body
+    } = req.body;
+
+    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ ok: false, error: "אין פריטים לעגלה" });
+    }
+
+    // Opt-out check (legal) before building/sending
+    if (await compliance.isOptedOut(shop, { email, phone })) {
+      return res.json({ ok: false, blocked: true, reason: "opted_out",
+        detail: "הלקוחה ביקשה לא לקבל הודעות. לא ניתן לפנות אליה." });
+    }
+
+    // 1. Create the draft order
+    const draft = await shopify.createDraftOrder(shop, {
+      items, email: email || null,
+      discount_percentage: discount_percentage || null,
+      note: `עגלה מותאמת ל${customer_name || 'לקוחה'} - הוכן על ידי היועץ`
+    });
+    if (!draft.ok) {
+      return res.status(400).json({ ok: false, error: "בניית העגלה נכשלה: " + draft.error, needs_scope: draft.needs_scope });
+    }
+
+    const payUrl = draft.invoice_url;
+    let finalBody = (message_body || "") + `\n\nלחצי כאן לתשלום מהיר ומאובטח:\n${payUrl}`;
+
+    const result = { ok: true, steps: { cart: { ok: true, total: draft.total, pay_url: payUrl } } };
+
+    // 2. Send via WhatsApp (if phone) else email
+    const hasPhone = phone && String(phone).trim().length >= 8;
+    if (hasPhone) {
+      let waPhone = String(phone).replace(/[^0-9]/g, "");
+      if (waPhone.startsWith("0")) waPhone = "972" + waPhone.slice(1);
+      const waUrl = `https://wa.me/${waPhone}?text=${encodeURIComponent(finalBody)}`;
+      result.steps.message = { channel: "whatsapp", ready_link: waUrl };
+    } else if (email) {
+      const gate = await compliance.canContactCustomer(shop, { email, phone });
+      if (!gate.allowed) {
+        return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
+      }
+      const html = mailer.buildHtmlEmail(message_body || "הכנו לך עגלה אישית!", {
+        cta_url: payUrl, cta_label: "לתשלום מהיר", brand: "770", to: email
+      });
+      const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
+      if (!sent.ok) return res.status(400).json({ ok: false, error: "שליחת המייל נכשלה: " + sent.error });
+      result.steps.message = { channel: "email", ok: true, id: sent.id };
+    } else {
+      return res.status(400).json({ ok: false, error: "אין דרך ליצור קשר" });
+    }
+
+    // 3. Log
+    await db.query(
+      `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details)
+       VALUES ($1, 'personalized_cart', $2, $3, $4)`,
+      [shop, email || null, phone || null, JSON.stringify({ draft_order_id: draft.draft_order_id, total: draft.total })]
+    ).catch(e => console.error("log:", e.message));
+
+    res.json(result);
+  } catch (err) {
+    console.error("Build cart error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 app.get("/icon-192.png", (req, res) => {
   res.sendFile(__dirname + "/icon-192.png");
