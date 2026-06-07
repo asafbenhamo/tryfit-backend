@@ -677,6 +677,104 @@ app.get("/api/working-hours", (req, res) => {
   res.json(compliance.workingHoursStatus());
 });
 
+// ======================
+// ACTIONS: Execute a full advisor action plan (coupon + message), merchant-approved.
+// This is the closed loop: create coupon -> send via email (auto) or return
+// WhatsApp link -> log the action. Channel priority: WhatsApp (if phone) else email.
+// ======================
+app.post("/api/action/execute", express.json(), async (req, res) => {
+  try {
+    const {
+      password, action_type,
+      email, phone, customer_name,
+      create_coupon, coupon_percentage, coupon_code, coupon_days,
+      message_subject, message_body, cta_url, cta_label
+    } = req.body;
+
+    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const result = { ok: true, steps: {} };
+
+    // --- Step 1: create coupon if requested ---
+    let couponCode = null;
+    if (create_coupon) {
+      const c = await shopify.createDiscountCode(shop, {
+        percentage: coupon_percentage || 10,
+        code: coupon_code,
+        days_valid: coupon_days || 30,
+        title: `יועץ: ${action_type || 'campaign'}`
+      });
+      if (!c.ok) {
+        result.steps.coupon = { ok: false, error: c.error, needs_scope: c.needs_scope };
+        // Coupon failed - abort before sending (don't send a message promising a broken code)
+        return res.status(400).json({ ok: false, error: "יצירת הקופון נכשלה: " + c.error, steps: result.steps });
+      }
+      couponCode = c.code;
+      result.steps.coupon = { ok: true, code: c.code, percentage: c.percentage, ends_at: c.ends_at };
+    }
+
+    // Build final message body (inject coupon code if created)
+    let finalBody = message_body || "";
+    if (couponCode && finalBody.includes("{COUPON}")) {
+      finalBody = finalBody.replace(/\{COUPON\}/g, couponCode);
+    } else if (couponCode && !finalBody.includes(couponCode)) {
+      finalBody += `\n\nקוד הקופון שלך: ${couponCode}`;
+    }
+
+    // --- Step 2: choose channel. WhatsApp first (if phone), else email ---
+    const hasPhone = phone && String(phone).trim().length >= 8;
+
+    if (hasPhone) {
+      // WhatsApp: we can't auto-send without Business API. Return a ready wa.me link.
+      // Still check opt-out (legal) before offering to contact.
+      const optedOut = await compliance.isOptedOut(shop, { email, phone });
+      if (optedOut) {
+        return res.json({ ok: false, blocked: true, reason: "opted_out",
+          detail: "הלקוחה ביקשה לא לקבל הודעות. לא ניתן לפנות אליה." });
+      }
+      let waPhone = String(phone).replace(/[^0-9]/g, "");
+      if (waPhone.startsWith("0")) waPhone = "972" + waPhone.slice(1);
+      const waUrl = `https://wa.me/${waPhone}?text=${encodeURIComponent(finalBody)}`;
+      result.steps.message = { channel: "whatsapp", ready_link: waUrl, note: "לחץ לשליחה ב-WhatsApp" };
+
+      await db.query(
+        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [shop, action_type || 'whatsapp_prepared', email || null, phone, JSON.stringify({ channel: 'whatsapp', subject: message_subject }), couponCode]
+      ).catch(e => console.error("log:", e.message));
+
+    } else if (email) {
+      // Email: full auto-send through the safety gate (hours + opt-out)
+      const gate = await compliance.canContactCustomer(shop, { email, phone });
+      if (!gate.allowed) {
+        result.steps.message = { channel: "email", ok: false, blocked: true, reason: gate.reason, detail: gate.detail };
+        return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
+      }
+      const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: "770", to: email });
+      const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הודעה מ-770", html, text: finalBody });
+      if (!sent.ok) {
+        result.steps.message = { channel: "email", ok: false, error: sent.error };
+        return res.status(400).json({ ok: false, error: "שליחת המייל נכשלה: " + sent.error, steps: result.steps });
+      }
+      result.steps.message = { channel: "email", ok: true, id: sent.id };
+
+      await db.query(
+        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [shop, action_type || 'email_sent', email, phone || null, JSON.stringify({ channel: 'email', subject: message_subject }), couponCode]
+      ).catch(e => console.error("log:", e.message));
+
+    } else {
+      return res.status(400).json({ ok: false, error: "אין דרך ליצור קשר (חסר טלפון ומייל)" });
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error("Action execute error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // PWA: manifest + icons
 app.get("/manifest.json", (req, res) => {
   res.sendFile(__dirname + "/manifest.json");
