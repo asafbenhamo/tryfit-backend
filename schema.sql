@@ -280,6 +280,39 @@ CREATE INDEX IF NOT EXISTS idx_abandoned_shop ON abandoned_checkouts(shop_domain
 CREATE INDEX IF NOT EXISTS idx_abandoned_date ON abandoned_checkouts(shopify_created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_abandoned_completed ON abandoned_checkouts(completed_at);
 
+-- ============ MESSAGE OPT-OUTS (legal: customers who asked to stop) ============
+
+CREATE TABLE IF NOT EXISTS message_optouts (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  email VARCHAR(255),
+  phone VARCHAR(100),
+  reason VARCHAR(255),
+  created_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE (shop_domain, email, phone)
+);
+
+CREATE INDEX IF NOT EXISTS idx_optouts_shop ON message_optouts(shop_domain, email, phone);
+
+-- ============ ACTION LOG (what the advisor did + money attributed) ============
+
+CREATE TABLE IF NOT EXISTS advisor_actions (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  action_type VARCHAR(80) NOT NULL,      -- 'coupon_created','email_sent','cart_recovery', etc.
+  target_email VARCHAR(255),
+  target_phone VARCHAR(100),
+  details JSONB DEFAULT '{}'::jsonb,       -- coupon code, % , message subject, etc.
+  coupon_code VARCHAR(100),
+  attributed_revenue NUMERIC(12,2) DEFAULT 0,  -- money this action brought in (filled when closed)
+  outcome VARCHAR(40) DEFAULT 'pending',   -- 'pending','converted','no_response'
+  created_at TIMESTAMP DEFAULT NOW(),
+  closed_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_actions_shop ON advisor_actions(shop_domain, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_actions_coupon ON advisor_actions(shop_domain, coupon_code);
+
 INSERT INTO shops (shop_domain, display_name, data_collection_enabled, installed_at)
 VALUES ('seven770.myshopify.com', 'Seven770 (Demo)', TRUE, NOW())
 ON CONFLICT (shop_domain) DO UPDATE

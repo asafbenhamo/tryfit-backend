@@ -66,6 +66,11 @@ function buildHtmlEmail(bodyText, opts = {}) {
             ${opts.cta_label}</a>
        </div>`
     : "";
+  // Legal: every marketing email must include an unsubscribe link.
+  const unsubBase = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
+  const unsub = opts.to
+    ? `<a href="${unsubBase}/unsubscribe?email=${encodeURIComponent(opts.to)}" style="color:#999;">להסרה מרשימת התפוצה</a>`
+    : "";
   return `<!DOCTYPE html>
 <html dir="rtl" lang="he">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -78,7 +83,7 @@ function buildHtmlEmail(bodyText, opts = {}) {
       ${cta}
     </div>
     <div style="text-align:center;color:#999;font-size:12px;margin-top:16px;">
-      ${opts.footer || "נשלח באמצעות היועץ החכם של 770"}
+      ${opts.footer || "נשלח באמצעות היועץ החכם של 770"}<br>${unsub}
     </div>
   </div>
 </body>

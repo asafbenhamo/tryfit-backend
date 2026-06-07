@@ -546,6 +546,38 @@ app.get("/api/insights", async (req, res) => {
 });
 
 // ======================
+// TEMPORARY: Test email sending
+// ======================
+app.get("/admin/test-email", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const to = req.query.to;
+  if (!to) {
+    return res.json({ ok: false, error: "הוסף &to=your@email.com ל-URL" });
+  }
+  if (!mailer.isConfigured()) {
+    return res.json({ ok: false, error: "RESEND_API_KEY not configured in Railway" });
+  }
+  try {
+    const html = mailer.buildHtmlEmail(
+      "שלום! 👋\n\nזו הודעת בדיקה מהיועץ החכם של 770.\n\nאם קיבלת את המייל הזה - מערכת השליחה עובדת מצוין!",
+      { cta_url: "https://sevenseventy.co.il", cta_label: "לחנות שלנו", brand: "770" }
+    );
+    const result = await mailer.sendEmail({
+      to,
+      subject: "בדיקה - היועץ החכם של 770",
+      html,
+      text: "הודעת בדיקה מהיועץ החכם של 770. המערכת עובדת!"
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ======================
 // ACTIONS: Create a real discount coupon (merchant-approved)
 // ======================
 app.post("/api/coupon/create", express.json(), async (req, res) => {
@@ -572,10 +604,11 @@ app.post("/api/coupon/create", express.json(), async (req, res) => {
 // ACTIONS: Send an email (merchant-approved)
 // ======================
 const mailer = require("./mailer");
+const compliance = require("./compliance");
 
 app.post("/api/send-email", express.json(), async (req, res) => {
   try {
-    const { password, to, subject, body, cta_url, cta_label } = req.body;
+    const { password, to, phone, subject, body, cta_url, cta_label, ignore_hours } = req.body;
     if (password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
@@ -585,16 +618,63 @@ app.post("/api/send-email", express.json(), async (req, res) => {
     if (!to || !subject || !body) {
       return res.status(400).json({ ok: false, error: "חסר נמען / נושא / תוכן" });
     }
-    const html = mailer.buildHtmlEmail(body, { cta_url, cta_label, brand: "770" });
+
+    const shop = "seven770.myshopify.com";
+    // SAFETY GATE: working hours + opt-out (legal). Manual sends can pass ignore_hours.
+    const gate = await compliance.canContactCustomer(shop, { email: to, phone }, { ignoreHours: !!ignore_hours });
+    if (!gate.allowed) {
+      return res.status(200).json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail });
+    }
+
+    const html = mailer.buildHtmlEmail(body, { cta_url, cta_label, brand: "770", to });
     const result = await mailer.sendEmail({ to, subject, html, text: body });
     if (!result.ok) {
       return res.status(400).json(result);
     }
+
+    // Log the action (for the daily summary + revenue attribution later)
+    try {
+      await db.query(
+        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details)
+         VALUES ($1, 'email_sent', $2, $3, $4)`,
+        [shop, to, phone || null, JSON.stringify({ subject })]
+      );
+    } catch (e) { console.error("action log failed:", e.message); }
+
     res.json(result);
   } catch (err) {
     console.error("Send email error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// ======================
+// COMPLIANCE: opt-out management + working-hours status
+// ======================
+app.post("/api/optout/add", express.json(), async (req, res) => {
+  try {
+    const { password, email, phone, reason } = req.body;
+    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const result = await compliance.addOptOut("seven770.myshopify.com", { email, phone, reason });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Public unsubscribe link (no password - reached from email footer)
+app.get("/unsubscribe", async (req, res) => {
+  const email = req.query.email;
+  if (!email) return res.status(400).send("Missing email");
+  await compliance.addOptOut("seven770.myshopify.com", { email, reason: "email_link" });
+  res.send(`<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
+    <style>body{font-family:Arial,sans-serif;text-align:center;padding:60px 20px;color:#333}</style></head>
+    <body><h2>הוסרת מרשימת התפוצה</h2><p>לא תקבל/י יותר הודעות שיווקיות. תודה.</p></body></html>`);
+});
+
+app.get("/api/working-hours", (req, res) => {
+  if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  res.json(compliance.workingHoursStatus());
 });
 
 // PWA: manifest + icons
