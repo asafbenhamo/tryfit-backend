@@ -1804,27 +1804,51 @@ function handleOrderWebhook(req, res) {
 
     setImmediate(async () => {
       try {
-        // Collect discount codes used on this order
-        const codes = (order.discount_codes || []).map(d => (d.code || "").toUpperCase()).filter(Boolean);
-        if (codes.length === 0) return;
-
         const orderTotal = parseFloat(order.total_price || order.current_total_price || 0);
+        const buyerEmail = (order.email || order.customer?.email || "").toLowerCase() || null;
+        const buyerPhone = (order.phone || order.customer?.phone || order.shipping_address?.phone || "").replace(/[^0-9]/g, "") || null;
 
-        // Find any advisor action with a matching coupon that's still pending
+        // --- Attribution 1: by coupon code (certain) ---
+        const codes = (order.discount_codes || []).map(d => (d.code || "").toUpperCase()).filter(Boolean);
+        let closedByCoupon = false;
         for (const code of codes) {
           const r = await db.query(
             `UPDATE advisor_actions
-             SET outcome = 'converted',
-                 attributed_revenue = $3,
-                 closed_at = NOW()
-             WHERE shop_domain = $1
-               AND coupon_code = $2
-               AND outcome = 'pending'
+             SET outcome = 'converted', attributed_revenue = $3, closed_at = NOW()
+             WHERE shop_domain = $1 AND coupon_code = $2 AND outcome = 'pending'
              RETURNING id`,
             [shopDomain, code, orderTotal]
           );
           if (r.rows.length > 0) {
-            console.log(`💰 [Loop closed] Coupon ${code} converted! +${orderTotal}₪ attributed to advisor (action ${r.rows[0].id})`);
+            closedByCoupon = true;
+            console.log(`💰 [Loop closed - coupon] ${code} converted! +${orderTotal}₪ (action ${r.rows[0].id})`);
+          }
+        }
+
+        // --- Attribution 2: by time window (customer bought within 3 days of being contacted) ---
+        // Only if not already closed by coupon (avoid double-counting the same order).
+        if (!closedByCoupon && (buyerEmail || buyerPhone)) {
+          const r = await db.query(
+            `UPDATE advisor_actions
+             SET outcome = 'converted', attributed_revenue = $4, closed_at = NOW(),
+                 details = details || '{"attribution":"time_window_3d"}'::jsonb
+             WHERE id = (
+               SELECT id FROM advisor_actions
+               WHERE shop_domain = $1
+                 AND outcome = 'pending'
+                 AND created_at >= NOW() - INTERVAL '3 days'
+                 AND (
+                   ($2::text IS NOT NULL AND lower(target_email) = $2)
+                   OR ($3::text IS NOT NULL AND regexp_replace(target_phone, '[^0-9]', '', 'g') = $3)
+                 )
+               ORDER BY created_at DESC
+               FETCH FIRST 1 ROWS ONLY
+             )
+             RETURNING id`,
+            [shopDomain, buyerEmail, buyerPhone, orderTotal]
+          );
+          if (r.rows.length > 0) {
+            console.log(`💰 [Loop closed - 3day window] customer ${buyerEmail || buyerPhone} bought! +${orderTotal}₪ (action ${r.rows[0].id})`);
           }
         }
       } catch (err) {
