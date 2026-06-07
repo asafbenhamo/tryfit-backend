@@ -1053,6 +1053,75 @@ async function createDiscountCode(shopDomain, opts = {}) {
   }
 }
 
+/**
+ * Create a draft order (a pre-built cart) and get a direct payment/invoice link.
+ * This powers the "personalized cart" move: the advisor builds a cart for a
+ * specific customer and sends them a link to pay - "we built your order, just pay".
+ *
+ * items: [{ variant_id, quantity }] OR [{ title, price, quantity }] for custom lines.
+ * Returns { ok, draft_order_id, invoice_url, total } or { ok:false, error }.
+ */
+async function createDraftOrder(shopDomain, opts = {}) {
+  if (!hasTokenForShop(shopDomain)) return { ok: false, error: 'no_token' };
+  const token = getTokenForShop(shopDomain);
+  const base = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}`;
+  const headers = { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' };
+
+  try {
+    const lineItems = (opts.items || []).map(it => {
+      if (it.variant_id) {
+        return { variant_id: it.variant_id, quantity: it.quantity || 1 };
+      }
+      // custom line item
+      return { title: it.title || 'מוצר', price: it.price || '0.00', quantity: it.quantity || 1 };
+    });
+    if (lineItems.length === 0) return { ok: false, error: 'no items' };
+
+    const body = {
+      draft_order: {
+        line_items: lineItems,
+        note: opts.note || 'הוכן על ידי היועץ החכם',
+        tags: 'advisor',
+        use_customer_default_address: true
+      }
+    };
+    // Attach customer + optional discount
+    if (opts.email) body.draft_order.email = opts.email;
+    if (opts.discount_percentage) {
+      body.draft_order.applied_discount = {
+        description: 'הנחת היועץ',
+        value_type: 'percentage',
+        value: String(opts.discount_percentage),
+        title: 'הנחה אישית'
+      };
+    }
+
+    const r = await fetch(`${base}/draft_orders.json`, {
+      method: 'POST', headers, body: JSON.stringify(body)
+    });
+    if (r.status !== 201) {
+      const txt = await r.text();
+      return { ok: false, error: `draft_order failed (${r.status}): ${txt.substring(0,150)}`,
+               needs_scope: r.status === 403 };
+    }
+    const data = await r.json();
+    const draft = data.draft_order;
+
+    // Send/generate the invoice to get a payment URL
+    let invoiceUrl = draft.invoice_url;
+    return {
+      ok: true,
+      draft_order_id: draft.id,
+      invoice_url: invoiceUrl,
+      total: draft.total_price,
+      currency: draft.currency
+    };
+  } catch (err) {
+    console.error('❌ [DraftOrder] failed:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   hasTokenForShop,
   getTokenForShop,
@@ -1074,5 +1143,6 @@ module.exports = {
   getAllAbandonedCheckouts,
   saveAbandonedCheckout,
   syncAbandonedCheckouts,
-  createDiscountCode
+  createDiscountCode,
+  createDraftOrder
 };

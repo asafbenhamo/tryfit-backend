@@ -730,11 +730,29 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
     // --- Step 1: create coupon if requested ---
     let couponCode = null;
     if (create_coupon) {
+      // Ensure a personalized, unique, traceable code.
+      // If the AI didn't supply one (or supplied a generic one), build it from
+      // the customer name + percentage + a short random suffix.
+      const GENERIC = ["SALE","DISCOUNT","COUPON","SAVE","PROMO","CODE"];
+      let finalCode = (coupon_code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const isGeneric = !finalCode || GENERIC.includes(finalCode);
+      if (isGeneric) {
+        // transliterate-ish: keep ASCII letters from name, else fallback
+        let namePart = "";
+        if (customer_name) {
+          namePart = customer_name.replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8);
+        }
+        if (!namePart && email) namePart = email.split("@")[0].replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8);
+        if (!namePart) namePart = "VIP";
+        const pct = coupon_percentage || 10;
+        const suffix = Math.floor(Math.random() * 900 + 100); // 3 digits, keeps it unique
+        finalCode = `${namePart}${pct}${suffix}`;
+      }
       const c = await shopify.createDiscountCode(shop, {
         percentage: coupon_percentage || 10,
-        code: coupon_code,
+        code: finalCode,
         days_valid: coupon_days || 30,
-        title: `יועץ: ${action_type || 'campaign'}`
+        title: `יועץ: ${action_type || 'campaign'} - ${customer_name || email || ''}`
       });
       if (!c.ok) {
         result.steps.coupon = { ok: false, error: c.error, needs_scope: c.needs_scope };
