@@ -2046,6 +2046,77 @@ function handleOrderWebhook(req, res) {
 app.post("/webhooks/orders/create", express.raw({ type: "application/json" }), handleOrderWebhook);
 
 // === Register checkout webhooks with Shopify (TEMPORARY - call once) ===
+============================================================
+תוספת ל-server-dual.js — endpoint חד-פעמי לתיקון נתונים קיימים
+============================================================
+
+מטרה: לתקן את הנתונים שכבר נשמרו במערכת —
+  1. לנקות טלפונים שגויים (שנשאבו מכתובת משלוח)
+  2. למלא last_order_date מתוך ההזמנות הקיימות
+
+איפה להוסיף: פתח server-dual.js, חפש את השורה (Ctrl+F):
+
+    app.get("/admin/setup-agent-tables", async (req, res) => {
+
+ממש *לפני* השורה הזו, הדבק את כל הבלוק הבא:
+
+// ======================
+// ONE-TIME FIX: clean bad phones + backfill last_order_date
+// Call once: /admin/fix-data?password=...
+// ======================
+app.get("/admin/fix-data", async (req, res) => {
+  if (req.query.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = "seven770.myshopify.com";
+  try {
+    // 1. Null out phones that are not clean Israeli mobiles (05X + 8 digits).
+    //    These were wrongly pulled from shipping addresses.
+    const badPhones = await db.query(
+      `UPDATE store_customers
+       SET phone = NULL
+       WHERE shop_domain = $1
+         AND phone IS NOT NULL
+         AND phone !~ '^0?5[0-9]{8}$'
+         AND phone !~ '^\\+?9725[0-9]{8}$'`,
+      [shop]
+    );
+
+    // 2. Recompute last_order_date from the orders we actually have.
+    const lod = await db.query(
+      `UPDATE store_customers sc
+       SET last_order_date = sub.last_order
+       FROM (
+         SELECT shopify_customer_id, MAX(ordered_at) AS last_order
+         FROM store_orders
+         WHERE shop_domain = $1 AND shopify_customer_id IS NOT NULL
+         GROUP BY shopify_customer_id
+       ) sub
+       WHERE sc.shop_domain = $1
+         AND sc.shopify_customer_id = sub.shopify_customer_id`,
+      [shop]
+    );
+
+    res.json({
+      ok: true,
+      phones_cleaned: badPhones.rowCount,
+      last_order_dates_filled: lod.rowCount,
+      message: "הנתונים תוקנו"
+    });
+  } catch (err) {
+    console.error("fix-data error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+============================================================
+אחרי שתדחוף ל-Railway, הרץ פעם אחת בדפדפן:
+https://tryfit-backend-production.up.railway.app/admin/fix-data?password=Ariel770!
+(שים לב: הסיסמה ב-URL צריכה להיות Ariel770%21 במקום הסימן !)
+
+כלומר הכתובת המלאה:
+https://tryfit-backend-production.up.railway.app/admin/fix-data?password=Ariel770%21
+============================================================
 app.get("/admin/setup-agent-tables", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {

@@ -1129,7 +1129,7 @@
     html += '<div class="action-row"><span>ערוץ:</span> ' + channel + '</div>';
     html += '<div class="action-row"><span>פריטים בעגלה:</span> ' + itemCount + '</div>';
     if (f.discount) html += '<div class="action-row"><span>הנחה:</span> ' + esc(f.discount) + '%</div>';
-    if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\n/g,'<br>') + '</div>';
+    if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\{COUPON\}/g,'[הקוד האישי שלך]').replace(/\n/g,'<br>') + '</div>';
     html += '<div class="action-btns"><button class="action-approve">בנה עגלה ושלח ←</button><button class="action-cancel">בטל</button></div>';
     html += '<div class="action-result" style="display:none"></div>';
     card.innerHTML = html;
@@ -1189,7 +1189,7 @@
     html += '<div class="action-row"><span>ערוץ:</span> ' + channel + (f.phone ? ' (' + esc(f.phone) + ')' : (f.email ? ' (' + esc(f.email) + ')' : '')) + '</div>';
     if (f.coupon) html += '<div class="action-row"><span>קופון:</span> ' + esc(f.coupon) + '% הנחה' + (f.coupon_days ? ', ' + esc(f.coupon_days) + ' ימים' : '') + '</div>';
     if (f.subject) html += '<div class="action-row"><span>נושא:</span> ' + esc(f.subject) + '</div>';
-    if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\n/g,'<br>') + '</div>';
+    if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\{COUPON\}/g,'[הקוד האישי שלך]').replace(/\n/g,'<br>') + '</div>';
     html += '<div class="action-btns"><button class="action-approve">אשר ושלח ←</button><button class="action-cancel">בטל</button></div>';
     html += '<div class="action-result" style="display:none"></div>';
     card.innerHTML = html;

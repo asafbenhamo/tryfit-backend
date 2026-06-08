@@ -144,6 +144,36 @@ async function getCustomerOrders(shopDomain, customerId, limit = 250) {
   }
 }
 
+// Return a clean primary phone ONLY. We deliberately do NOT fall back to the
+// shipping/default address phone, because that is often the RECIPIENT's number
+// (a gift, a different address, an old number) - sending a marketing message
+// there reaches the wrong person. Better to have no phone (skip / email later)
+// than a wrong one. Returns a normalized number or null.
+function cleanPhone(raw) {
+  if (!raw) return null;
+  let p = String(raw).replace(/[^0-9+]/g, '');
+  // Normalize +972 / 972 to local 0-prefixed form for validation.
+  if (p.startsWith('+972')) p = '0' + p.slice(4);
+  else if (p.startsWith('972')) p = '0' + p.slice(3);
+  // Israeli mobile: 05X + 7 digits = 10 digits starting with 05.
+  if (/^05\d{8}$/.test(p)) return p;
+  return null; // not a clean mobile -> treat as no phone
+}
+
+// Compute the customer's last order date from the orders Shopify returns on the
+// customer object. Shopify does NOT provide a `last_order_date` field, so the
+// old code always saved null. We derive it from last_order_id presence + the
+// orders sync (server refreshes it from store_orders too).
+function deriveLastOrderDate(shopifyCustomer) {
+  // If Shopify gives us a structured last order, use its created_at.
+  if (shopifyCustomer.last_order && shopifyCustomer.last_order.created_at) {
+    return shopifyCustomer.last_order.created_at;
+  }
+  // Otherwise null here; the scheduled sync in server-dual.js fills it from
+  // store_orders (MAX(ordered_at) per customer).
+  return null;
+}
+
 /**
  * Save a Shopify customer to our store_customers table (Tier 1 - all customers).
  * Returns the database row ID.
@@ -186,7 +216,7 @@ async function saveStoreCustomer(shopDomain, shopifyCustomer) {
       shopifyCustomer.email || null,
       shopifyCustomer.first_name || null,
       shopifyCustomer.last_name || null,
-      shopifyCustomer.phone || (shopifyCustomer.default_address?.phone) || null,
+      cleanPhone(shopifyCustomer.phone),
       shopifyCustomer.default_address?.city || null,
       shopifyCustomer.default_address?.province || null,
       shopifyCustomer.default_address?.country || null,
@@ -194,7 +224,7 @@ async function saveStoreCustomer(shopDomain, shopifyCustomer) {
       shopifyCustomer.updated_at || null,
       parseFloat(shopifyCustomer.total_spent || '0'),
       shopifyCustomer.orders_count || 0,
-      shopifyCustomer.last_order_date || null,
+      deriveLastOrderDate(shopifyCustomer),
       (shopifyCustomer.tags || '').split(',').map(t => t.trim()).filter(Boolean),
       shopifyCustomer.accepts_marketing || false,
       shopifyCustomer.accepts_marketing_updated_at || null,
