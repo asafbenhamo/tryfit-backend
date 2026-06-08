@@ -20,6 +20,11 @@ const compliance = require('./compliance');
 const MAX_PER_CAMPAIGN = 50;       // safety cap
 const SEND_DELAY_MS = 600;         // small pace between customers
 
+// Cooldown: don't re-contact a customer we already messaged in the last N days.
+// During development/testing this is short (1 day) so you can test freely.
+// ⚠️ BEFORE GOING LIVE TO REAL CUSTOMERS: change this back to 14.
+const CAMPAIGN_COOLDOWN_DAYS = 1;
+
 // In-memory registry of running/finished campaigns.
 const campaigns = {};
 
@@ -61,9 +66,26 @@ function summarize(c) {
   };
 }
 
+// Transliterate a Hebrew name to Latin letters so the coupon code is personal
+// (e.g. שושי -> SHOSHI) instead of falling back to a generic "VIP".
+function hebrewToLatin(str) {
+  const map = {
+    'א':'','ב':'B','ג':'G','ד':'D','ה':'H','ו':'V','ז':'Z','ח':'CH','ט':'T',
+    'י':'Y','כ':'K','ך':'K','ל':'L','מ':'M','ם':'M','נ':'N','ן':'N','ס':'S',
+    'ע':'','פ':'P','ף':'P','צ':'TS','ץ':'TS','ק':'K','ר':'R','ש':'SH','ת':'T'
+  };
+  return String(str || '').split('').map(ch => (ch in map ? map[ch] : ch)).join('');
+}
+
 // Build a unique personal coupon code from a name/email.
+// Tries the (transliterated) name first, then the email prefix, then 'VIP'.
 function personalCode(nameOrEmail, pct) {
-  let base = (nameOrEmail || 'VIP').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 8) || 'VIP';
+  const translit = hebrewToLatin(nameOrEmail);
+  let base = translit.replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 8);
+  if (!base && nameOrEmail && nameOrEmail.includes('@')) {
+    base = nameOrEmail.split('@')[0].replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 8);
+  }
+  if (!base) base = 'VIP';
   const suffix = Math.floor(Math.random() * 900 + 100);
   return `${base}${pct}${suffix}`;
 }
@@ -114,7 +136,7 @@ async function runCampaign(id, shop, segment, template) {
       // Safety gate. For WhatsApp we IGNORE working hours (the merchant sends the
       // link manually, whenever they choose) but STILL enforce opt-out + cooldown.
       // For email (auto-send) we enforce the full gate including hours.
-      const gate = await compliance.canContactCustomer(shop, contact, { ignoreHours: hasPhone });
+      const gate = await compliance.canContactCustomer(shop, contact, { ignoreHours: hasPhone, cooldownDays: CAMPAIGN_COOLDOWN_DAYS });
       if (!gate.allowed) {
         c.skipped++; c.done++;
         c.log.push({ customer: cust.name || cust.email, skipped: gate.reason });
