@@ -317,3 +317,44 @@ INSERT INTO shops (shop_domain, display_name, data_collection_enabled, installed
 VALUES ('seven770.myshopify.com', 'Seven770 (Demo)', TRUE, NOW())
 ON CONFLICT (shop_domain) DO UPDATE
 SET data_collection_enabled = TRUE;
+
+-- ============================================================
+-- AGENT: autonomous daily plans + tasks
+-- A "plan" is what the agent proposes each morning. Each plan has
+-- multiple "tasks" (moves). The merchant approves which tasks to run;
+-- the agent-engine executes approved tasks one by one in the background.
+-- Persisted so a server restart can resume in-progress plans.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS agent_plans (
+  id BIGSERIAL PRIMARY KEY,
+  shop_domain VARCHAR(255) NOT NULL,
+  plan_date DATE NOT NULL,
+  status VARCHAR(40) DEFAULT 'proposed',   -- 'proposed','approved','running','done','stopped'
+  summary TEXT,                             -- the human-readable plan text
+  projected_revenue NUMERIC(12,2) DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW(),
+  approved_at TIMESTAMP,
+  finished_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id BIGSERIAL PRIMARY KEY,
+  plan_id BIGINT NOT NULL,
+  shop_domain VARCHAR(255) NOT NULL,
+  priority INTEGER DEFAULT 1,               -- order of importance (1 = highest)
+  move_type VARCHAR(60) NOT NULL,           -- 'abandoned_cart','dormant_vip','one_time','hot_product'
+  title TEXT,                               -- short label shown to merchant
+  segment VARCHAR(60),                      -- which customer segment to pull at run time
+  percentage INTEGER DEFAULT 10,            -- coupon %
+  projected_revenue NUMERIC(12,2) DEFAULT 0,
+  est_customers INTEGER DEFAULT 0,
+  params JSONB DEFAULT '{}'::jsonb,         -- extra params (product name, message template, etc.)
+  selected BOOLEAN DEFAULT TRUE,            -- merchant ticked it
+  status VARCHAR(40) DEFAULT 'pending',     -- 'pending','running','done','skipped','failed'
+  result JSONB DEFAULT '{}'::jsonb,         -- sent count, revenue potential, campaign id
+  created_at TIMESTAMP DEFAULT NOW(),
+  finished_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_plans_shop ON agent_plans(shop_domain, plan_date DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_plan ON agent_tasks(plan_id, priority);
