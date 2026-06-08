@@ -1895,7 +1895,7 @@ app.get("/admin/fix-data", async (req, res) => {
        WHERE shop_domain = $1
          AND phone IS NOT NULL
          AND phone !~ '^0?5[0-9]{8}$'
-         AND phone !~ '^\+?9725[0-9]{8}$'`,
+         AND phone !~ '^972 ?5[0-9]{8}$'`,
       [shop]
     );
     const lod = await db.query(
