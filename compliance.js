@@ -81,6 +81,29 @@ async function addOptOut(shop, { email, phone, reason } = {}) {
   }
 }
 
+// ---------- Cooldown: don't pester a customer we contacted recently ----------
+// If we contacted this customer in the last N days (default 14), skip her.
+// Also skip if she already converted recently (no point pushing again).
+const COOLDOWN_DAYS = 14;
+async function isInCooldown(shop, { email, phone } = {}, days = COOLDOWN_DAYS) {
+  if (!email && !phone) return false;
+  try {
+    const r = await db.query(
+      `SELECT 1 FROM advisor_actions
+       WHERE shop_domain = $1
+         AND created_at >= NOW() - ($4 || ' days')::interval
+         AND ( ($2::text IS NOT NULL AND lower(target_email) = lower($2))
+            OR ($3::text IS NOT NULL AND regexp_replace(target_phone,'[^0-9]','','g') = regexp_replace($3,'[^0-9]','','g')) )
+       FETCH FIRST 1 ROWS ONLY`,
+      [shop, email || null, phone || null, String(days)]
+    );
+    return r.rows.length > 0;
+  } catch (e) {
+    console.error('[compliance] isInCooldown failed:', e.message);
+    return false; // fail open - don't block sends on a check error
+  }
+}
+
 // ---------- The single gate every send must pass ----------
 // Returns { allowed: true } or { allowed: false, reason, detail }
 async function canContactCustomer(shop, { email, phone } = {}, opts = {}) {
@@ -101,6 +124,14 @@ async function canContactCustomer(shop, { email, phone } = {}, opts = {}) {
       detail: 'הלקוחה ביקשה לא לקבל הודעות. ההודעה לא נשלחה (חובה חוקית).'
     };
   }
+  // 3. Cooldown - don't pester (skip in batch unless explicitly overridden)
+  if (!opts.ignoreCooldown && await isInCooldown(shop, { email, phone }, opts.cooldownDays || COOLDOWN_DAYS)) {
+    return {
+      allowed: false,
+      reason: 'cooldown',
+      detail: `פנינו ללקוחה הזו לאחרונה (ב-${opts.cooldownDays || COOLDOWN_DAYS} הימים האחרונים). מדלגים כדי לא להציק.`
+    };
+  }
   return { allowed: true };
 }
 
@@ -110,5 +141,6 @@ module.exports = {
   workingHoursStatus,
   isOptedOut,
   addOptOut,
+  isInCooldown,
   canContactCustomer
 };

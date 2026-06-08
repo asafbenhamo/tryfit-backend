@@ -9,6 +9,12 @@ const adminRouter = require("./admin");
 const db = require("./database");
 const featureFlags = require("./feature-flags");
 const shopify = require("./shopify-client");
+const aiTools = require("./ai-tools");
+const aiBrain = require("./ai-brain");
+const dailySummary = require("./daily-summary");
+const insightsEngine = require("./insights-engine");
+const mailer = require("./mailer");
+const compliance = require("./compliance");
 
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
@@ -418,73 +424,12 @@ app.get("/admin/backfill/status", (req, res) => {
 // ======================
 // DATA PLATFORM: Test tools endpoint (TEMPORARY)
 // ======================
-const aiTools = require("./ai-tools");
 
-app.get("/admin/test-tools", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
-  }
-  const shop = "seven770.myshopify.com";
-  const results = {};
-  try {
-    results.getTopCustomers      = await aiTools.getTopCustomers(shop, { limit: 3 });
-    results.getDormantCustomers  = await aiTools.getDormantCustomers(shop, { limit: 3, daysInactive: 30 });
-    results.getNeverPurchased    = await aiTools.getNeverPurchased(shop, { limit: 3 });
-    results.getRepeatCustomers   = await aiTools.getRepeatCustomers(shop, { limit: 3 });
-    results.searchCustomers      = await aiTools.searchCustomers(shop, { query: "a" });
-    results.getTopProducts       = await aiTools.getTopProducts(shop, { limit: 5 });
-    results.getRevenueStats      = await aiTools.getRevenueStats(shop, { days: 60 });
-    results.getTryFitInsights    = await aiTools.getTryFitInsights(shop, { days: 30 });
-    const top = results.getTopCustomers;
-    const sampleEmail = top.ok && top.customers && top.customers[0] ? top.customers[0].email : null;
-    if (sampleEmail) {
-      results._sample_email_used = sampleEmail;
-      results.getCustomerProfile       = await aiTools.getCustomerProfile(shop, { email: sampleEmail });
-      results.generateWhatsAppMessage  = await aiTools.generateWhatsAppMessage(shop, { email: sampleEmail, intent: "comeback" });
-    } else {
-      results.getCustomerProfile = { skipped: "no sample email available" };
-      results.generateWhatsAppMessage = { skipped: "no sample email available" };
-    }
-    res.json({ ok: true, shop, tested_at: new Date().toISOString(), results });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message, partial_results: results });
-  }
-});
 
 // ======================
 // DATA PLATFORM: Test brain endpoint (TEMPORARY)
 // ======================
-const aiBrain = require("./ai-brain");
 
-app.get("/admin/test-brain", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
-  }
-  const question = req.query.q;
-  if (!question) {
-    return res.status(400).json({ error: "חסרה שאלה - הוסף &q=השאלה שלך ל-URL" });
-  }
-  const shop = "seven770.myshopify.com";
-  const shopName = "770";
-  try {
-    const start = Date.now();
-    const result = await aiBrain.askBrain(shop, shopName, question);
-    const duration = Date.now() - start;
-    res.json({
-      ok: result.ok,
-      question,
-      answer: result.answer,
-      tools_used: result.toolsUsed,
-      duration_seconds: (duration / 1000).toFixed(1),
-      model: aiBrain.MODEL
-    });
-  } catch (err) {
-    console.error("test-brain error:", err);
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
 
 // ======================
 // AI CHAT: Real chat endpoint
@@ -529,7 +474,6 @@ app.get("/chat", (req, res) => {
 // ======================
 // DAILY SUMMARY: the advisor's morning briefing (principle 5)
 // ======================
-const dailySummary = require("./daily-summary");
 
 app.get("/api/daily-summary", async (req, res) => {
   try {
@@ -546,7 +490,6 @@ app.get("/api/daily-summary", async (req, res) => {
 // ======================
 // INSIGHTS: Proactive opportunities (shown on chat open)
 // ======================
-const insightsEngine = require("./insights-engine");
 
 app.get("/api/insights", async (req, res) => {
   try {
@@ -565,34 +508,6 @@ app.get("/api/insights", async (req, res) => {
 // ======================
 // TEMPORARY: Test email sending
 // ======================
-app.get("/admin/test-email", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה" });
-  }
-  const to = req.query.to;
-  if (!to) {
-    return res.json({ ok: false, error: "הוסף &to=your@email.com ל-URL" });
-  }
-  if (!mailer.isConfigured()) {
-    return res.json({ ok: false, error: "RESEND_API_KEY not configured in Railway" });
-  }
-  try {
-    const html = mailer.buildHtmlEmail(
-      "שלום! 👋\n\nזו הודעת בדיקה מהיועץ החכם של 770.\n\nאם קיבלת את המייל הזה - מערכת השליחה עובדת מצוין!",
-      { cta_url: "https://sevenseventy.co.il", cta_label: "לחנות שלנו", brand: "770" }
-    );
-    const result = await mailer.sendEmail({
-      to,
-      subject: "בדיקה - היועץ החכם של 770",
-      html,
-      text: "הודעת בדיקה מהיועץ החכם של 770. המערכת עובדת!"
-    });
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
 
 // ======================
 // ACTIONS: Create a real discount coupon (merchant-approved)
@@ -620,8 +535,6 @@ app.post("/api/coupon/create", express.json(), async (req, res) => {
 // ======================
 // ACTIONS: Send an email (merchant-approved)
 // ======================
-const mailer = require("./mailer");
-const compliance = require("./compliance");
 
 app.post("/api/send-email", express.json(), async (req, res) => {
   try {
@@ -692,6 +605,46 @@ app.get("/unsubscribe", async (req, res) => {
 app.get("/api/working-hours", (req, res) => {
   if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
   res.json(compliance.workingHoursStatus());
+});
+
+// ======================
+// CAMPAIGNS: autonomous batch sending (background worker)
+// ======================
+const campaignEngine = require("./campaign-engine");
+
+app.post("/api/campaign/start", express.json(), async (req, res) => {
+  try {
+    const { password, campaign_type, segment, template } = req.body;
+    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    if (!Array.isArray(segment) || segment.length === 0) {
+      return res.status(400).json({ ok: false, error: "אין לקוחות בקמפיין" });
+    }
+    if (!template || !template.body) {
+      return res.status(400).json({ ok: false, error: "חסר תוכן הודעה" });
+    }
+    const { id } = campaignEngine.startCampaign(shop, { campaign_type, segment, template });
+    res.json({ ok: true, campaign_id: id, total: Math.min(segment.length, campaignEngine.MAX_PER_CAMPAIGN) });
+  } catch (err) {
+    console.error("Campaign start error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/campaign/status", (req, res) => {
+  if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  const id = req.query.id;
+  if (id) {
+    const s = campaignEngine.getCampaignStatus(id);
+    if (!s) return res.json({ ok: false, error: "not found" });
+    return res.json({ ok: true, campaign: { id, ...{
+      status: s.status, total: s.total, done: s.done, sent: s.sent,
+      skipped: s.skipped, failed: s.failed,
+      revenue_potential: Math.round(s.revenue_potential || 0),
+      finished_at: s.finished_at
+    } } });
+  }
+  res.json({ ok: true, active: campaignEngine.listActiveCampaigns("seven770.myshopify.com") });
 });
 
 // ======================
@@ -1085,216 +1038,14 @@ app.get("/admin/sync-checkouts", async (req, res) => {
 // ======================
 // TEMPORARY: Diagnose checkout fetch limits
 // ======================
-app.get("/admin/diagnose-checkouts", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה" });
-  }
-  const shop = "seven770.myshopify.com";
-  const token = process.env.SHOPIFY_770_TOKEN;
-  if (!token) return res.json({ ok: false, reason: "no token" });
-
-  const ver = "2026-01";
-  const base = `https://${shop}/admin/api/${ver}`;
-  const headers = { "X-Shopify-Access-Token": token, "Content-Type": "application/json" };
-  const out = {};
-
-  async function tryUrl(label, endpoint) {
-    try {
-      const r = await fetch(`${base}/${endpoint}`, { headers });
-      const status = r.status;
-      let body; try { body = await r.json(); } catch(e){ body = {}; }
-      out[label] = {
-        status,
-        endpoint,
-        count: body.count !== undefined ? body.count : (body.checkouts ? body.checkouts.length : null),
-        link_header: r.headers.get('Link') || r.headers.get('link') || null
-      };
-    } catch (e) {
-      out[label] = { error: e.message, endpoint };
-    }
-  }
-
-  await tryUrl("count_default", "checkouts/count.json");
-  await tryUrl("count_since_2020", "checkouts/count.json?created_at_min=2020-01-01");
-  await tryUrl("page_since_2020", "checkouts.json?limit=250&created_at_min=2020-01-01");
-
-  try {
-    const range = await db.query(
-      `SELECT COUNT(*)::int AS in_db,
-              MIN(shopify_created_at) AS oldest,
-              MAX(shopify_created_at) AS newest
-       FROM abandoned_checkouts WHERE shop_domain = $1`,
-      [shop]
-    );
-    out.db_state = range.rows[0];
-  } catch (e) {
-    out.db_state = { error: e.message };
-  }
-
-  res.json({ ok: true, diagnostics: out });
-});
 
 // ======================
 // TEMPORARY: Test discount/coupon API access
 // ======================
-app.get("/admin/test-discounts", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה" });
-  }
-  const shop = "seven770.myshopify.com";
-  const token = process.env.SHOPIFY_770_TOKEN;
-  if (!token) return res.json({ ok: false, reason: "no token" });
-
-  const base = `https://${shop}/admin/api/2026-01`;
-  const headers = { "X-Shopify-Access-Token": token, "Content-Type": "application/json" };
-  const out = {};
-
-  // READ test: list existing price rules (needs read_price_rules)
-  try {
-    const r = await fetch(`${base}/price_rules.json?limit=1`, { headers });
-    out.read_price_rules = {
-      status: r.status,
-      access: r.status === 200 ? "GRANTED" : "DENIED",
-      count: r.status === 200 ? ((await r.json()).price_rules || []).length : null
-    };
-  } catch (e) { out.read_price_rules = { error: e.message }; }
-
-  // WRITE capability is inferred: if read works, write usually shares the scope,
-  // but the true test is creating one. We do NOT create here to avoid junk data.
-  // Instead we report what scopes the token reports (if the endpoint allows).
-  try {
-    const r = await fetch(`${base}/oauth/access_scopes.json`, { headers });
-    if (r.status === 200) {
-      const body = await r.json();
-      out.granted_scopes = (body.access_scopes || []).map(s => s.handle);
-    } else {
-      out.granted_scopes = `could not read scopes (status ${r.status})`;
-    }
-  } catch (e) { out.granted_scopes = { error: e.message }; }
-
-  res.json({ ok: true, diagnostics: out });
-});
 
 // ======================
 // TEMPORARY: Test WRITE access for coupons (creates + deletes a test coupon)
 // ======================
-app.get("/admin/test-coupon-write", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה" });
-  }
-  const shop = "seven770.myshopify.com";
-  const token = process.env.SHOPIFY_770_TOKEN;
-  if (!token) return res.json({ ok: false, reason: "no token" });
-
-  const base = `https://${shop}/admin/api/2026-01`;
-  const headers = { "X-Shopify-Access-Token": token, "Content-Type": "application/json" };
-  const out = {};
-  let createdPriceRuleId = null;
-
-  // Step 1: Try to create a price rule (the actual write test)
-  try {
-    const priceRule = {
-      price_rule: {
-        title: "TRYFIT_WRITE_TEST_DELETE_ME",
-        target_type: "line_item",
-        target_selection: "all",
-        allocation_method: "across",
-        value_type: "percentage",
-        value: "-10.0",
-        customer_selection: "all",
-        starts_at: new Date().toISOString()
-      }
-    };
-    const r = await fetch(`${base}/price_rules.json`, {
-      method: "POST", headers, body: JSON.stringify(priceRule)
-    });
-    out.create_attempt = { status: r.status };
-    if (r.status === 201) {
-      const body = await r.json();
-      createdPriceRuleId = body.price_rule?.id;
-      out.create_attempt.access = "WRITE GRANTED ✅";
-      out.create_attempt.created_id = createdPriceRuleId;
-    } else {
-      const body = await r.text();
-      out.create_attempt.access = "WRITE DENIED ❌";
-      out.create_attempt.message = body.substring(0, 200);
-      out.create_attempt.likely_cause = (r.status === 403)
-        ? "Missing write_price_rules scope - need to add it to the app"
-        : "Other error";
-    }
-  } catch (e) {
-    out.create_attempt = { error: e.message };
-  }
-
-  // Step 2: Clean up - delete the test price rule if we created one
-  if (createdPriceRuleId) {
-    try {
-      const dr = await fetch(`${base}/price_rules/${createdPriceRuleId}.json`, {
-        method: "DELETE", headers
-      });
-      out.cleanup = { status: dr.status, deleted: dr.status === 200 || dr.status === 204 };
-    } catch (e) {
-      out.cleanup = { error: e.message, note: "test rule may remain - delete TRYFIT_WRITE_TEST_DELETE_ME manually" };
-    }
-  }
-
-  res.json({ ok: true, result: out });
-});
-app.get("/admin/test-checkouts", async (req, res) => {
-  const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
-  }
-  const shop = "seven770.myshopify.com";
-  const token = process.env.SHOPIFY_770_TOKEN;
-  if (!token) {
-    return res.json({ ok: false, reason: "no token configured" });
-  }
-  try {
-    // Try to fetch a single abandoned checkout to test access + scope.
-    const url = `https://${shop}/admin/api/2026-01/checkouts.json?limit=1`;
-    const r = await fetch(url, {
-      headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" }
-    });
-    const status = r.status;
-    let body;
-    try { body = await r.json(); } catch (e) { body = await r.text(); }
-
-    if (status === 200) {
-      const checkouts = body.checkouts || [];
-      const sample = checkouts[0] || null;
-      return res.json({
-        ok: true,
-        access: "GRANTED",
-        status,
-        checkouts_returned: checkouts.length,
-        sample_fields: sample ? Object.keys(sample) : [],
-        sample_line_items: sample && sample.line_items
-          ? sample.line_items.map(li => ({ title: li.title, quantity: li.quantity, price: li.price }))
-          : [],
-        sample_total: sample ? sample.total_price : null,
-        sample_email: sample ? (sample.email ? "present" : "none") : null,
-        sample_created: sample ? sample.created_at : null
-      });
-    } else {
-      // 401/403 = scope missing; anything else = other error
-      return res.json({
-        ok: false,
-        access: "DENIED_OR_ERROR",
-        status,
-        message: typeof body === "string" ? body.substring(0, 300) : JSON.stringify(body).substring(0, 300),
-        likely_cause: (status === 401 || status === 403)
-          ? "Missing read_checkouts / read_orders scope - need to add scope (permission popup)"
-          : "Other API error"
-      });
-    }
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
 
 // ======================
 // FASHN FUNCTIONS
