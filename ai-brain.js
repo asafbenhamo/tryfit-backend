@@ -319,6 +319,14 @@ const TOOL_DEFINITIONS = [
     name: "getTodayActivity",
     description: "מה היועץ עשה היום (מתחילת היום בשעון ישראל) - כמה פעולות, כמה לקוחות נוצר איתן קשר, כמה קופונים נוצרו, כמה המרות וכמה כסף נכנס היום. השתמש בזה כשבעל החנות שואל 'מה עשית עד עכשיו' / 'מה קרה היום' / לדיווח אמצע יום או סוף יום. נותן תמונה מדויקת של הפעילות היומית.",
     input_schema: { type: "object", properties: {} }
+  },
+  {
+    name: "getNewestProducts",
+    description: "המוצרים שפורסמו לאחרונה - הקולקציה החדשה ביותר שעלתה לחנות. ממיין לפי תאריך פרסום (published_at), כך שזה תופס גם מוצרים שנוצרו מזמן אבל רק עכשיו הפכו לאקטיביים/פורסמו. השתמש בזה כשבעל החנות מדבר על 'הקולקציה החדשה', 'מה שעלה עכשיו', או רוצה לקדם את המוצרים החדשים. מחזיר שם, מחיר, מלאי, קישור ותאריך פרסום.",
+    input_schema: {
+      type: "object",
+      properties: { limit: { type: "integer", description: "כמה מוצרים (ברירת מחדל 15)" } }
+    }
   }
 ];
 
@@ -340,7 +348,8 @@ const TOOL_IMPL = {
   getCampaignPerformance: aiTools.getCampaignPerformance,
   getProductVariants: aiTools.getProductVariants,
   getCustomerSizes: aiTools.getCustomerSizes,
-  getTodayActivity: aiTools.getTodayActivity
+  getTodayActivity: aiTools.getTodayActivity,
+  getNewestProducts: aiTools.getNewestProducts
 };
 
 // Recursively strip heavy/PII-laden fields before sending to Claude.

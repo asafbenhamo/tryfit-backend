@@ -354,6 +354,52 @@ async function getCustomerPurchases(shopDomain, options = {}) {
   });
 }
 
+// ---------- 19. getNewestProducts ----------
+// The most recently PUBLISHED products (the newest collection that just went
+// live). Reads published_at / updated_at from raw_data, so it catches products
+// that were created earlier but only just set to active.
+async function getNewestProducts(shopDomain, options = {}) {
+  return safe('getNewestProducts', async () => {
+    const limit = Math.min(parseInt(options.limit) || 15, 40);
+    // Pull available products with their raw_data, then sort by published_at in JS
+    // (published_at lives inside the JSONB, not a top-level column).
+    const result = await db.query(
+      `SELECT title, handle, min_price, max_price, total_inventory, raw_data
+       FROM store_products
+       WHERE shop_domain = $1 AND available = TRUE AND raw_data IS NOT NULL
+       FETCH FIRST 500 ROWS ONLY`,
+      [shopDomain]
+    );
+
+    const PUBLIC_DOMAIN = "https://sevenseventy.co.il";
+    const withDates = result.rows.map(row => {
+      let raw = {};
+      try { raw = typeof row.raw_data === 'string' ? JSON.parse(row.raw_data) : row.raw_data; } catch (e) {}
+      const published = raw.published_at || raw.created_at || null;
+      const updated = raw.updated_at || null;
+      // "freshness" = most recent of published/updated
+      const freshness = [published, updated].filter(Boolean).sort().pop() || null;
+      return {
+        title: row.title,
+        url: row.handle ? `${PUBLIC_DOMAIN}/products/${row.handle}` : null,
+        price: row.min_price,
+        inventory: row.total_inventory,
+        published_at: published,
+        freshness
+      };
+    }).filter(p => p.freshness);
+
+    // Sort newest first
+    withDates.sort((a, b) => (b.freshness || '').localeCompare(a.freshness || ''));
+
+    return {
+      ok: true,
+      newest_products: withDates.slice(0, limit),
+      note: 'sorted by publish/update date - the top items are the freshest collection that went live most recently. Use these when the merchant asks about the new collection or wants to promote what just launched.'
+    };
+  });
+}
+
 // ---------- 12. getStoreProducts ----------
 // Live catalog (synced from Shopify every 6h). Search by free text in title,
 // filter by price and availability. Does NOT rely on product_type (mostly empty in 770).
@@ -722,5 +768,6 @@ module.exports = {
   getCampaignPerformance,
   getProductVariants,
   getCustomerSizes,
-  getTodayActivity
+  getTodayActivity,
+  getNewestProducts
 };
