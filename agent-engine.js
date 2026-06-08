@@ -163,7 +163,7 @@ async function stopPlan(planId) {
 async function getPlanStatus(planId) {
   const plan = await db.query(`SELECT * FROM agent_plans WHERE id=$1`, [planId]);
   if (plan.rows.length === 0) return null;
-  const tasks = await db.query(`SELECT id, priority, move_type, title, status, result, est_customers, projected_revenue FROM agent_tasks WHERE plan_id=$1 ORDER BY priority ASC`, [planId]);
+  const tasks = await db.query(`SELECT id, priority, move_type, title, status, result, est_customers, projected_revenue, params FROM agent_tasks WHERE plan_id=$1 ORDER BY priority ASC`, [planId]);
   return { plan: plan.rows[0], tasks: tasks.rows };
 }
 

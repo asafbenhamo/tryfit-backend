@@ -697,7 +697,12 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
       const val = cartList.reduce((s, c) => s + parseFloat(c.total_price || 0), 0);
       moves.push({ priority: 1, move_type: 'abandoned_cart', segment: 'abandoned',
         title: `שחזור ${cartList.length} עגלות נטושות`, percentage: 10,
-        est_customers: cartList.length, projected_revenue: Math.round(val * 0.25) });
+        est_customers: cartList.length, projected_revenue: Math.round(val * 0.25),
+        details: {
+          what: `אשלח לכל אחת מ-${cartList.length} הלקוחות שנטשו עגלה הודעה אישית עם קוד הנחה של 10% וקישור ישיר להשלמת הרכישה.`,
+          goal: 'להחזיר כסף שכבר כמעט נכנס - הלקוחה רצתה לקנות ועצרה ברגע האחרון.',
+          why: `עגלות נטושות הן ההזדמנות הכי חמה שיש: הלקוחה כבר בחרה מוצר והראתה כוונת קנייה. תזכורת קטנה + תמריץ של 10% מספיקים בדרך כלל כדי לסגור. בשווי כולל של ₪${Math.round(val).toLocaleString()} בעגלות, גם המרה של רבע מהן = הכנסה משמעותית. זה המהלך עם ה-ROI הכי גבוה, ולכן הוא ראשון.`
+        }});
     }
 
     // 2. Dormant VIPs
@@ -706,7 +711,12 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
       const val = vips.customers.reduce((s, c) => s + parseFloat(c.total_spent || 0) * 0.15, 0);
       moves.push({ priority: 2, move_type: 'dormant_vip', segment: 'dormant_vip',
         title: `החזרת ${vips.customers.length} לקוחות VIP שנעלמו`, percentage: 15,
-        est_customers: vips.customers.length, projected_revenue: Math.round(val) });
+        est_customers: vips.customers.length, projected_revenue: Math.round(val),
+        details: {
+          what: `אפנה ל-${vips.customers.length} לקוחות VIP (שהוציאו מעל ₪1,000) שלא קנו מעל 30 יום, עם הודעה חמה אישית וקוד הנחה נדיב של 15%.`,
+          goal: 'להחזיר לקוחות בעלות ערך גבוה לפני שהן עוברות למתחרים.',
+          why: 'לקוחה ש-VIP ששווה אלפי שקלים לאורך זמן שווה הרבה יותר מלקוחה חדשה - כבר השקעת בגיוס שלה, היא מכירה ואוהבת את המותג. כשהיא נעלמת, זו נורת אזהרה. הנחה נדיבה יותר (15%) מוצדקת כי שווי הלקוחה גבוה, והסיכון לאבד אותה לחלוטין גדול יותר מעלות ההנחה.'
+        }});
     }
 
     // 3. One-time buyers
@@ -715,7 +725,12 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
       const val = oneTime.reduce((s, c) => s + parseFloat(c.total_spent || 0), 0);
       moves.push({ priority: 3, move_type: 'one_time', segment: 'one_time',
         title: `דחיפת ${oneTime.length} לקוחות לקנייה שנייה`, percentage: 12,
-        est_customers: oneTime.length, projected_revenue: Math.round(val * 0.4) });
+        est_customers: oneTime.length, projected_revenue: Math.round(val * 0.4),
+        details: {
+          what: `אפנה ל-${oneTime.length} לקוחות שקנו פעם אחת בלבד, עם הזמנה חמה לחזור וקוד הנחה של 12%.`,
+          goal: 'להפוך קונה חד-פעמי ללקוח חוזר - הקפיצה הכי חשובה בנאמנות.',
+          why: 'המעבר מקנייה ראשונה לשנייה הוא הרגע הקריטי ביותר במחזור החיים של לקוח. לקוח שקונה פעמיים נוטה להישאר לטווח ארוך והערך שלו קופץ. לקוח שנשאר עם קנייה אחת בדרך כלל אבוד. דחיפה עדינה בזמן הנכון מכפילה את אחוז ההמרה לקנייה שנייה.'
+        }});
     }
 
     // 4. Hot product promotion
@@ -723,9 +738,15 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
     const repeat = await aiTools.getRepeatCustomers(shop, { limit: 50 });
     if ((repeat.customers || []).length > 0 && (hot.products || hot.top_products || []).length > 0) {
       const val = repeat.customers.reduce((s, c) => s + parseFloat(c.total_spent || 0) * 0.1, 0);
+      const hotName = ((hot.products || hot.top_products || [])[0] || {}).title || 'המוצר החם';
       moves.push({ priority: 4, move_type: 'hot_product', segment: 'repeat',
         title: `קידום מוצר חם ל-${repeat.customers.length} לקוחות נאמנים`, percentage: 10,
-        est_customers: repeat.customers.length, projected_revenue: Math.round(val) });
+        est_customers: repeat.customers.length, projected_revenue: Math.round(val),
+        details: {
+          what: `אקדם את המוצר שהכי נמכר ("${hotName}") ל-${repeat.customers.length} לקוחות חוזרים, עם הודעה וקוד 10%.`,
+          goal: 'למנף מוצר שכבר מוכיח את עצמו, ולמכור אותו ליותר אנשים לפני שאוזל.',
+          why: 'מוצר שמוכר חזק הוא הוכחה חיה לביקוש - קל יותר למכור עוד ממנו מאשר לדחוף מוצר חדש לא מוכח. לקוחות חוזרים כבר סומכים על הטעם שלך, אז המלצה על להיט תתקבל בחום. זה גם יוצר תחושת דחיפות (FOMO) אם המלאי מוגבל.'
+        }});
     }
 
     if (moves.length === 0) {
@@ -745,9 +766,9 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
     // Save tasks
     for (const m of moves) {
       await db.query(
-        `INSERT INTO agent_tasks (plan_id, shop_domain, priority, move_type, title, segment, percentage, projected_revenue, est_customers)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [planId, shop, m.priority, m.move_type, m.title, m.segment, m.percentage, m.projected_revenue, m.est_customers]
+        `INSERT INTO agent_tasks (plan_id, shop_domain, priority, move_type, title, segment, percentage, projected_revenue, est_customers, params)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [planId, shop, m.priority, m.move_type, m.title, m.segment, m.percentage, m.projected_revenue, m.est_customers, JSON.stringify({ details: m.details || {} })]
       );
     }
 

@@ -201,6 +201,19 @@
   .task-info { flex: 1; }
   .task-title { font-size: 14px; font-weight: 600; color: #1a2230; line-height: 1.4; }
   .task-meta { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+  .plan-task-wrap { margin-bottom: 9px; }
+  .plan-task-wrap .plan-task { margin-bottom: 0; }
+  .task-expand {
+    border: none; background: none; color: #0a6fe0; font-family: 'Heebo',sans-serif;
+    font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 6px 4px 2px 4px; margin-right: 30px;
+  }
+  .task-details {
+    margin: 4px 30px 0; padding: 12px 14px; background: #f4f8ff;
+    border: 1px solid #dde8fa; border-radius: 10px; animation: rise 0.25s ease;
+  }
+  .td-row { font-size: 13px; color: #2f3a48; line-height: 1.65; margin-bottom: 8px; }
+  .td-row:last-child { margin-bottom: 0; }
+  .td-label { font-weight: 700; color: #0a2540; }
   .plan-exec-status { margin-top: 6px; }
   .agent-working { font-size: 15px; font-weight: 700; color: #0a6fe0; margin-bottom: 10px; }
   .agent-task-line { font-size: 13.5px; color: #2a3441; padding: 5px 0; line-height: 1.5; }
@@ -410,10 +423,25 @@
     $('main').style.display = 'flex';
     $('input').focus();
     loadConvoList();
+    setupHomeSections();
     loadDailySummary();
+    loadDailyPlan();
     loadInsights();
     loadMoneyCounter();
     setInterval(loadMoneyCounter, 60000);
+  }
+
+  /* Anchor the home screen sections in a fixed order so load timing
+     never changes the layout: summary -> plan -> insights -> welcome */
+  function setupHomeSections() {
+    const w = $('welcome');
+    if (!w || document.getElementById('homeSummarySlot')) return;
+    ['homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
+      const slot = document.createElement('div');
+      slot.id = id;
+      slot.className = 'home-slot';
+      w.parentNode.insertBefore(slot, w);
+    });
   }
 
   /* ===== DAILY SUMMARY (principle 5) ===== */
@@ -451,19 +479,20 @@
       html += '<div class="summary-line">⏳ ' + ach.pending + ' פעולות ממתינות לתוצאה. אני עוקב ואעדכן ברגע שייסגרו.</div>';
     }
     card.innerHTML = html;
-    w.parentNode.insertBefore(card, w);
-    loadDailyPlan();
+    const slot = document.getElementById('homeSummarySlot');
+    if (slot) slot.appendChild(card);
+    else w.parentNode.insertBefore(card, w);
   }
 
   /* ===== AGENT DAILY PLAN (propose -> select -> execute -> track) ===== */
   async function loadDailyPlan() {
     if (!$('welcome')) return;
-    const sc = document.querySelector('.summary-card');
     const wrap = document.createElement('div');
     wrap.className = 'plan-card';
     wrap.id = 'agentPlanCard';
     wrap.innerHTML = '<div class="plan-head">📋 התוכנית שלי להיום</div><div class="plan-loading">מנתח את החנות ובונה תוכנית עבודה... ⚙️</div>';
-    if (sc) sc.parentNode.insertBefore(wrap, sc.nextSibling);
+    const slot = document.getElementById('homePlanSlot');
+    if (slot) slot.appendChild(wrap);
     else return;
     try {
       const res = await fetch('/api/agent/propose-plan', {
@@ -484,18 +513,41 @@
     html += '<div class="plan-intro">ניתחתי את החנות ובניתי תוכנית עבודה. סמן מה לבצע ואני אריץ הכל לבד. צפי הכנסה כולל: <strong>₪' + (data.projected_revenue||0).toLocaleString() + '</strong></div>';
     html += '<div class="plan-tasks">';
     data.tasks.forEach((t, idx) => {
+      let det = {};
+      try { det = (typeof t.params === 'string' ? JSON.parse(t.params) : t.params || {}).details || {}; } catch(e) {}
+      const hasDetails = det.what || det.goal || det.why;
+      html += '<div class="plan-task-wrap">';
       html += '<label class="plan-task">'
         + '<input type="checkbox" class="task-check" value="' + t.id + '" checked>'
         + '<div class="task-info">'
         + '<div class="task-title">' + (idx+1) + '. ' + esc(t.title) + '</div>'
         + '<div class="task-meta">' + t.est_customers + ' לקוחות · צפי ₪' + Math.round(t.projected_revenue||0).toLocaleString() + '</div>'
         + '</div></label>';
+      if (hasDetails) {
+        html += '<button class="task-expand" data-idx="' + idx + '">הסבר מלא על המהלך ⌄</button>';
+        html += '<div class="task-details" id="taskDet' + idx + '" style="display:none">';
+        if (det.what) html += '<div class="td-row"><span class="td-label">מה אעשה:</span> ' + esc(det.what) + '</div>';
+        if (det.goal) html += '<div class="td-row"><span class="td-label">המטרה:</span> ' + esc(det.goal) + '</div>';
+        if (det.why) html += '<div class="td-row"><span class="td-label">למה זה חכם:</span> ' + esc(det.why) + '</div>';
+        html += '</div>';
+      }
+      html += '</div>';
     });
     html += '</div>';
     html += '<button class="plan-approve" id="execPlanBtn">בצע את מה שסימנתי ←</button>';
     html += '<div class="plan-exec-status" id="planExecStatus" style="display:none"></div>';
     wrap.innerHTML = html;
     wrap.querySelector('#execPlanBtn').onclick = () => executeAgentPlan(wrap);
+    wrap.querySelectorAll('.task-expand').forEach(btn => {
+      btn.onclick = () => {
+        const det = wrap.querySelector('#taskDet' + btn.getAttribute('data-idx'));
+        if (det) {
+          const open = det.style.display !== 'none';
+          det.style.display = open ? 'none' : 'block';
+          btn.innerHTML = open ? 'הסבר מלא על המהלך ⌄' : 'הסתר ⌃';
+        }
+      };
+    });
   }
   async function executeAgentPlan(wrap) {
     const checks = [...wrap.querySelectorAll('.task-check:checked')].map(c => parseInt(c.value));
@@ -641,8 +693,10 @@
       html += '</div>';
     });
     wrap.innerHTML = html;
-    // Insert the insights above the welcome text
-    w.parentNode.insertBefore(wrap, w);
+    // Insert the insights into their fixed slot (below the plan)
+    const slot = document.getElementById('homeInsightsSlot');
+    if (slot) slot.appendChild(wrap);
+    else w.parentNode.insertBefore(wrap, w);
     // Wire up buttons
     wrap.querySelectorAll('.insight-btn').forEach(btn => {
       btn.onclick = () => {
@@ -719,7 +773,9 @@
     history = [];
     $('messages').innerHTML = '<div class="welcome" id="welcome"><h2>איך אפשר לעזור?</h2><p>שאלי אותי כל דבר על החנות — לקוחות, מכירות, מוצרים, או רעיונות לקמפיינים.</p></div>';
     loadConvoList();
+    setupHomeSections();
     loadDailySummary();
+    loadDailyPlan();
     loadInsights();
     closeSidebar();
     $('input').focus();
