@@ -16,6 +16,7 @@ const insightsEngine = require("./insights-engine");
 const mailer = require("./mailer");
 const compliance = require("./compliance");
 const agentEngine = require("./agent-engine");
+const attributionEngine = require("./attribution-engine");
 
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
@@ -1959,6 +1960,24 @@ app.get("/admin/fix-data", async (req, res) => {
   }
 });
 
+// ======================
+// ATTRIBUTION: pull recent orders and close advisor actions (HMAC-independent).
+// Run manually now to close existing orders; also runs automatically every 5 min.
+// Call: /admin/run-attribution?password=...
+// ======================
+app.get("/admin/run-attribution", async (req, res) => {
+  if (req.query.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  try {
+    const result = await attributionEngine.runAttribution("seven770.myshopify.com");
+    res.json(result);
+  } catch (err) {
+    console.error("run-attribution error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/admin/setup-agent-tables", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
@@ -2199,6 +2218,29 @@ app.listen(PORT, async () => {
     }
   }, 60 * 1000);
   console.log("📋 Reports scheduled (09:00 overnight + 21:00 end-of-day, Israel time)");
+
+  // ========== Attribution scan (every 5 minutes) ==========
+  // Pulls recent orders from Shopify and closes advisor actions. Independent of
+  // the orders/create webhook, so it works even if webhook HMAC verification fails.
+  if (process.env.DATABASE_URL) {
+    const ATTR_SHOP = "seven770.myshopify.com";
+    let attrRunning = false;
+    const runAttr = async () => {
+      if (attrRunning) return;
+      if (!shopify.hasTokenForShop(ATTR_SHOP)) return;
+      attrRunning = true;
+      try {
+        await attributionEngine.runAttribution(ATTR_SHOP);
+      } catch (e) {
+        console.error("⚠️  [Attribution] scheduled run failed:", e.message);
+      } finally {
+        attrRunning = false;
+      }
+    };
+    setTimeout(runAttr, 120000); // first run 2 min after startup
+    setInterval(runAttr, 5 * 60 * 1000); // then every 5 minutes
+    console.log("🔁 Attribution scan scheduled (every 5 min)");
+  }
 
   agentEngine.resumeInterruptedPlans();
 

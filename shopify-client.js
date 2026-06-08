@@ -1150,6 +1150,7 @@ async function createDraftOrder(shopDomain, opts = {}) {
 }
 
 module.exports = {
+  shopifyGet,
   hasTokenForShop,
   getTokenForShop,
   findCustomerByEmail,
