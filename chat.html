@@ -643,6 +643,97 @@
     });
     return { fields, cleanText: text.replace(m[0], '').trim() };
   }
+  function parseCampaign(text) {
+    const m = text.match(/\[\[CAMPAIGN:([\s\S]*?)\]\]/);
+    if (!m) return null;
+    const fields = {};
+    // body may contain '|', so split carefully: only split on '|key='
+    const raw = m[1];
+    const parts = raw.split(/\|(?=[a-z_]+=)/);
+    parts.forEach(part => {
+      const idx = part.indexOf('=');
+      if (idx > -1) fields[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+    });
+    // Parse customers: name<email<phone<value ;; ...
+    const customers = (fields.customers || '').split(';;').map(c => {
+      const [name, email, phone, value] = c.split('<');
+      return { name: (name||'').trim(), email: (email||'').trim(), phone: (phone||'').trim(), est_value: parseFloat(value||'0')||0 };
+    }).filter(c => c.email || c.phone);
+    return { fields, customers, cleanText: text.replace(m[0], '').trim() };
+  }
+  function renderCampaignCard(camp, container) {
+    const f = camp.fields;
+    const custs = camp.customers;
+    const totalValue = custs.reduce((s,c) => s + (c.est_value||0), 0);
+    const card = document.createElement('div');
+    card.className = 'action-card campaign-card';
+    let html = '<div class="action-head">🚀 קמפיין מוכן להפעלה</div>';
+    html += '<div class="action-row"><span>סגמנט:</span> ' + esc(f.type || 'קמפיין') + '</div>';
+    html += '<div class="action-row"><span>לקוחות:</span> ' + custs.length + '</div>';
+    if (f.percentage) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ' + esc(f.percentage) + '%</div>';
+    if (totalValue > 0) html += '<div class="action-row"><span>צפי הכנסה:</span> ₪' + Math.round(totalValue).toLocaleString() + '</div>';
+    html += '<div class="action-btns"><button class="action-approve">הפעל קמפיין ←</button><button class="action-cancel">בטל</button></div>';
+    html += '<div class="action-result" style="display:none"></div>';
+    card.innerHTML = html;
+    container.appendChild(card);
+
+    const approveBtn = card.querySelector('.action-approve');
+    const cancelBtn = card.querySelector('.action-cancel');
+    const resultDiv = card.querySelector('.action-result');
+    cancelBtn.onclick = () => card.remove();
+    approveBtn.onclick = async () => {
+      approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'מתחיל...';
+      try {
+        const res = await fetch('/api/campaign/start', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            password: PASSWORD, campaign_type: f.type || 'campaign',
+            segment: custs,
+            template: { percentage: f.percentage ? parseInt(f.percentage) : 10,
+              days_valid: f.days ? parseInt(f.days) : 14,
+              subject: f.subject || 'הודעה מ-770', body: f.body || '' }
+          })
+        });
+        const data = await res.json();
+        card.querySelector('.action-btns').style.display = 'none';
+        resultDiv.style.display = 'block';
+        if (data.ok) {
+          resultDiv.className = 'action-result success';
+          pollCampaign(data.campaign_id, data.total, resultDiv);
+        } else {
+          resultDiv.className = 'action-result error';
+          resultDiv.innerHTML = '❌ ' + (data.error || 'שגיאה');
+        }
+      } catch (err) {
+        resultDiv.style.display = 'block';
+        resultDiv.className = 'action-result error';
+        resultDiv.innerHTML = '❌ שגיאה: ' + err.message;
+      }
+    };
+  }
+  async function pollCampaign(id, total, el) {
+    let done = false;
+    async function tick() {
+      try {
+        const res = await fetch('/api/campaign/status?password=' + encodeURIComponent(PASSWORD) + '&id=' + id);
+        const data = await res.json();
+        if (!data.ok || !data.campaign) return;
+        const c = data.campaign;
+        if (c.status === 'done') {
+          done = true;
+          el.innerHTML = '✅ הקמפיין הושלם! פניתי ל-' + c.sent + ' לקוחות'
+            + (c.skipped ? ' (' + c.skipped + ' דולגו - cooldown/הסרה)' : '')
+            + (c.revenue_potential ? '<br>צפי הכנסה: ₪' + c.revenue_potential.toLocaleString() : '')
+            + '<br><span style="font-size:12px;color:#666">אעקוב ואדווח כשייסגרו מעגלים. הרווח בפועל יופיע למעלה.</span>';
+          loadMoneyCounter();
+        } else {
+          el.innerHTML = '⚙️ עובד... ' + c.done + '/' + c.total + ' (' + c.sent + ' נשלחו)';
+        }
+      } catch (e) {}
+      if (!done) setTimeout(tick, 2000);
+    }
+    tick();
+  }
   function renderCartCard(cart, container) {
     const f = cart.fields;
     const card = document.createElement('div');
@@ -787,11 +878,17 @@
     if (role === 'ai') {
       const action = parseAction(text);
       const cart = parseCart(text);
-      const displayText = cart ? cart.cleanText : (action ? action.cleanText : text);
+      const campaign = parseCampaign(text);
+      const displayText = campaign ? campaign.cleanText : (cart ? cart.cleanText : (action ? action.cleanText : text));
       bubble.innerHTML = render(displayText);
       row.appendChild(bubble);
       $('messages').appendChild(row);
-      if (cart) {
+      if (campaign) {
+        const cardRow = document.createElement('div');
+        cardRow.className = 'action-row-wrap';
+        renderCampaignCard(campaign, cardRow);
+        $('messages').appendChild(cardRow);
+      } else if (cart) {
         const cardRow = document.createElement('div');
         cardRow.className = 'action-row-wrap';
         renderCartCard(cart, cardRow);
@@ -921,7 +1018,8 @@
     return new Promise(resolve => {
       const action = parseAction(fullText);
       const cart = parseCart(fullText);
-      const displayText = cart ? cart.cleanText : (action ? action.cleanText : fullText);
+      const campaign = parseCampaign(fullText);
+      const displayText = campaign ? campaign.cleanText : (cart ? cart.cleanText : (action ? action.cleanText : fullText));
 
       const w = $('welcome'); if (w) w.remove();
       const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
@@ -940,7 +1038,12 @@
       function step() {
         if (i >= tokens.length) {
           bubble.innerHTML = render(displayText);
-          if (cart) {
+          if (campaign) {
+            const cardRow = document.createElement('div');
+            cardRow.className = 'action-row-wrap';
+            renderCampaignCard(campaign, cardRow);
+            $('messages').appendChild(cardRow);
+          } else if (cart) {
             const cardRow = document.createElement('div');
             cardRow.className = 'action-row-wrap';
             renderCartCard(cart, cardRow);
