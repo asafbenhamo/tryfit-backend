@@ -188,6 +188,23 @@
   }
   .plan-approve:active { transform: scale(0.98); }
   .plan-approve:hover { background: #15803d; }
+  .plan-intro { font-size: 13.5px; color: #44505f; margin-bottom: 14px; line-height: 1.6; }
+  .plan-intro strong { color: #16a34a; }
+  .plan-tasks { display: flex; flex-direction: column; gap: 9px; margin-bottom: 14px; }
+  .plan-task {
+    display: flex; align-items: flex-start; gap: 11px; padding: 12px 13px;
+    background: #f8faff; border: 1px solid #e3ebf9; border-radius: 12px; cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .plan-task:hover { border-color: #b9d0f5; }
+  .task-check { width: 19px; height: 19px; margin-top: 1px; accent-color: #16a34a; cursor: pointer; flex-shrink: 0; }
+  .task-info { flex: 1; }
+  .task-title { font-size: 14px; font-weight: 600; color: #1a2230; line-height: 1.4; }
+  .task-meta { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+  .plan-exec-status { margin-top: 6px; }
+  .agent-working { font-size: 15px; font-weight: 700; color: #0a6fe0; margin-bottom: 10px; }
+  .agent-task-line { font-size: 13.5px; color: #2a3441; padding: 5px 0; line-height: 1.5; }
+  .agent-summary { margin-top: 12px; padding-top: 12px; border-top: 1px solid #e3ebf9; font-size: 14px; font-weight: 600; color: #16a34a; }
   .action-stop {
     border: 1px solid #dc2626; background: #fff; color: #dc2626;
     font-family: 'Heebo',sans-serif; font-size: 13px; font-weight: 700;
@@ -438,33 +455,116 @@
     loadDailyPlan();
   }
 
-  /* ===== DAILY BUSINESS PLAN (the agent's plan for today) ===== */
+  /* ===== AGENT DAILY PLAN (propose -> select -> execute -> track) ===== */
   async function loadDailyPlan() {
     if (!$('welcome')) return;
-    // Insert a loading placeholder right after the summary card
     const sc = document.querySelector('.summary-card');
     const wrap = document.createElement('div');
     wrap.className = 'plan-card';
-    wrap.innerHTML = '<div class="plan-head">📋 התוכנית שלי להיום</div><div class="plan-loading">בונה לך תוכנית עסקית מותאמת... ⚙️</div>';
+    wrap.id = 'agentPlanCard';
+    wrap.innerHTML = '<div class="plan-head">📋 התוכנית שלי להיום</div><div class="plan-loading">מנתח את החנות ובונה תוכנית עבודה... ⚙️</div>';
     if (sc) sc.parentNode.insertBefore(wrap, sc.nextSibling);
     else return;
     try {
-      const res = await fetch('/api/daily-plan?password=' + encodeURIComponent(PASSWORD));
+      const res = await fetch('/api/agent/propose-plan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD })
+      });
       const data = await res.json();
-      if (!data.ok || !$('welcome')) { wrap.remove(); return; }
-      let html = '<div class="plan-head">📋 התוכנית שלי להיום</div>';
-      html += '<div class="plan-body">' + render(data.plan) + '</div>';
-      html += '<button class="plan-approve" onclick="approvePlan()">אשר את התוכנית והתחל לעבוד ←</button>';
-      wrap.innerHTML = html;
-      window._dailyPlanText = data.plan;
+      if (!$('welcome')) { wrap.remove(); return; }
+      if (!data.ok || !data.tasks || data.tasks.length === 0) { wrap.remove(); return; }
+      renderAgentPlan(wrap, data);
     } catch (err) {
       wrap.remove();
     }
   }
-  function approvePlan() {
-    const plan = window._dailyPlanText || '';
-    input.value = 'אשרתי את התוכנית. תתחיל לבצע אותה - הפעל את הקמפיינים והפעולות לפי הסדר שהצעת, ודווח לי על ההתקדמות.';
-    sendMessage();
+  function renderAgentPlan(wrap, data) {
+    window._agentPlanId = data.plan_id;
+    let html = '<div class="plan-head">📋 התוכנית שלי להיום</div>';
+    html += '<div class="plan-intro">ניתחתי את החנות ובניתי תוכנית עבודה. סמן מה לבצע ואני אריץ הכל לבד. צפי הכנסה כולל: <strong>₪' + (data.projected_revenue||0).toLocaleString() + '</strong></div>';
+    html += '<div class="plan-tasks">';
+    data.tasks.forEach((t, idx) => {
+      html += '<label class="plan-task">'
+        + '<input type="checkbox" class="task-check" value="' + t.id + '" checked>'
+        + '<div class="task-info">'
+        + '<div class="task-title">' + (idx+1) + '. ' + esc(t.title) + '</div>'
+        + '<div class="task-meta">' + t.est_customers + ' לקוחות · צפי ₪' + Math.round(t.projected_revenue||0).toLocaleString() + '</div>'
+        + '</div></label>';
+    });
+    html += '</div>';
+    html += '<button class="plan-approve" id="execPlanBtn">בצע את מה שסימנתי ←</button>';
+    html += '<div class="plan-exec-status" id="planExecStatus" style="display:none"></div>';
+    wrap.innerHTML = html;
+    wrap.querySelector('#execPlanBtn').onclick = () => executeAgentPlan(wrap);
+  }
+  async function executeAgentPlan(wrap) {
+    const checks = [...wrap.querySelectorAll('.task-check:checked')].map(c => parseInt(c.value));
+    if (checks.length === 0) { alert('סמן לפחות מהלך אחד'); return; }
+    const btn = wrap.querySelector('#execPlanBtn');
+    btn.disabled = true; btn.textContent = 'מפעיל את הסוכן...';
+    try {
+      const res = await fetch('/api/agent/approve-plan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD, plan_id: window._agentPlanId, selected_task_ids: checks })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        wrap.querySelector('.plan-tasks').style.display = 'none';
+        btn.style.display = 'none';
+        const st = wrap.querySelector('#planExecStatus');
+        st.style.display = 'block';
+        st.innerHTML = '<div class="agent-working">🤖 הסוכן עובד...</div>'
+          + '<button class="action-stop" id="stopPlanBtn">🛑 עצור את הסוכן</button>';
+        st.querySelector('#stopPlanBtn').onclick = async () => {
+          await fetch('/api/agent/stop-plan', { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ password: PASSWORD, plan_id: window._agentPlanId }) });
+        };
+        pollAgentPlan(window._agentPlanId, st);
+      } else {
+        btn.textContent = 'שגיאה - נסה שוב'; btn.disabled = false;
+      }
+    } catch (err) {
+      btn.textContent = 'שגיאה - נסה שוב'; btn.disabled = false;
+    }
+  }
+  async function pollAgentPlan(planId, el) {
+    let done = false;
+    async function tick() {
+      try {
+        const res = await fetch('/api/agent/plan-status?password=' + encodeURIComponent(PASSWORD) + '&plan_id=' + planId);
+        const data = await res.json();
+        if (data.ok && data.tasks) {
+          const planStatus = data.plan.status;
+          let lines = data.tasks.map(t => {
+            const icon = t.status === 'done' ? '✅' : (t.status === 'running' ? '⚙️' : (t.status === 'skipped' ? '⏭️' : (t.status === 'failed' ? '⚠️' : '⏳')));
+            let line = icon + ' ' + esc(t.title);
+            if (t.status === 'done' && t.result && t.result.sent != null) line += ' — נשלח ל-' + t.result.sent;
+            return '<div class="agent-task-line">' + line + '</div>';
+          }).join('');
+          if (planStatus === 'done' || planStatus === 'stopped') {
+            done = true;
+            const totalSent = data.tasks.reduce((s,t) => s + ((t.result&&t.result.sent)||0), 0);
+            const totalPot = data.tasks.reduce((s,t) => s + ((t.result&&t.result.revenue_potential)||0), 0);
+            const verb = planStatus === 'stopped' ? 'נעצר' : 'סיים';
+            el.innerHTML = '<div class="agent-working">🏁 הסוכן ' + verb + '!</div>' + lines
+              + '<div class="agent-summary">פניתי ל-' + totalSent + ' לקוחות · צפי הכנסה ₪' + totalPot.toLocaleString()
+              + '<br><span style="font-size:12px;color:#666">אעקוב ואדווח כשייסגרו מעגלים. הרווח בפועל יופיע למעלה.</span></div>';
+            loadMoneyCounter();
+          } else {
+            const stopBtn = el.querySelector('#stopPlanBtn');
+            el.innerHTML = '<div class="agent-working">🤖 הסוכן עובד...</div>' + lines;
+            if (stopBtn) el.appendChild(stopBtn);
+            else {
+              const b = document.createElement('button'); b.className='action-stop'; b.id='stopPlanBtn'; b.textContent='🛑 עצור את הסוכן';
+              b.onclick = async () => { await fetch('/api/agent/stop-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:PASSWORD,plan_id:planId})}); };
+              el.appendChild(b);
+            }
+          }
+        }
+      } catch (e) {}
+      if (!done) setTimeout(tick, 2500);
+    }
+    tick();
   }
 
   /* ===== LIVE MONEY COUNTER ===== */
