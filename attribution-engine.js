@@ -45,6 +45,9 @@ async function attributeOrder(shopDomain, order) {
   const buyerEmail = (order.email || (order.customer && order.customer.email) || "").toLowerCase() || null;
   const buyerPhone = digits(order.phone || (order.customer && order.customer.phone) || (order.shipping_address && order.shipping_address.phone)) || null;
   const buyerName = buildBuyerName(order);
+  // When the order was placed. Time-window tiers must only credit the advisor if
+  // the order happened AFTER the advisor reached out — never before.
+  const orderCreatedAt = order.created_at || order.processed_at || null;
 
   // --- Tier 1: by coupon code ---
   const codes = (order.discount_codes || []).map(d => (d.code || "").toUpperCase()).filter(Boolean);
@@ -89,7 +92,7 @@ async function attributeOrder(shopDomain, order) {
     }
   }
 
-  // --- Tier 3: by phone/email within 3 days ---
+  // --- Tier 3: by phone/email, order placed within 3 days AFTER outreach ---
   if (buyerEmail || buyerPhone) {
     const r = await db.query(
       `UPDATE advisor_actions
@@ -99,13 +102,14 @@ async function attributeOrder(shopDomain, order) {
          SELECT id FROM advisor_actions
          WHERE shop_domain = $1
            AND outcome = 'pending'
-           AND created_at >= NOW() - INTERVAL '3 days'
+           AND created_at <= $5::timestamptz
+           AND created_at >= $5::timestamptz - INTERVAL '3 days'
            AND ( ($2::text IS NOT NULL AND lower(target_email) = $2)
               OR ($3::text IS NOT NULL AND regexp_replace(target_phone,'[^0-9]','','g') = $3) )
          ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
        )
        RETURNING id`,
-      [shopDomain, buyerEmail, buyerPhone, orderTotal]
+      [shopDomain, buyerEmail, buyerPhone, orderTotal, orderCreatedAt]
     );
     if (r.rows.length > 0) {
       console.log(`💰 [Attribution - 3day phone/email] ${buyerEmail || buyerPhone} +${orderTotal}₪ (action ${r.rows[0].id})`);
@@ -113,7 +117,7 @@ async function attributeOrder(shopDomain, order) {
     }
   }
 
-  // --- Tier 4: by customer NAME within 3 days (last resort) ---
+  // --- Tier 4: by customer NAME, order placed within 3 days AFTER outreach (last resort) ---
   if (buyerName) {
     const r = await db.query(
       `UPDATE advisor_actions
@@ -123,12 +127,13 @@ async function attributeOrder(shopDomain, order) {
          SELECT id FROM advisor_actions
          WHERE shop_domain = $1
            AND outcome = 'pending'
-           AND created_at >= NOW() - INTERVAL '3 days'
+           AND created_at <= $4::timestamptz
+           AND created_at >= $4::timestamptz - INTERVAL '3 days'
            AND lower(btrim(details->>'customer_name')) = $2
          ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
        )
        RETURNING id`,
-      [shopDomain, buyerName, orderTotal]
+      [shopDomain, buyerName, orderTotal, orderCreatedAt]
     );
     if (r.rows.length > 0) {
       console.log(`💰 [Attribution - name 3day] "${buyerName}" +${orderTotal}₪ (action ${r.rows[0].id})`);

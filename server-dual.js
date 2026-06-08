@@ -1811,6 +1811,9 @@ function handleOrderWebhook(req, res) {
           (order.shipping_address?.name || "") ||
           (order.billing_address?.name || "")
         ).trim().toLowerCase() || null;
+        // Order timestamp — time-window tiers must only credit if the order came
+        // AFTER the outreach, never before.
+        const orderCreatedAt = order.created_at || order.processed_at || null;
 
         const codes = (order.discount_codes || []).map(d => (d.code || "").toUpperCase()).filter(Boolean);
         let closedByCoupon = false;
@@ -1860,7 +1863,8 @@ function handleOrderWebhook(req, res) {
                SELECT id FROM advisor_actions
                WHERE shop_domain = $1
                  AND outcome = 'pending'
-                 AND created_at >= NOW() - INTERVAL '3 days'
+                 AND created_at <= $5::timestamptz
+                 AND created_at >= $5::timestamptz - INTERVAL '3 days'
                  AND (
                    ($2::text IS NOT NULL AND lower(target_email) = $2)
                    OR ($3::text IS NOT NULL AND regexp_replace(target_phone, '[^0-9]', '', 'g') = $3)
@@ -1869,7 +1873,7 @@ function handleOrderWebhook(req, res) {
                FETCH FIRST 1 ROWS ONLY
              )
              RETURNING id`,
-            [shopDomain, buyerEmail, buyerPhone, orderTotal]
+            [shopDomain, buyerEmail, buyerPhone, orderTotal, orderCreatedAt]
           );
           if (r.rows.length > 0) {
             closedByWindow = true;
@@ -1891,13 +1895,14 @@ function handleOrderWebhook(req, res) {
                SELECT id FROM advisor_actions
                WHERE shop_domain = $1
                  AND outcome = 'pending'
-                 AND created_at >= NOW() - INTERVAL '3 days'
+                 AND created_at <= $4::timestamptz
+                 AND created_at >= $4::timestamptz - INTERVAL '3 days'
                  AND lower(btrim(details->>'customer_name')) = $2
                ORDER BY created_at DESC
                FETCH FIRST 1 ROWS ONLY
              )
              RETURNING id`,
-            [shopDomain, buyerName, orderTotal]
+            [shopDomain, buyerName, orderTotal, orderCreatedAt]
           );
           if (r.rows.length > 0) {
             console.log(`💰 [Loop closed - name 3day] customer "${buyerName}" bought (no code)! +${orderTotal}₪ (action ${r.rows[0].id})`);
