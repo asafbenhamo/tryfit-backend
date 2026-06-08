@@ -925,7 +925,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       await db.query(
         `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [shop, action_type || 'whatsapp_prepared', email || null, phone, JSON.stringify({ channel: 'whatsapp', subject: message_subject }), couponCode]
+        [shop, action_type || 'whatsapp_prepared', email || null, phone, JSON.stringify({ channel: 'whatsapp', subject: message_subject, customer_name: customer_name || null }), couponCode]
       ).catch(e => console.error("log:", e.message));
 
     } else if (email) {
@@ -945,7 +945,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       await db.query(
         `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [shop, action_type || 'email_sent', email, phone || null, JSON.stringify({ channel: 'email', subject: message_subject }), couponCode]
+        [shop, action_type || 'email_sent', email, phone || null, JSON.stringify({ channel: 'email', subject: message_subject, customer_name: customer_name || null }), couponCode]
       ).catch(e => console.error("log:", e.message));
 
     } else {
@@ -1038,7 +1038,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     await db.query(
       `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
        VALUES ($1, 'personalized_cart', $2, $3, $4, $5)`,
-      [shop, email || null, phone || null, JSON.stringify({ draft_order_id: draft.draft_order_id, total: draft.total }), cartCoupon]
+      [shop, email || null, phone || null, JSON.stringify({ draft_order_id: draft.draft_order_id, total: draft.total, customer_name: customer_name || null }), cartCoupon]
     ).catch(e => console.error("log:", e.message));
 
     res.json(result);
@@ -1803,6 +1803,13 @@ function handleOrderWebhook(req, res) {
         const orderTotal = parseFloat(order.total_price || order.current_total_price || 0);
         const buyerEmail = (order.email || order.customer?.email || "").toLowerCase() || null;
         const buyerPhone = (order.phone || order.customer?.phone || order.shipping_address?.phone || "").replace(/[^0-9]/g, "") || null;
+        // Buyer full name (for name-based attribution fallback). Prefer the customer
+        // profile name, fall back to the shipping/billing address name.
+        const buyerName = (
+          (order.customer ? `${order.customer.first_name || ""} ${order.customer.last_name || ""}`.trim() : "") ||
+          (order.shipping_address?.name || "") ||
+          (order.billing_address?.name || "")
+        ).trim().toLowerCase() || null;
 
         const codes = (order.discount_codes || []).map(d => (d.code || "").toUpperCase()).filter(Boolean);
         let closedByCoupon = false;
@@ -1842,6 +1849,7 @@ function handleOrderWebhook(req, res) {
           }
         }
 
+        let closedByWindow = false;
         if (!closedByCoupon && (buyerEmail || buyerPhone)) {
           const r = await db.query(
             `UPDATE advisor_actions
@@ -1863,7 +1871,35 @@ function handleOrderWebhook(req, res) {
             [shopDomain, buyerEmail, buyerPhone, orderTotal]
           );
           if (r.rows.length > 0) {
+            closedByWindow = true;
             console.log(`💰 [Loop closed - 3day window] customer ${buyerEmail || buyerPhone} bought! +${orderTotal}₪ (action ${r.rows[0].id})`);
+          }
+        }
+
+        // --- Attribution 3: by customer NAME within 3 days (last resort) ---
+        // Fires only if NOTHING above matched, so a single order is never counted
+        // twice. Matches the buyer's name (stored in details.customer_name) against
+        // a pending action from the last 3 days. Name is not unique, so this is the
+        // weakest signal and is intentionally last.
+        if (!closedByCoupon && !closedByWindow && buyerName) {
+          const r = await db.query(
+            `UPDATE advisor_actions
+             SET outcome = 'converted', attributed_revenue = $3, closed_at = NOW(),
+                 details = details || '{"attribution":"name_window_3d"}'::jsonb
+             WHERE id = (
+               SELECT id FROM advisor_actions
+               WHERE shop_domain = $1
+                 AND outcome = 'pending'
+                 AND created_at >= NOW() - INTERVAL '3 days'
+                 AND lower(btrim(details->>'customer_name')) = $2
+               ORDER BY created_at DESC
+               FETCH FIRST 1 ROWS ONLY
+             )
+             RETURNING id`,
+            [shopDomain, buyerName, orderTotal]
+          );
+          if (r.rows.length > 0) {
+            console.log(`💰 [Loop closed - name 3day] customer "${buyerName}" bought (no code)! +${orderTotal}₪ (action ${r.rows[0].id})`);
           }
         }
       } catch (err) {

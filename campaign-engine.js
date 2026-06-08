@@ -183,7 +183,7 @@ async function runCampaign(id, shop, segment, template) {
           `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
            VALUES ($1, $2, $3, $4, $5, $6)`,
           [shop, c.campaign_type, contact.email, contact.phone,
-           JSON.stringify({ channel: 'whatsapp', campaign_id: id, prepared: true }), finalCode]
+           JSON.stringify({ channel: 'whatsapp', campaign_id: id, prepared: true, customer_name: cust.name || null }), finalCode]
         ).catch(e => console.error('[campaign] log:', e.message));
 
       } else if (contact.email) {
@@ -199,7 +199,7 @@ async function runCampaign(id, shop, segment, template) {
           `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
            VALUES ($1, $2, $3, $4, $5, $6)`,
           [shop, c.campaign_type, contact.email, contact.phone,
-           JSON.stringify({ channel: 'email', campaign_id: id }), finalCode]
+           JSON.stringify({ channel: 'email', campaign_id: id, customer_name: cust.name || null }), finalCode]
         ).catch(e => console.error('[campaign] log:', e.message));
 
       } else {
