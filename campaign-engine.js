@@ -119,7 +119,7 @@ function startCampaign(shop, { campaign_type, segment, template }) {
 async function runCampaign(id, shop, segment, template) {
   const c = campaigns[id];
   const pct = parseInt(template.percentage) || 10;
-  const days = parseInt(template.days_valid) || 14;
+  const days = parseInt(template.days_valid) || 2; // 48-hour validity by default
 
   for (const cust of segment) {
     if (!c) break;
@@ -156,6 +156,9 @@ async function runCampaign(id, shop, segment, template) {
         .replace(/\{NAME\}/g, cust.name || '')
         .replace(/\{COUPON\}/g, finalCode || '');
       if (finalCode && !body.includes(finalCode)) body += `\n\nקוד אישי: ${finalCode}`;
+      // Always state the 48-hour validity so it matches the real coupon expiry,
+      // and to create urgency. Only add it if not already mentioned.
+      if (finalCode && !body.includes('48 שעות')) body += `\nהקוד תקף ל-48 שעות בלבד ⏰`;
 
       if (hasPhone) {
         // WhatsApp: PREPARE a ready link. Do NOT count as "sent" - the merchant
