@@ -324,6 +324,14 @@
   .action-result.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
   .action-result.blocked { background: #fffbeb; color: #b45309; border: 1px solid #fde68a; }
   .action-result.error { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+  .wa-list { margin-top: 10px; display: flex; flex-direction: column; gap: 7px; max-height: 320px; overflow-y: auto; }
+  .wa-item { display: flex; align-items: center; gap: 10px; padding: 9px 11px; background: #fff; border: 1px solid #e3ebf9; border-radius: 11px; }
+  .wa-item .wa-name { flex: 1; font-size: 13.5px; font-weight: 600; color: #1a2230; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wa-item .wa-coupon { font-size: 11.5px; color: var(--text-dim); }
+  .wa-send-btn { border: none; background: #25d366; color: #fff; font-family: 'Heebo',sans-serif; font-size: 13px; font-weight: 700; padding: 8px 14px; border-radius: 9px; cursor: pointer; text-decoration: none; white-space: nowrap; flex-shrink: 0; transition: background 0.15s, transform 0.1s; }
+  .wa-send-btn:active { transform: scale(0.95); }
+  .wa-send-btn.sent { background: #d1fadf; color: #15803d; cursor: default; pointer-events: none; }
+  .wa-progress { font-size: 12.5px; color: var(--text-dim); margin: 8px 2px 4px; }
   .wa-link { display: inline-block; margin-top: 6px; background: #25d366; color: #fff !important;
     padding: 9px 16px; border-radius: 9px; text-decoration: none; font-weight: 700; }
   .typing { display: flex; align-items: center; gap: 8px; }
@@ -473,8 +481,6 @@
     setInterval(loadMoneyCounter, 60000);
   }
 
-  /* Remove the entire home screen (summary + plan + insights + welcome)
-     when the user starts interacting, so nothing stays stuck on top. */
   function clearHomeScreen() {
     ['homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
       const el = document.getElementById(id); if (el) el.remove();
@@ -485,8 +491,6 @@
     const pc = document.querySelector('.plan-card'); if (pc) pc.remove();
   }
 
-  /* Anchor the home screen sections in a fixed order so load timing
-     never changes the layout: summary -> plan -> insights -> welcome */
   function setupHomeSections() {
     const w = $('welcome');
     if (!w || document.getElementById('homeSummarySlot')) return;
@@ -664,7 +668,7 @@
       });
       const data = await res.json();
       if (data.ok && data.tasks) {
-        renderAgentPlan(wrap, data); // re-render with updated plan
+        renderAgentPlan(wrap, data);
       } else {
         btn.disabled = false; input.disabled = false; btn.textContent = 'שנה';
         alert(data.error || 'לא הצלחתי לעדכן, נסה לנסח אחרת');
@@ -755,7 +759,6 @@
       if (!el) return;
       const val = data.total_revenue || 0;
       el.textContent = '₪' + val.toLocaleString();
-      // Bump animation if the value grew
       if (lastMoneyValue !== null && val > lastMoneyValue) {
         el.classList.remove('bump'); void el.offsetWidth; el.classList.add('bump');
       }
@@ -793,7 +796,6 @@
       const res = await fetch('/api/insights?password=' + encodeURIComponent(PASSWORD));
       const data = await res.json();
       if (!data.ok || !data.insights || data.insights.length === 0) return;
-      // Only show if we're still on the welcome screen (no messages yet)
       if (!$('welcome')) return;
       renderInsights(data.insights);
     } catch (err) {
@@ -818,11 +820,9 @@
       html += '</div>';
     });
     wrap.innerHTML = html;
-    // Insert the insights into their fixed slot (below the plan)
     const slot = document.getElementById('homeInsightsSlot');
     if (slot) slot.appendChild(wrap);
     else w.parentNode.insertBefore(wrap, w);
-    // Wire up buttons
     wrap.querySelectorAll('.insight-btn').forEach(btn => {
       btn.onclick = () => {
         const hint = btn.getAttribute('data-hint');
@@ -917,10 +917,8 @@
     scrollDown();
   }
   function linkify(s) {
-    // First: markdown links [text](url) -> clickable <a>
     s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
       '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    // Then: bare URLs not already inside an <a href="...">
     s = s.replace(/(^|[^"=>])(https?:\/\/[^\s<]+)/g,
       '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
     return s;
@@ -981,14 +979,12 @@
     const m = text.match(/\[\[CAMPAIGN:([\s\S]*?)\]\]/);
     if (!m) return null;
     const fields = {};
-    // body may contain '|', so split carefully: only split on '|key='
     const raw = m[1];
     const parts = raw.split(/\|(?=[a-z_]+=)/);
     parts.forEach(part => {
       const idx = part.indexOf('=');
       if (idx > -1) fields[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
     });
-    // Parse customers: name<email<phone<value ;; ...
     const customers = (fields.customers || '').split(';;').map(c => {
       const [name, email, phone, value] = c.split('<');
       return { name: (name||'').trim(), email: (email||'').trim(), phone: (phone||'').trim(), est_value: parseFloat(value||'0')||0 };
@@ -1047,8 +1043,7 @@
   }
   async function pollCampaign(id, total, el) {
     let done = false;
-    // Show a stop button while running
-    el.innerHTML = '<div class="camp-status">⚙️ מתחיל...</div><button class="action-stop" id="stopBtn_' + id + '">🛑 עצור קמפיין</button>';
+    el.innerHTML = '<div class="camp-status">⚙️ מכין קופונים והודעות...</div><button class="action-stop" id="stopBtn_' + id + '">🛑 עצור קמפיין</button>';
     const stopBtn = el.querySelector('#stopBtn_' + id);
     if (stopBtn) stopBtn.onclick = async () => {
       stopBtn.disabled = true; stopBtn.textContent = 'עוצר...';
@@ -1069,19 +1064,59 @@
         if (c.status === 'done' || c.status === 'stopped') {
           done = true;
           const stopB = el.querySelector('.action-stop'); if (stopB) stopB.remove();
-          const verb = c.status === 'stopped' ? 'נעצר' : 'הושלם';
-          el.querySelector('.camp-status').innerHTML = '✅ הקמפיין ' + verb + '! פניתי ל-' + c.sent + ' לקוחות'
-            + (c.skipped ? ' (' + c.skipped + ' דולגו)' : '')
-            + (c.revenue_potential ? '<br>צפי הכנסה: ₪' + c.revenue_potential.toLocaleString() : '')
-            + '<br><span style="font-size:12px;color:#666">אעקוב ואדווח כשייסגרו מעגלים. הרווח בפועל יופיע למעלה.</span>';
+          renderCampaignResult(c, el);
           loadMoneyCounter();
         } else if (statusEl) {
-          statusEl.innerHTML = '⚙️ עובד... ' + c.done + '/' + c.total + ' (' + c.sent + ' נשלחו)';
+          statusEl.innerHTML = '⚙️ עובד... ' + c.done + '/' + c.total
+            + ' (' + (c.sent || 0) + ' מיילים נשלחו, ' + (c.prepared || 0) + ' וואטסאפ מוכנים)';
         }
       } catch (e) {}
       if (!done) setTimeout(tick, 2000);
     }
     tick();
+  }
+
+  // Render the finished campaign: email summary + a clickable WhatsApp list.
+  function renderCampaignResult(c, el) {
+    const wa = c.whatsapp || [];
+    const verb = c.status === 'stopped' ? 'נעצר' : 'מוכן';
+    let html = '<div class="camp-status">✅ הקמפיין ' + verb + '!';
+    if (c.sent > 0) html += ' ' + c.sent + ' מיילים נשלחו אוטומטית.';
+    if (c.skipped > 0) html += ' (' + c.skipped + ' דולגו)';
+    html += '</div>';
+
+    if (wa.length > 0) {
+      html += '<div class="wa-progress">📱 ' + wa.length + ' הודעות וואטסאפ מוכנות. לחץ "שלח" ליד כל לקוחה - זה יפתח וואטסאפ עם ההודעה מוכנה. <strong id="waSentCount">0</strong>/' + wa.length + ' נשלחו</div>';
+      html += '<div class="wa-list">';
+      wa.forEach((w, i) => {
+        const label = w.name || w.phone || 'לקוחה';
+        const coup = w.coupon ? ('קוד: ' + w.coupon) : '';
+        html += '<div class="wa-item">'
+          + '<div><div class="wa-name">' + esc(label) + '</div>'
+          + (coup ? '<div class="wa-coupon">' + esc(coup) + '</div>' : '')
+          + '</div>'
+          + '<a class="wa-send-btn" href="' + w.link + '" target="_blank" rel="noopener" data-i="' + i + '">שלח ←</a>'
+          + '</div>';
+      });
+      html += '</div>';
+    }
+    if (c.revenue_potential) {
+      html += '<div class="agent-summary">צפי הכנסה ₪' + c.revenue_potential.toLocaleString()
+        + '<br><span style="font-size:12px;color:#666">אעקוב ואדווח כשייסגרו מעגלים. הרווח בפועל יופיע למעלה.</span></div>';
+    }
+    el.innerHTML = html;
+
+    let sentCount = 0;
+    el.querySelectorAll('.wa-send-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.classList.contains('sent')) return;
+        btn.classList.add('sent');
+        btn.textContent = '✓ נשלח';
+        sentCount++;
+        const counter = el.querySelector('#waSentCount');
+        if (counter) counter.textContent = sentCount;
+      });
+    });
   }
   function renderCartCard(cart, container) {
     const f = cart.fields;
@@ -1359,8 +1394,6 @@
     }
   }
 
-  // Simulated streaming: reveal the answer progressively (typewriter feel).
-  // The action block is parsed only at the end so the card appears once, complete.
   function streamAnswer(fullText) {
     return new Promise(resolve => {
       const action = parseAction(fullText);
@@ -1376,10 +1409,9 @@
       row.appendChild(bubble);
       $('messages').appendChild(row);
 
-      // Reveal in word chunks for a natural "typing" feel
       const tokens = displayText.split(/(\s+)/);
       let i = 0;
-      const chunk = 2; // words per tick
+      const chunk = 2;
       function step() {
         if (i >= tokens.length) {
           bubble.innerHTML = render(displayText);

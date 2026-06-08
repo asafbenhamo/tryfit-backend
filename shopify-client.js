@@ -523,8 +523,6 @@ async function getAllOrders(shopDomain, onProgress = null) {
 
   while (true) {
     try {
-      // Use since_id pagination (reliable, not dependent on the Link header).
-      // Order ascending by id so since_id walks forward through ALL orders.
       const endpoint = `orders.json?limit=250&status=any&order=id+asc&since_id=${sinceId}`;
       const url = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/${endpoint}`;
       const response = await fetch(url, {
@@ -546,17 +544,15 @@ async function getAllOrders(shopDomain, onProgress = null) {
 
       const data = await response.json();
       const pageOrders = data.orders || [];
-      if (pageOrders.length === 0) break; // no more orders
+      if (pageOrders.length === 0) break;
 
       orders.push(...pageOrders);
-
-      // Advance the cursor to the highest id we just received.
       sinceId = pageOrders[pageOrders.length - 1].id;
 
       console.log(`📦 [Backfill] Orders page ${page}: ${pageOrders.length} (total: ${orders.length})`);
       if (onProgress) onProgress({ phase: 'orders', page, count: orders.length });
 
-      if (pageOrders.length < 250) break; // last (partial) page reached
+      if (pageOrders.length < 250) break;
 
       page++;
       await new Promise(resolve => setTimeout(resolve, 300));
@@ -571,7 +567,6 @@ async function getAllOrders(shopDomain, onProgress = null) {
 
 /**
  * THE BIG ONE - Backfill the entire shop.
- * Pulls ALL customers + ALL orders (last 60 days) and saves to Tier 1 tables.
  */
 async function backfillEntireShop(shopDomain, onProgress = null) {
   if (!hasTokenForShop(shopDomain)) {
@@ -596,13 +591,11 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     console.log(`\n🚀 [Backfill] Starting FULL backfill for ${shopDomain}\n`);
     if (onProgress) onProgress({ phase: 'starting', stats });
 
-    // Phase 1: Fetch all customers
     console.log(`📥 [Backfill] Phase 1: Fetching all customers...`);
     const customers = await getAllCustomers(shopDomain, onProgress);
     stats.customers_fetched = customers.length;
     console.log(`✅ [Backfill] Fetched ${customers.length} customers from Shopify`);
 
-    // Phase 2: Save customers to Tier 1
     console.log(`💾 [Backfill] Phase 2: Saving customers to database...`);
     for (let i = 0; i < customers.length; i++) {
       const customer = customers[i];
@@ -619,13 +612,11 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     }
     console.log(`✅ [Backfill] Saved ${stats.customers_saved} customers (${stats.customers_failed} failed)`);
 
-    // Phase 3: Fetch all orders
     console.log(`📥 [Backfill] Phase 3: Fetching all orders...`);
     const orders = await getAllOrders(shopDomain, onProgress);
     stats.orders_fetched = orders.length;
     console.log(`✅ [Backfill] Fetched ${orders.length} orders from Shopify`);
 
-    // Phase 4: Save orders + line items to Tier 1
     console.log(`💾 [Backfill] Phase 4: Saving orders to database...`);
     for (let i = 0; i < orders.length; i++) {
       const order = orders[i];
@@ -646,7 +637,6 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     stats.success = true;
     stats.completed_at = new Date().toISOString();
 
-    // Log audit trail
     try {
       await db.query(`
         INSERT INTO data_access_log (
@@ -828,7 +818,6 @@ async function syncProducts(shopDomain) {
 
 /**
  * Get all abandoned checkouts from a shop using since_id pagination.
- * Abandoned checkouts = carts that were started but not completed.
  */
 async function getAllAbandonedCheckouts(shopDomain, onProgress = null) {
   const checkouts = [];
@@ -977,6 +966,12 @@ async function syncAbandonedCheckouts(shopDomain) {
  * Create a real discount code in Shopify.
  * Creates a price_rule (the discount logic) + a discount_code (the code customers type).
  * percentage: e.g. 10 for 10% off. days_valid: how long the code is active.
+ *
+ * combinesWith (default true): when true, the code is allowed to STACK on top of
+ * the store's existing automatic order discount (e.g. the site-wide 10%). This is
+ * what makes the personal coupon an "extra" discount rather than replacing the
+ * automatic one. Set combine:false to force a standalone, non-stacking code.
+ *
  * Returns { ok, code, price_rule_id, discount_code_id } or { ok:false, error }.
  */
 async function createDiscountCode(shopDomain, opts = {}) {
@@ -992,6 +987,8 @@ async function createDiscountCode(shopDomain, opts = {}) {
   const daysValid = parseInt(opts.days_valid) || 30;
   const startsAt = new Date();
   const endsAt = new Date(Date.now() + daysValid * 24 * 60 * 60 * 1000);
+  // Default to stacking ON (combine with the store's automatic discount).
+  const allowCombine = opts.combine === false ? false : true;
 
   let priceRuleId = null;
   try {
@@ -1008,7 +1005,15 @@ async function createDiscountCode(shopDomain, opts = {}) {
         once_per_customer: true,
         usage_limit: opts.usage_limit || null,
         starts_at: startsAt.toISOString(),
-        ends_at: endsAt.toISOString()
+        ends_at: endsAt.toISOString(),
+        // Allow this code to stack with the store's automatic order/product/shipping
+        // discounts. Without this, the code REPLACES the automatic 10% instead of
+        // adding to it. (Shopify REST PriceRule combines_with, API 2026-01.)
+        combines_with: {
+          order_discounts: allowCombine,
+          product_discounts: allowCombine,
+          shipping_discounts: allowCombine
+        }
       }
     };
     const prRes = await fetch(`${base}/price_rules.json`, {
@@ -1028,18 +1033,18 @@ async function createDiscountCode(shopDomain, opts = {}) {
     });
     if (dcRes.status !== 201) {
       const txt = await dcRes.text();
-      // Roll back the price rule so we don't leave an orphan
       try { await fetch(`${base}/price_rules/${priceRuleId}.json`, { method: 'DELETE', headers }); } catch (e) {}
       return { ok: false, error: `discount_code failed (${dcRes.status}): ${txt.substring(0, 150)}` };
     }
     const dcData = await dcRes.json();
 
-    console.log(`🎟️  [Coupon] Created ${code} (${percentage}% off, ${daysValid}d) for ${shopDomain}`);
+    console.log(`🎟️  [Coupon] Created ${code} (${percentage}% off, ${daysValid}d, combine=${allowCombine}) for ${shopDomain}`);
     return {
       ok: true,
       code,
       percentage,
       days_valid: daysValid,
+      combines: allowCombine,
       ends_at: endsAt.toISOString(),
       price_rule_id: priceRuleId,
       discount_code_id: dcData.discount_code.id
@@ -1055,11 +1060,6 @@ async function createDiscountCode(shopDomain, opts = {}) {
 
 /**
  * Create a draft order (a pre-built cart) and get a direct payment/invoice link.
- * This powers the "personalized cart" move: the advisor builds a cart for a
- * specific customer and sends them a link to pay - "we built your order, just pay".
- *
- * items: [{ variant_id, quantity }] OR [{ title, price, quantity }] for custom lines.
- * Returns { ok, draft_order_id, invoice_url, total } or { ok:false, error }.
  */
 async function createDraftOrder(shopDomain, opts = {}) {
   if (!hasTokenForShop(shopDomain)) return { ok: false, error: 'no_token' };
@@ -1072,7 +1072,6 @@ async function createDraftOrder(shopDomain, opts = {}) {
       if (it.variant_id) {
         return { variant_id: it.variant_id, quantity: it.quantity || 1 };
       }
-      // custom line item
       return { title: it.title || 'מוצר', price: it.price || '0.00', quantity: it.quantity || 1 };
     });
     if (lineItems.length === 0) return { ok: false, error: 'no items' };
@@ -1085,7 +1084,6 @@ async function createDraftOrder(shopDomain, opts = {}) {
         use_customer_default_address: true
       }
     };
-    // Attach customer + optional discount
     if (opts.email) body.draft_order.email = opts.email;
     if (opts.discount_percentage) {
       body.draft_order.applied_discount = {
@@ -1107,7 +1105,6 @@ async function createDraftOrder(shopDomain, opts = {}) {
     const data = await r.json();
     const draft = data.draft_order;
 
-    // Send/generate the invoice to get a payment URL
     let invoiceUrl = draft.invoice_url;
     return {
       ok: true,

@@ -1,10 +1,16 @@
 // campaign-engine.js - Autonomous batch campaign runner.
-// Runs a campaign in the BACKGROUND: for each customer in the segment, creates a
-// personal coupon + personalized message, sends it (email auto / WhatsApp link),
-// respecting all safety gates (hours, opt-out, cooldown). Tracks live progress.
+// For each customer in the segment: creates a personal coupon, builds the
+// personalized message, and:
+//   - EMAIL customers -> sends automatically (through the safety gate).
+//   - WHATSAPP customers -> does NOT auto-send (no Business API). Instead it
+//     PREPARES a ready wa.me link and returns it to the UI so the merchant can
+//     send it in one click. These are reported as "prepared", NOT "sent".
 //
-// Progress is held in-memory (per running campaign) and also persisted via
-// advisor_actions rows. A status endpoint reads the in-memory progress.
+// This fixes the old bug where WhatsApp links were counted as "sent" and then
+// thrown away (the merchant never saw them).
+//
+// Progress is held in-memory (per running campaign). The UI polls /status and
+// reads the prepared WhatsApp links from there.
 
 const db = require('./database');
 const shopify = require('./shopify-client');
@@ -12,10 +18,10 @@ const mailer = require('./mailer');
 const compliance = require('./compliance');
 
 const MAX_PER_CAMPAIGN = 50;       // safety cap
-const SEND_DELAY_MS = 1200;        // pace sends (~1/sec) to avoid spam-like bursts
+const SEND_DELAY_MS = 600;         // small pace between customers
 
 // In-memory registry of running/finished campaigns.
-const campaigns = {}; // { id: { status, total, done, sent, skipped, failed, revenue_potential, started_at, finished_at, log:[] } }
+const campaigns = {};
 
 function newCampaignId() {
   return 'camp_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
@@ -44,10 +50,13 @@ function listActiveCampaigns(shop) {
 
 function summarize(c) {
   return {
-    status: c.status, total: c.total, done: c.done, sent: c.sent,
+    status: c.status, total: c.total, done: c.done,
+    sent: c.sent,             // emails actually sent
+    prepared: c.prepared,     // WhatsApp links ready for the merchant to click
     skipped: c.skipped, failed: c.failed,
     revenue_potential: Math.round(c.revenue_potential || 0),
     campaign_type: c.campaign_type,
+    whatsapp: c.whatsapp,     // [{ name, phone, coupon, link, sent:false }]
     started_at: c.started_at, finished_at: c.finished_at
   };
 }
@@ -61,7 +70,7 @@ function personalCode(nameOrEmail, pct) {
 
 /**
  * Start a campaign in the background.
- * segment: array of { name, email, phone, est_value } (already filtered by the brain)
+ * segment: array of { name, email, phone, est_value }
  * template: { percentage, days_valid, subject, body }  body may contain {NAME} and {COUPON}
  * Returns { id } immediately; work continues async.
  */
@@ -72,11 +81,11 @@ function startCampaign(shop, { campaign_type, segment, template }) {
   campaigns[id] = {
     shop, campaign_type: campaign_type || 'campaign',
     status: 'running', total: capped.length, done: 0,
-    sent: 0, skipped: 0, failed: 0, revenue_potential: 0,
+    sent: 0, prepared: 0, skipped: 0, failed: 0, revenue_potential: 0,
+    whatsapp: [],   // prepared WhatsApp links the merchant will click to send
     started_at: new Date().toISOString(), finished_at: null, log: []
   };
 
-  // Fire the async worker (do not await).
   runCampaign(id, shop, capped, template).catch(err => {
     console.error('[campaign] fatal:', err.message);
     if (campaigns[id]) { campaigns[id].status = 'error'; campaigns[id].error = err.message; }
@@ -100,16 +109,19 @@ async function runCampaign(id, shop, segment, template) {
     }
     try {
       const contact = { email: cust.email || null, phone: cust.phone || null };
+      const hasPhone = contact.phone && String(contact.phone).replace(/[^0-9]/g, '').length >= 8;
 
-      // Safety gate: hours + opt-out + cooldown
-      const gate = await compliance.canContactCustomer(shop, contact, {});
+      // Safety gate. For WhatsApp we IGNORE working hours (the merchant sends the
+      // link manually, whenever they choose) but STILL enforce opt-out + cooldown.
+      // For email (auto-send) we enforce the full gate including hours.
+      const gate = await compliance.canContactCustomer(shop, contact, { ignoreHours: hasPhone });
       if (!gate.allowed) {
         c.skipped++; c.done++;
         c.log.push({ customer: cust.name || cust.email, skipped: gate.reason });
         continue;
       }
 
-      // Personal coupon
+      // Personal coupon (stacks on the store's automatic discount by default)
       const code = personalCode(cust.name || cust.email, pct);
       const coupon = await shopify.createDiscountCode(shop, {
         percentage: pct, code, days_valid: days,
@@ -123,34 +135,51 @@ async function runCampaign(id, shop, segment, template) {
         .replace(/\{COUPON\}/g, finalCode || '');
       if (finalCode && !body.includes(finalCode)) body += `\n\nקוד אישי: ${finalCode}`;
 
-      // Send: WhatsApp link if phone, else email auto
-      const hasPhone = contact.phone && String(contact.phone).replace(/[^0-9]/g, '').length >= 8;
-      let channel = null, waLink = null;
       if (hasPhone) {
+        // WhatsApp: PREPARE a ready link. Do NOT count as "sent" - the merchant
+        // sends it by clicking. We add it to the whatsapp list for the UI.
         let wa = String(contact.phone).replace(/[^0-9]/g, '');
         if (wa.startsWith('0')) wa = '972' + wa.slice(1);
-        waLink = `https://wa.me/${wa}?text=${encodeURIComponent(body)}`;
-        channel = 'whatsapp';
+        const waLink = `https://wa.me/${wa}?text=${encodeURIComponent(body)}`;
+
+        c.whatsapp.push({
+          name: cust.name || '',
+          phone: contact.phone,
+          coupon: finalCode,
+          link: waLink,
+          sent: false
+        });
+        c.prepared++; c.done++;
+        c.revenue_potential += parseFloat(cust.est_value || 0);
+
+        // Log as 'prepared' (not converted) so attribution still works when she buys,
+        // but we are honest that it hasn't been sent yet.
+        await db.query(
+          `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [shop, c.campaign_type, contact.email, contact.phone,
+           JSON.stringify({ channel: 'whatsapp', campaign_id: id, prepared: true }), finalCode]
+        ).catch(e => console.error('[campaign] log:', e.message));
+
       } else if (contact.email) {
+        // Email: auto-send through the gate (already checked above)
         const html = mailer.buildHtmlEmail(body, { brand: '770', to: contact.email });
         const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || 'הודעה מ-770', html, text: body });
-        channel = 'email';
         if (!sent.ok) { c.failed++; c.done++; c.log.push({ customer: cust.email, failed: sent.error }); continue; }
+
+        c.sent++; c.done++;
+        c.revenue_potential += parseFloat(cust.est_value || 0);
+
+        await db.query(
+          `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [shop, c.campaign_type, contact.email, contact.phone,
+           JSON.stringify({ channel: 'email', campaign_id: id }), finalCode]
+        ).catch(e => console.error('[campaign] log:', e.message));
+
       } else {
         c.skipped++; c.done++; c.log.push({ customer: cust.name, skipped: 'no_contact' }); continue;
       }
-
-      // Log action (powers attribution + daily report + cooldown)
-      await db.query(
-        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [shop, c.campaign_type, contact.email, contact.phone,
-         JSON.stringify({ channel, campaign_id: id, wa_link: waLink }), finalCode]
-      ).catch(e => console.error('[campaign] log:', e.message));
-
-      c.sent++; c.done++;
-      c.revenue_potential += parseFloat(cust.est_value || 0);
-      c.log.push({ customer: cust.name || cust.email, channel, coupon: finalCode });
 
       await new Promise(r => setTimeout(r, SEND_DELAY_MS));
     } catch (err) {
@@ -162,7 +191,7 @@ async function runCampaign(id, shop, segment, template) {
   if (c) {
     c.status = 'done';
     c.finished_at = new Date().toISOString();
-    console.log(`🏁 [Campaign ${id}] done: ${c.sent} sent, ${c.skipped} skipped, ${c.failed} failed`);
+    console.log(`🏁 [Campaign ${id}] done: ${c.sent} emails sent, ${c.prepared} WhatsApp prepared, ${c.skipped} skipped, ${c.failed} failed`);
   }
 }
 
