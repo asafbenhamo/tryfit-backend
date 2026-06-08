@@ -25,8 +25,6 @@ app.use(cors({
   methods: ["GET", "POST", "OPTIONS", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"]
 }));
-// Global JSON parser — but SKIP checkout webhook paths, which need the raw
-// body for HMAC verification (handled by express.raw on those routes).
 app.use((req, res, next) => {
   if (req.path === "/webhooks/checkouts/create" || req.path === "/webhooks/checkouts/update" || req.path === "/webhooks/orders/create") {
     return next();
@@ -34,17 +32,12 @@ app.use((req, res, next) => {
   return express.json()(req, res, next);
 });
 
-// ======================
-// BACKEND MODE: "fashn" or "runpod"
-// ======================
 const BACKEND_MODE = process.env.BACKEND_MODE || "fashn";
 
-// RunPod config
 const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY || "rpa_94NQI07B7J69J3A25963D9RH0R0FSILF9DFEPEAEwc2qnz";
 const RUNPOD_ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID || "4nxbizcdhfxobd";
 const RUNPOD_BASE_URL = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
 
-// === RATE LIMIT ===
 const userLimits = new Map();
 const DEFAULT_DAILY_LIMIT = 3;
 
@@ -71,7 +64,6 @@ function checkRateLimit(ip, limit) {
   return true;
 }
 
-// === DATA PLATFORM: Save try-on event ===
 async function saveTryOnEvent(shop, eventData) {
   if (!shop) return;
   if (!featureFlags.isDataCollectionEnabled(shop)) {
@@ -133,7 +125,6 @@ async function saveTryOnEvent(shop, eventData) {
   }
 }
 
-// === DATA PLATFORM: Handle TryFit consent + customer backfill ===
 function handleConsentAndBackfill(shop, params) {
   if (!shop) return;
   if (!featureFlags.isDataCollectionEnabled(shop)) return;
@@ -165,7 +156,6 @@ function getShopFromRequest(req) {
   return "";
 }
 
-// === WEBHOOK HMAC VERIFICATION ===
 function verifyShopifyWebhook(req, res, next) {
   const hmacHeader = req.headers["x-shopify-hmac-sha256"];
   if (!hmacHeader) {
@@ -180,9 +170,6 @@ function verifyShopifyWebhook(req, res, next) {
   next();
 }
 
-// ======================
-// STATIC PAGES
-// ======================
 app.get("/health", (req, res) => {
   res.json({ status: "ok", mode: BACKEND_MODE });
 });
@@ -220,18 +207,12 @@ h1{color:#E94560}h2{color:#2D3436;margin-top:30px}
 </html>`);
 });
 
-// ======================
-// ADMIN + CREDITS
-// ======================
 app.use("/admin", adminRouter);
 
 app.get("/api/credits/:shop", (req, res) => {
   res.json(creditsSystem.getStoreCredits(req.params.shop));
 });
 
-// ======================
-// DATA PLATFORM: Consent endpoint
-// ======================
 app.post("/api/consent", express.json(), async (req, res) => {
   try {
     const shop = getShopFromRequest(req);
@@ -265,9 +246,6 @@ app.post("/api/consent", express.json(), async (req, res) => {
   }
 });
 
-// ======================
-// DATA PLATFORM: Admin backfill endpoint
-// ======================
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "tryfit2026";
 const backfillStatus = {};
 
@@ -422,19 +400,6 @@ app.get("/admin/backfill/status", (req, res) => {
   res.json({ shop, status: backfillStatus[shop] || null });
 });
 
-// ======================
-// DATA PLATFORM: Test tools endpoint (TEMPORARY)
-// ======================
-
-
-// ======================
-// DATA PLATFORM: Test brain endpoint (TEMPORARY)
-// ======================
-
-
-// ======================
-// AI CHAT: Real chat endpoint
-// ======================
 app.post("/api/chat", express.json(), async (req, res) => {
   try {
     const { message, history, password } = req.body;
@@ -465,16 +430,10 @@ app.post("/api/chat", express.json(), async (req, res) => {
   }
 });
 
-// ======================
-// AI CHAT: Serve the chat UI page
-// ======================
 app.get("/chat", (req, res) => {
   res.sendFile(__dirname + "/chat.html");
 });
 
-// ======================
-// DAILY PLAN: the brain builds a full business action plan for today
-// ======================
 app.get("/api/daily-plan", async (req, res) => {
   try {
     if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
@@ -493,10 +452,6 @@ app.get("/api/daily-plan", async (req, res) => {
   }
 });
 
-// ======================
-// DAILY SUMMARY: the advisor's morning briefing (principle 5)
-// ======================
-
 app.get("/api/daily-summary", async (req, res) => {
   try {
     if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
@@ -508,10 +463,6 @@ app.get("/api/daily-summary", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-
-// ======================
-// INSIGHTS: Proactive opportunities (shown on chat open)
-// ======================
 
 app.get("/api/insights", async (req, res) => {
   try {
@@ -527,13 +478,6 @@ app.get("/api/insights", async (req, res) => {
   }
 });
 
-// ======================
-// TEMPORARY: Test email sending
-// ======================
-
-// ======================
-// ACTIONS: Create a real discount coupon (merchant-approved)
-// ======================
 app.post("/api/coupon/create", express.json(), async (req, res) => {
   try {
     const { password, percentage, code, days_valid, title, usage_limit } = req.body;
@@ -554,10 +498,6 @@ app.post("/api/coupon/create", express.json(), async (req, res) => {
   }
 });
 
-// ======================
-// ACTIONS: Send an email (merchant-approved)
-// ======================
-
 app.post("/api/send-email", express.json(), async (req, res) => {
   try {
     const { password, to, phone, subject, body, cta_url, cta_label, ignore_hours } = req.body;
@@ -572,7 +512,6 @@ app.post("/api/send-email", express.json(), async (req, res) => {
     }
 
     const shop = "seven770.myshopify.com";
-    // SAFETY GATE: working hours + opt-out (legal). Manual sends can pass ignore_hours.
     const gate = await compliance.canContactCustomer(shop, { email: to, phone }, { ignoreHours: !!ignore_hours });
     if (!gate.allowed) {
       return res.status(200).json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail });
@@ -584,7 +523,6 @@ app.post("/api/send-email", express.json(), async (req, res) => {
       return res.status(400).json(result);
     }
 
-    // Log the action (for the daily summary + revenue attribution later)
     try {
       await db.query(
         `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details)
@@ -600,9 +538,6 @@ app.post("/api/send-email", express.json(), async (req, res) => {
   }
 });
 
-// ======================
-// COMPLIANCE: opt-out management + working-hours status
-// ======================
 app.post("/api/optout/add", express.json(), async (req, res) => {
   try {
     const { password, email, phone, reason } = req.body;
@@ -614,7 +549,6 @@ app.post("/api/optout/add", express.json(), async (req, res) => {
   }
 });
 
-// Public unsubscribe link (no password - reached from email footer)
 app.get("/unsubscribe", async (req, res) => {
   const email = req.query.email;
   if (!email) return res.status(400).send("Missing email");
@@ -629,9 +563,6 @@ app.get("/api/working-hours", (req, res) => {
   res.json(compliance.workingHoursStatus());
 });
 
-// ======================
-// CAMPAIGNS: autonomous batch sending (background worker)
-// ======================
 const campaignEngine = require("./campaign-engine");
 
 app.post("/api/campaign/start", express.json(), async (req, res) => {
@@ -675,22 +606,14 @@ app.post("/api/campaign/stop", express.json(), (req, res) => {
   res.json(result);
 });
 
-// ======================
-// AGENT: autonomous daily plan (propose -> approve selected -> execute alone)
-// ======================
-
-// Propose a structured plan: detect opportunities and save as agent_plans + agent_tasks.
-// Returns the plan with its tasks (each with a checkbox-ready structure).
 app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
   try {
     if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = "seven770.myshopify.com";
     const today = new Date().toISOString().slice(0, 10);
 
-    // Build candidate moves from real data
     const moves = [];
 
-    // 1. Abandoned carts
     const carts = await aiTools.getAbandonedCheckouts(shop, { limit: 50, days: 30 });
     const cartList = carts.recoverable_carts || carts.carts || [];
     if (cartList.length > 0) {
@@ -705,7 +628,6 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
         }});
     }
 
-    // 2. Dormant VIPs
     const vips = await aiTools.getDormantCustomers(shop, { limit: 50, daysInactive: 30, minSpent: 1000 });
     if ((vips.customers || []).length > 0) {
       const val = vips.customers.reduce((s, c) => s + parseFloat(c.total_spent || 0) * 0.15, 0);
@@ -719,7 +641,6 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
         }});
     }
 
-    // 3. One-time buyers
     const oneTime = (vips.customers || []).filter(c => (c.orders_count || 0) === 1);
     if (oneTime.length > 0) {
       const val = oneTime.reduce((s, c) => s + parseFloat(c.total_spent || 0), 0);
@@ -733,7 +654,6 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
         }});
     }
 
-    // 4. Hot product promotion
     const hot = await aiTools.getTopProducts(shop, { limit: 3 });
     const repeat = await aiTools.getRepeatCustomers(shop, { limit: 50 });
     if ((repeat.customers || []).length > 0 && (hot.products || hot.top_products || []).length > 0) {
@@ -755,7 +675,6 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
 
     const totalProjected = moves.reduce((s, m) => s + m.projected_revenue, 0);
 
-    // Save plan
     const planRes = await db.query(
       `INSERT INTO agent_plans (shop_domain, plan_date, status, projected_revenue)
        VALUES ($1, $2, 'proposed', $3) RETURNING id`,
@@ -763,7 +682,6 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
     );
     const planId = planRes.rows[0].id;
 
-    // Save tasks
     for (const m of moves) {
       await db.query(
         `INSERT INTO agent_tasks (plan_id, shop_domain, priority, move_type, title, segment, percentage, projected_revenue, est_customers, params)
@@ -780,7 +698,6 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
   }
 });
 
-// Approve selected tasks and start execution.
 app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
   try {
     if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
@@ -789,12 +706,10 @@ app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
     if (!plan_id || !Array.isArray(selected_task_ids)) {
       return res.status(400).json({ ok: false, error: "חסר plan_id או רשימת מהלכים" });
     }
-    // Mark selected vs unselected
     await db.query(`UPDATE agent_tasks SET selected = (id = ANY($2)) WHERE plan_id=$1`,
       [plan_id, selected_task_ids]);
     await db.query(`UPDATE agent_plans SET status='approved', approved_at=NOW() WHERE id=$1`, [plan_id]);
 
-    // Kick off execution in the background
     agentEngine.startPlan(shop, plan_id);
     res.json({ ok: true, started: true, plan_id });
   } catch (err) {
@@ -816,8 +731,6 @@ app.post("/api/agent/stop-plan", express.json(), async (req, res) => {
   res.json(result);
 });
 
-// Revise a proposed plan based on a free-text request from the merchant.
-// Uses the AI to interpret the request into structured updates to agent_tasks.
 app.post("/api/agent/revise-plan", express.json(), async (req, res) => {
   try {
     if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
@@ -825,13 +738,11 @@ app.post("/api/agent/revise-plan", express.json(), async (req, res) => {
     const { plan_id, request } = req.body;
     if (!plan_id || !request) return res.status(400).json({ ok: false, error: "חסר plan_id או בקשה" });
 
-    // Load current tasks
     const cur = await db.query(
       `SELECT id, priority, move_type, title, percentage, est_customers, projected_revenue
        FROM agent_tasks WHERE plan_id=$1 ORDER BY priority ASC`, [plan_id]);
     if (cur.rows.length === 0) return res.json({ ok: false, error: "התוכנית לא נמצאה" });
 
-    // Ask the AI to translate the request into structured updates.
     const tasksJson = JSON.stringify(cur.rows.map(t => ({
       id: t.id, move: t.move_type, title: t.title, percentage: t.percentage,
       customers: t.est_customers
@@ -855,7 +766,6 @@ ${tasksJson}
       return res.json({ ok: false, error: "לא הצלחתי להבין את הבקשה, נסה לנסח אחרת" });
     }
 
-    // Apply updates
     for (const u of updates) {
       if (!u.id) continue;
       if (u.remove) {
@@ -871,7 +781,6 @@ ${tasksJson}
       }
     }
 
-    // Recompute projected total and return the refreshed plan
     const refreshed = await agentEngine.getPlanStatus(plan_id);
     const projected = (refreshed.tasks || []).reduce((s, t) => s + parseFloat(t.projected_revenue || 0), 0);
     await db.query(`UPDATE agent_plans SET projected_revenue=$2 WHERE id=$1`, [plan_id, projected]);
@@ -882,10 +791,6 @@ ${tasksJson}
   }
 });
 
-// ======================
-// STATS: how much money the advisor has made (live counter)
-// Only counts CONVERTED actions - credit only for what the advisor truly closed.
-// ======================
 app.get("/api/advisor-actions-log", async (req, res) => {
   try {
     if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
@@ -900,7 +805,6 @@ app.get("/api/advisor-actions-log", async (req, res) => {
        FETCH FIRST 100 ROWS ONLY`,
       [shop]
     );
-    // Friendly labels for action types
     const TYPE_LABELS = {
       abandoned_cart: 'שחזור עגלה נטושה',
       dormant_vip: 'החזרת לקוחה VIP',
@@ -955,11 +859,6 @@ app.get("/api/advisor-stats", async (req, res) => {
   }
 });
 
-// ======================
-// ACTIONS: Execute a full advisor action plan (coupon + message), merchant-approved.
-// This is the closed loop: create coupon -> send via email (auto) or return
-// WhatsApp link -> log the action. Channel priority: WhatsApp (if phone) else email.
-// ======================
 app.post("/api/action/execute", express.json(), async (req, res) => {
   try {
     const {
@@ -973,17 +872,12 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
     const shop = "seven770.myshopify.com";
     const result = { ok: true, steps: {} };
 
-    // --- Step 1: create coupon if requested ---
     let couponCode = null;
     if (create_coupon) {
-      // Ensure a personalized, unique, traceable code.
-      // If the AI didn't supply one (or supplied a generic one), build it from
-      // the customer name + percentage + a short random suffix.
       const GENERIC = ["SALE","DISCOUNT","COUPON","SAVE","PROMO","CODE"];
       let finalCode = (coupon_code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
       const isGeneric = !finalCode || GENERIC.includes(finalCode);
       if (isGeneric) {
-        // transliterate-ish: keep ASCII letters from name, else fallback
         let namePart = "";
         if (customer_name) {
           namePart = customer_name.replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8);
@@ -991,25 +885,23 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
         if (!namePart && email) namePart = email.split("@")[0].replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8);
         if (!namePart) namePart = "VIP";
         const pct = coupon_percentage || 10;
-        const suffix = Math.floor(Math.random() * 900 + 100); // 3 digits, keeps it unique
+        const suffix = Math.floor(Math.random() * 900 + 100);
         finalCode = `${namePart}${pct}${suffix}`;
       }
       const c = await shopify.createDiscountCode(shop, {
         percentage: coupon_percentage || 10,
         code: finalCode,
-        days_valid: coupon_days || 30,
+        days_valid: coupon_days || 2,
         title: `יועץ: ${action_type || 'campaign'} - ${customer_name || email || ''}`
       });
       if (!c.ok) {
         result.steps.coupon = { ok: false, error: c.error, needs_scope: c.needs_scope };
-        // Coupon failed - abort before sending (don't send a message promising a broken code)
         return res.status(400).json({ ok: false, error: "יצירת הקופון נכשלה: " + c.error, steps: result.steps });
       }
       couponCode = c.code;
       result.steps.coupon = { ok: true, code: c.code, percentage: c.percentage, ends_at: c.ends_at };
     }
 
-    // Build final message body (inject coupon code if created)
     let finalBody = message_body || "";
     if (couponCode && finalBody.includes("{COUPON}")) {
       finalBody = finalBody.replace(/\{COUPON\}/g, couponCode);
@@ -1017,12 +909,9 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       finalBody += `\n\nקוד הקופון שלך: ${couponCode}`;
     }
 
-    // --- Step 2: choose channel. WhatsApp first (if phone), else email ---
     const hasPhone = phone && String(phone).trim().length >= 8;
 
     if (hasPhone) {
-      // WhatsApp: we can't auto-send without Business API. Return a ready wa.me link.
-      // Still check opt-out (legal) before offering to contact.
       const optedOut = await compliance.isOptedOut(shop, { email, phone });
       if (optedOut) {
         return res.json({ ok: false, blocked: true, reason: "opted_out",
@@ -1040,7 +929,6 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       ).catch(e => console.error("log:", e.message));
 
     } else if (email) {
-      // Email: full auto-send through the safety gate (hours + opt-out)
       const gate = await compliance.canContactCustomer(shop, { email, phone });
       if (!gate.allowed) {
         result.steps.message = { channel: "email", ok: false, blocked: true, reason: gate.reason, detail: gate.detail };
@@ -1071,11 +959,6 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
   }
 });
 
-// ======================
-// ACTIONS: Build a personalized cart (draft order) + send payment link.
-// The aggressive move: advisor pre-builds a cart for a customer and sends a
-// direct pay link. Channel priority: WhatsApp (if phone) else email.
-// ======================
 app.post("/api/action/build-cart", express.json(), async (req, res) => {
   try {
     const {
@@ -1091,13 +974,11 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
       return res.status(400).json({ ok: false, error: "אין פריטים לעגלה" });
     }
 
-    // Opt-out check (legal) before building/sending
     if (await compliance.isOptedOut(shop, { email, phone })) {
       return res.json({ ok: false, blocked: true, reason: "opted_out",
         detail: "הלקוחה ביקשה לא לקבל הודעות. לא ניתן לפנות אליה." });
     }
 
-    // 1. Create the draft order
     const draft = await shopify.createDraftOrder(shop, {
       items, email: email || null,
       discount_percentage: discount_percentage || null,
@@ -1107,8 +988,6 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
       return res.status(400).json({ ok: false, error: "בניית העגלה נכשלה: " + draft.error, needs_scope: draft.needs_scope });
     }
 
-    // Create a personal coupon so the discount works on the EDITABLE cart link too,
-    // and so we can close the loop by code when she buys. Build a unique code.
     let cartCoupon = null;
     if (discount_percentage) {
       const namePart = (customer_name || (email ? email.split("@")[0] : "") || "VIP").replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8) || "VIP";
@@ -1116,14 +995,13 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
       const c = await shopify.createDiscountCode(shop, {
         percentage: discount_percentage,
         code: `${namePart}${discount_percentage}${suffix}`,
-        days_valid: 14,
+        days_valid: 2,
         title: `יועץ: עגלה מותאמת - ${customer_name || email || ''}`
       });
       if (c.ok) cartCoupon = c.code;
     }
 
     const payUrl = draft.invoice_url;
-    // Also build an EDITABLE cart permalink (customer can change items/sizes/add more).
     let editableCartUrl = null;
     try {
       const cartParts = items.map(it => `${it.variant_id}:${it.quantity || 1}`).join(',');
@@ -1136,7 +1014,6 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
 
     const result = { ok: true, steps: { cart: { ok: true, total: draft.total, pay_url: payUrl, editable_url: editableCartUrl, coupon: cartCoupon } } };
 
-    // 2. Send via WhatsApp (if phone) else email
     const hasPhone = phone && String(phone).trim().length >= 8;
     if (hasPhone) {
       let waPhone = String(phone).replace(/[^0-9]/g, "");
@@ -1158,7 +1035,6 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
       return res.status(400).json({ ok: false, error: "אין דרך ליצור קשר" });
     }
 
-    // 3. Log
     await db.query(
       `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
        VALUES ($1, 'personalized_cart', $2, $3, $4, $5)`,
@@ -1181,9 +1057,6 @@ app.get("/apple-touch-icon.png", (req, res) => {
   res.sendFile(__dirname + "/apple-touch-icon.png");
 });
 
-// ======================
-// CHAT HISTORY: Persistent conversations (DB-backed)
-// ======================
 app.post("/api/chat/save", express.json(), async (req, res) => {
   try {
     const { id, title, messages, password } = req.body;
@@ -1280,9 +1153,6 @@ app.delete("/api/chat/delete/:id", async (req, res) => {
   }
 });
 
-// ======================
-// PRODUCTS: Manual sync trigger (TEMPORARY)
-// ======================
 app.get("/admin/sync-products", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
@@ -1296,9 +1166,6 @@ app.get("/admin/sync-products", async (req, res) => {
   }
 });
 
-// ======================
-// TEMPORARY: Manual abandoned-checkout sync trigger
-// ======================
 app.get("/admin/sync-checkouts", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
@@ -1311,21 +1178,7 @@ app.get("/admin/sync-checkouts", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-// ======================
-// TEMPORARY: Diagnose checkout fetch limits
-// ======================
 
-// ======================
-// TEMPORARY: Test discount/coupon API access
-// ======================
-
-// ======================
-// TEMPORARY: Test WRITE access for coupons (creates + deletes a test coupon)
-// ======================
-
-// ======================
-// FASHN FUNCTIONS
-// ======================
 function buildFashnBody(dataUri, garmentUrl, category) {
   console.log("Building FASHN body with category:", category);
   return {
@@ -1392,9 +1245,6 @@ async function submitAndWaitFashn(modelImage, garmentUrl, category) {
   throw lastError;
 }
 
-// ======================
-// RUNPOD FUNCTIONS
-// ======================
 async function submitRunPod(dataUri, garmentUrl, category) {
   let rpCategory = category;
   const categoryMap = {
@@ -1536,7 +1386,6 @@ async function submitAndWaitRunPod(modelImage, garmentUrl, category) {
   throw new Error("No output image from RunPod");
 }
 
-// === UNIFIED ===
 async function submitJob(dataUri, garmentUrl, category) {
   if (BACKEND_MODE === "runpod") return await submitRunPod(dataUri, garmentUrl, category);
   return await submitFashn(dataUri, garmentUrl, category);
@@ -1547,9 +1396,6 @@ async function submitAndWait(modelImage, garmentUrl, category) {
   return await submitAndWaitFashn(modelImage, garmentUrl, category);
 }
 
-// ======================
-// TRY-ON ROUTES
-// ======================
 app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) => {
   try {
     console.log("=== NEW TRY-ON REQUEST [" + BACKEND_MODE + "] ===");
@@ -1875,7 +1721,6 @@ app.get("/api/tryon/video-proxy", async (req, res) => {
   }
 });
 
-// === COMPLIANCE WEBHOOKS (HMAC VERIFIED) ===
 app.post("/webhooks/compliance", verifyShopifyWebhook, (req, res) => {
   console.log("Compliance webhook received:", JSON.stringify(req.body).substring(0, 200));
   res.status(200).json({ success: true });
@@ -1891,14 +1736,11 @@ app.post("/webhooks/app/scopes_update", verifyShopifyWebhook, (req, res) => {
   res.status(200).json({ success: true });
 });
 
-// === CHECKOUT WEBHOOKS (abandoned cart capture, real-time, saved forever) ===
-// Uses express.raw so we can verify the HMAC against the EXACT bytes Shopify
-// signed (JSON.stringify would re-serialize and break verification).
 function handleCheckoutWebhook(req, res) {
   try {
     const hmacHeader = req.headers["x-shopify-hmac-sha256"];
     const secret = process.env.SHOPIFY_API_SECRET || "";
-    const rawBody = req.body; // Buffer (from express.raw)
+    const rawBody = req.body;
 
     if (!hmacHeader || !secret) {
       return res.status(401).json({ error: "Unauthorized" });
@@ -1909,7 +1751,6 @@ function handleCheckoutWebhook(req, res) {
       return res.status(401).json({ error: "Invalid HMAC" });
     }
 
-    // Respond 200 immediately (Shopify requires fast ack), then save in background.
     res.status(200).json({ success: true });
 
     const shopDomain = req.headers["x-shopify-shop-domain"] || "seven770.myshopify.com";
@@ -1940,9 +1781,6 @@ function handleCheckoutWebhook(req, res) {
 app.post("/webhooks/checkouts/create", express.raw({ type: "application/json" }), handleCheckoutWebhook);
 app.post("/webhooks/checkouts/update", express.raw({ type: "application/json" }), handleCheckoutWebhook);
 
-// === ORDER WEBHOOK: close the loop on advisor-created coupons ===
-// When an order comes in that used a coupon the advisor created, mark that
-// action as converted and attribute the revenue. This powers the live counter.
 function handleOrderWebhook(req, res) {
   try {
     const hmacHeader = req.headers["x-shopify-hmac-sha256"];
@@ -1966,7 +1804,6 @@ function handleOrderWebhook(req, res) {
         const buyerEmail = (order.email || order.customer?.email || "").toLowerCase() || null;
         const buyerPhone = (order.phone || order.customer?.phone || order.shipping_address?.phone || "").replace(/[^0-9]/g, "") || null;
 
-        // --- Attribution 1: by coupon code (certain) ---
         const codes = (order.discount_codes || []).map(d => (d.code || "").toUpperCase()).filter(Boolean);
         let closedByCoupon = false;
         for (const code of codes) {
@@ -1983,11 +1820,8 @@ function handleOrderWebhook(req, res) {
           }
         }
 
-        // --- Attribution 1.5: by draft order id (personalized carts) ---
-        // Orders created from our draft order carry source/draft info.
         const draftId = order.source_identifier || (order.note_attributes || []).find(a => a.name === 'draft_order_id')?.value || null;
         if (!closedByCoupon && order.source_name === 'draft_order') {
-          // Match a pending personalized_cart action by the buyer's email/phone
           const r = await db.query(
             `UPDATE advisor_actions
              SET outcome = 'converted', attributed_revenue = $4, closed_at = NOW(),
@@ -2003,13 +1837,11 @@ function handleOrderWebhook(req, res) {
             [shopDomain, buyerEmail, buyerPhone, orderTotal]
           );
           if (r.rows.length > 0) {
-            closedByCoupon = true; // mark handled
+            closedByCoupon = true;
             console.log(`💰 [Loop closed - draft cart] +${orderTotal}₪ (action ${r.rows[0].id})`);
           }
         }
 
-        // --- Attribution 2: by time window (customer bought within 3 days of being contacted) ---
-        // Only if not already closed by coupon (avoid double-counting the same order).
         if (!closedByCoupon && (buyerEmail || buyerPhone)) {
           const r = await db.query(
             `UPDATE advisor_actions
@@ -2046,23 +1878,10 @@ function handleOrderWebhook(req, res) {
 app.post("/webhooks/orders/create", express.raw({ type: "application/json" }), handleOrderWebhook);
 
 // === Register checkout webhooks with Shopify (TEMPORARY - call once) ===
-============================================================
-תוספת ל-server-dual.js — endpoint חד-פעמי לתיקון נתונים קיימים
-============================================================
-
-מטרה: לתקן את הנתונים שכבר נשמרו במערכת —
-  1. לנקות טלפונים שגויים (שנשאבו מכתובת משלוח)
-  2. למלא last_order_date מתוך ההזמנות הקיימות
-
-איפה להוסיף: פתח server-dual.js, חפש את השורה (Ctrl+F):
-
-    app.get("/admin/setup-agent-tables", async (req, res) => {
-
-ממש *לפני* השורה הזו, הדבק את כל הבלוק הבא:
 
 // ======================
 // ONE-TIME FIX: clean bad phones + backfill last_order_date
-// Call once: /admin/fix-data?password=...
+// Call once: /admin/fix-data?password=Ariel770%21
 // ======================
 app.get("/admin/fix-data", async (req, res) => {
   if (req.query.password !== ADMIN_PASSWORD) {
@@ -2070,19 +1889,15 @@ app.get("/admin/fix-data", async (req, res) => {
   }
   const shop = "seven770.myshopify.com";
   try {
-    // 1. Null out phones that are not clean Israeli mobiles (05X + 8 digits).
-    //    These were wrongly pulled from shipping addresses.
     const badPhones = await db.query(
       `UPDATE store_customers
        SET phone = NULL
        WHERE shop_domain = $1
          AND phone IS NOT NULL
          AND phone !~ '^0?5[0-9]{8}$'
-         AND phone !~ '^\\+?9725[0-9]{8}$'`,
+         AND phone !~ '^\+?9725[0-9]{8}$'`,
       [shop]
     );
-
-    // 2. Recompute last_order_date from the orders we actually have.
     const lod = await db.query(
       `UPDATE store_customers sc
        SET last_order_date = sub.last_order
@@ -2096,7 +1911,6 @@ app.get("/admin/fix-data", async (req, res) => {
          AND sc.shopify_customer_id = sub.shopify_customer_id`,
       [shop]
     );
-
     res.json({
       ok: true,
       phones_cleaned: badPhones.rowCount,
@@ -2109,14 +1923,6 @@ app.get("/admin/fix-data", async (req, res) => {
   }
 });
 
-============================================================
-אחרי שתדחוף ל-Railway, הרץ פעם אחת בדפדפן:
-https://tryfit-backend-production.up.railway.app/admin/fix-data?password=Ariel770!
-(שים לב: הסיסמה ב-URL צריכה להיות Ariel770%21 במקום הסימן !)
-
-כלומר הכתובת המלאה:
-https://tryfit-backend-production.up.railway.app/admin/fix-data?password=Ariel770%21
-============================================================
 app.get("/admin/setup-agent-tables", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
@@ -2155,7 +1961,6 @@ app.get("/admin/setup-agent-tables", async (req, res) => {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_agent_plans_shop ON agent_plans(shop_domain, plan_date DESC)`);
     await db.query(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_plan ON agent_tasks(plan_id, priority)`);
 
-    // Verify
     const check = await db.query(`SELECT
       (SELECT COUNT(*) FROM agent_plans)::int AS plans,
       (SELECT COUNT(*) FROM agent_tasks)::int AS tasks`);
@@ -2201,7 +2006,6 @@ app.get("/admin/register-webhooks", async (req, res) => {
     }
   }
 
-  // Also list all currently registered webhooks for confirmation.
   let existing = [];
   try {
     const lr = await fetch(`https://${shop}/admin/api/2026-01/webhooks.json`, {
@@ -2226,7 +2030,6 @@ app.listen(PORT, async () => {
   console.log("Credits system: ACTIVE");
   console.log("Admin dashboard: /admin");
 
-  // ========== Data Platform Initialization ==========
   console.log("\n--- Data Platform Initialization ---");
   console.log("Data collection enabled for:", featureFlags.getDataCollectionShops().join(", "));
   if (process.env.DATABASE_URL) {
@@ -2254,7 +2057,6 @@ app.listen(PORT, async () => {
     console.log("⚠️  DATABASE_URL not configured, data platform disabled");
   }
 
-  // ========== Product Catalog Sync (every 6 hours) ==========
   if (process.env.DATABASE_URL) {
     const PRODUCT_SYNC_SHOP = "seven770.myshopify.com";
     const runProductSync = async () => {
@@ -2271,9 +2073,6 @@ app.listen(PORT, async () => {
     console.log("🔄 Product catalog sync scheduled (every 6h)");
   }
 
-  // ========== Orders + Customers Sync (every 3 hours) ==========
-  // Keeps store_orders / store_customers fresh so the advisor's numbers
-  // match Shopify. Reuses the existing backfillEntireShop (full upsert).
   if (process.env.DATABASE_URL) {
     const DATA_SYNC_SHOP = "seven770.myshopify.com";
     let dataSyncRunning = false;
@@ -2291,8 +2090,6 @@ app.listen(PORT, async () => {
           `customers ${r.customers_saved}/${r.customers_fetched},`,
           `orders ${r.orders_saved}/${r.orders_fetched} (${r.duration_seconds}s)`);
 
-        // Recompute last_order_date for each customer from their orders,
-        // so "dormant customer" analysis stays accurate after every sync.
         try {
           const upd = await db.query(`
             UPDATE store_customers sc
@@ -2311,7 +2108,6 @@ app.listen(PORT, async () => {
           console.error("⚠️  [Data] last_order_date refresh failed:", e.message);
         }
 
-        // Sync abandoned checkouts (carts not completed) for cart-recovery insights.
         try {
           const ac = await shopify.syncAbandonedCheckouts(DATA_SYNC_SHOP);
           if (ac.success) {
@@ -2328,13 +2124,11 @@ app.listen(PORT, async () => {
         dataSyncRunning = false;
       }
     };
-    // First run 90s after startup (lets product sync go first), then every 3h.
     setTimeout(runDataSync, 90000);
     setInterval(runDataSync, 3 * 60 * 60 * 1000);
     console.log("🔄 Orders + customers sync scheduled (every 3h)");
   }
 
-  // === Daily reports: 09:00 (overnight) and 21:00 (end of day) Israel time ===
   let lastReport09 = null, lastReport21 = null;
   setInterval(async () => {
     try {
@@ -2343,7 +2137,6 @@ app.listen(PORT, async () => {
       const dateStr = israelNow.toISOString().slice(0, 10);
       const shop = "seven770.myshopify.com";
 
-      // 09:00 - overnight report (what happened during the night)
       if (hour === 9 && lastReport09 !== dateStr) {
         lastReport09 = dateStr;
         const summary = await dailySummary.getDailySummary(shop);
@@ -2355,7 +2148,6 @@ app.listen(PORT, async () => {
         console.log(`🌅 [Morning report] generated for ${dateStr} (09:00 Israel)`);
       }
 
-      // 21:00 - end of day report
       if (hour === 21 && lastReport21 !== dateStr) {
         lastReport21 = dateStr;
         const summary = await dailySummary.getDailySummary(shop);
@@ -2372,7 +2164,6 @@ app.listen(PORT, async () => {
   }, 60 * 1000);
   console.log("📋 Reports scheduled (09:00 overnight + 21:00 end-of-day, Israel time)");
 
-  // Resume any agent plan that was mid-execution when the server restarted.
   agentEngine.resumeInterruptedPlans();
 
   console.log("---\n");
