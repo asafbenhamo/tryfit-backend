@@ -42,8 +42,8 @@ async function detectDormantVIPs(shop) {
     return r.rows.map(c => ({
       type: 'dormant_vip',
       priority: 1,
-      title: `לקוחה VIP שנעלמה: ${(c.first_name || '') + ' ' + (c.last_name || '')}`.trim(),
-      detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ב-${c.orders_count} הזמנות, אבל לא קנתה כבר ${c.days_since} ימים.`,
+      title: `לקוחה מועדפת ששווה להחזיר: ${(c.first_name || '') + ' ' + (c.last_name || '')}`.trim(),
+      detail: `מלקוחות ה-VIP שלך, אבל לא קנתה כבר ${c.days_since} ימים. שווה לפנות אליה אישית עם עגלה מותאמת והטבה - לפני שתלך למתחרים.`,
       action_hint: 'send_winback',
       data: {
         name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),

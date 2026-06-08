@@ -171,6 +171,29 @@
   .summary-stat .num.green { color: #16a34a; }
   .summary-stat .lbl { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
   .summary-line { font-size: 13px; color: #44505f; margin-top: 8px; line-height: 1.5; }
+  .plan-card {
+    width: 100%; max-width: 620px; margin: 0 auto 10px; padding: 18px;
+    background: #fff; border: 1.5px solid #0a6fe0; border-radius: 18px;
+    box-shadow: 0 2px 14px rgba(10,111,224,0.10);
+    animation: rise 0.4s cubic-bezier(0.16,1,0.3,1);
+  }
+  .plan-head { font-size: 16px; font-weight: 800; color: #0a2540; margin-bottom: 12px; }
+  .plan-loading { font-size: 13.5px; color: var(--text-dim); padding: 10px 0; }
+  .plan-body { font-size: 14px; line-height: 1.7; color: #2a3441; }
+  .plan-body strong { color: #0a2540; }
+  .plan-approve {
+    width: 100%; margin-top: 14px; border: none; background: #16a34a; color: #fff;
+    font-family: 'Heebo',sans-serif; font-size: 15px; font-weight: 700;
+    padding: 13px; border-radius: 12px; cursor: pointer; transition: background 0.2s, transform 0.1s;
+  }
+  .plan-approve:active { transform: scale(0.98); }
+  .plan-approve:hover { background: #15803d; }
+  .action-stop {
+    border: 1px solid #dc2626; background: #fff; color: #dc2626;
+    font-family: 'Heebo',sans-serif; font-size: 13px; font-weight: 700;
+    padding: 8px 16px; border-radius: 9px; cursor: pointer; margin-top: 8px;
+  }
+  .action-stop:hover { background: #fef2f2; }
   .insight-card {
     background: var(--bg-soft); border: 1px solid var(--border-strong);
     border-radius: 16px; padding: 14px 16px; margin-bottom: 10px;
@@ -412,6 +435,36 @@
     }
     card.innerHTML = html;
     w.parentNode.insertBefore(card, w);
+    loadDailyPlan();
+  }
+
+  /* ===== DAILY BUSINESS PLAN (the agent's plan for today) ===== */
+  async function loadDailyPlan() {
+    if (!$('welcome')) return;
+    // Insert a loading placeholder right after the summary card
+    const sc = document.querySelector('.summary-card');
+    const wrap = document.createElement('div');
+    wrap.className = 'plan-card';
+    wrap.innerHTML = '<div class="plan-head">📋 התוכנית שלי להיום</div><div class="plan-loading">בונה לך תוכנית עסקית מותאמת... ⚙️</div>';
+    if (sc) sc.parentNode.insertBefore(wrap, sc.nextSibling);
+    else return;
+    try {
+      const res = await fetch('/api/daily-plan?password=' + encodeURIComponent(PASSWORD));
+      const data = await res.json();
+      if (!data.ok || !$('welcome')) { wrap.remove(); return; }
+      let html = '<div class="plan-head">📋 התוכנית שלי להיום</div>';
+      html += '<div class="plan-body">' + render(data.plan) + '</div>';
+      html += '<button class="plan-approve" onclick="approvePlan()">אשר את התוכנית והתחל לעבוד ←</button>';
+      wrap.innerHTML = html;
+      window._dailyPlanText = data.plan;
+    } catch (err) {
+      wrap.remove();
+    }
+  }
+  function approvePlan() {
+    const plan = window._dailyPlanText || '';
+    input.value = 'אשרתי את התוכנית. תתחיל לבצע אותה - הפעל את הקמפיינים והפעולות לפי הסדר שהצעת, ודווח לי על ההתקדמות.';
+    sendMessage();
   }
 
   /* ===== LIVE MONEY COUNTER ===== */
@@ -450,11 +503,11 @@
   }
   /* ===== PROACTIVE INSIGHTS ===== */
   const ACTION_PROMPTS = {
-    send_winback: name => `תכין לי הודעת win-back מותאמת אישית ל${name} שתחזיר אותה לקנות`,
-    reorder: title => `ספר לי עוד על המוצר "${title}" - כמה למכור, מתי, וכמה כדאי להזמין מחדש`,
-    recover_cart: () => `תכין לי הודעה להשלמת רכישה ללקוחה שנטשה את העגלה הזו`,
-    investigate_growth: () => `מה הניע את העלייה במכירות השבוע? אילו מוצרים ולקוחות?`,
-    investigate_drop: () => `מה גרם לירידה במכירות השבוע? מה השתנה מול שבוע שעבר?`
+    send_winback: name => `בנה ל${name} עגלה מותאמת אישית מלאה - בדוק מה היא קנתה בעבר ובאיזו מידה, בחר לה מוצרים שתאהב שזמינים במידה שלה, צרף קופון אישי והודעה חמה ומזמינה. הכל מותאם אליה אישית.`,
+    reorder: title => `המוצר "${title}" מוכר חזק ועומד להיגמר. בנה קמפיין שמקדם אותו ללקוחות שסביר שיאהבו אותו (לפי היסטוריית קניות), עם קופון והודעה - לפני שאוזל.`,
+    recover_cart: () => `תכין שחזור עגלה מושקע ללקוחה הזו - הודעה אישית חמה + קופון אישי + קישור ישיר לעגלה שלה כדי שתשלים בקלות.`,
+    investigate_growth: () => `מה הניע את העלייה במכירות השבוע? אילו מוצרים ולקוחות? ואיך אני ממנף את זה לעוד מכירות?`,
+    investigate_drop: () => `מה גרם לירידה במכירות השבוע? ומה התוכנית להחזיר את המומנטום?`
   };
   async function loadInsights() {
     const welcome = $('welcome');
@@ -713,21 +766,36 @@
   }
   async function pollCampaign(id, total, el) {
     let done = false;
+    // Show a stop button while running
+    el.innerHTML = '<div class="camp-status">⚙️ מתחיל...</div><button class="action-stop" id="stopBtn_' + id + '">🛑 עצור קמפיין</button>';
+    const stopBtn = el.querySelector('#stopBtn_' + id);
+    if (stopBtn) stopBtn.onclick = async () => {
+      stopBtn.disabled = true; stopBtn.textContent = 'עוצר...';
+      try {
+        await fetch('/api/campaign/stop', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: PASSWORD, id })
+        });
+      } catch (e) {}
+    };
     async function tick() {
       try {
         const res = await fetch('/api/campaign/status?password=' + encodeURIComponent(PASSWORD) + '&id=' + id);
         const data = await res.json();
         if (!data.ok || !data.campaign) return;
         const c = data.campaign;
-        if (c.status === 'done') {
+        const statusEl = el.querySelector('.camp-status');
+        if (c.status === 'done' || c.status === 'stopped') {
           done = true;
-          el.innerHTML = '✅ הקמפיין הושלם! פניתי ל-' + c.sent + ' לקוחות'
-            + (c.skipped ? ' (' + c.skipped + ' דולגו - cooldown/הסרה)' : '')
+          const stopB = el.querySelector('.action-stop'); if (stopB) stopB.remove();
+          const verb = c.status === 'stopped' ? 'נעצר' : 'הושלם';
+          el.querySelector('.camp-status').innerHTML = '✅ הקמפיין ' + verb + '! פניתי ל-' + c.sent + ' לקוחות'
+            + (c.skipped ? ' (' + c.skipped + ' דולגו)' : '')
             + (c.revenue_potential ? '<br>צפי הכנסה: ₪' + c.revenue_potential.toLocaleString() : '')
             + '<br><span style="font-size:12px;color:#666">אעקוב ואדווח כשייסגרו מעגלים. הרווח בפועל יופיע למעלה.</span>';
           loadMoneyCounter();
-        } else {
-          el.innerHTML = '⚙️ עובד... ' + c.done + '/' + c.total + ' (' + c.sent + ' נשלחו)';
+        } else if (statusEl) {
+          statusEl.innerHTML = '⚙️ עובד... ' + c.done + '/' + c.total + ' (' + c.sent + ' נשלחו)';
         }
       } catch (e) {}
       if (!done) setTimeout(tick, 2000);

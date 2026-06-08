@@ -25,6 +25,17 @@ function getCampaignStatus(id) {
   return campaigns[id] || null;
 }
 
+function stopCampaign(id) {
+  const c = campaigns[id];
+  if (!c) return { ok: false, error: 'not found' };
+  if (c.status === 'running') {
+    c.stopRequested = true;
+    c.status = 'stopping';
+    return { ok: true, status: 'stopping' };
+  }
+  return { ok: true, status: c.status };
+}
+
 function listActiveCampaigns(shop) {
   return Object.entries(campaigns)
     .filter(([id, c]) => c.shop === shop)
@@ -81,6 +92,12 @@ async function runCampaign(id, shop, segment, template) {
 
   for (const cust of segment) {
     if (!c) break;
+    if (c.stopRequested) {
+      c.status = 'stopped';
+      c.finished_at = new Date().toISOString();
+      console.log(`🛑 [Campaign ${id}] stopped by user at ${c.done}/${c.total}`);
+      return;
+    }
     try {
       const contact = { email: cust.email || null, phone: cust.phone || null };
 
@@ -149,4 +166,4 @@ async function runCampaign(id, shop, segment, template) {
   }
 }
 
-module.exports = { startCampaign, getCampaignStatus, listActiveCampaigns, MAX_PER_CAMPAIGN };
+module.exports = { startCampaign, getCampaignStatus, stopCampaign, listActiveCampaigns, MAX_PER_CAMPAIGN };

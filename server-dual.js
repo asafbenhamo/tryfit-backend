@@ -472,6 +472,27 @@ app.get("/chat", (req, res) => {
 });
 
 // ======================
+// DAILY PLAN: the brain builds a full business action plan for today
+// ======================
+app.get("/api/daily-plan", async (req, res) => {
+  try {
+    if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const shopName = "770";
+    const planPrompt = `בנה לי תוכנית פעולה עסקית להיום כדי להכניס כמה שיותר כסף. אתה מנהל השיווק של החנות.
+חשוב כמו חברת שיווק מובילה: נתח את המצב (עגלות נטושות, VIP שנעלמו, מוצרים חמים, דפוסי קנייה, cross-sell), ובנה תוכנית עם 2-4 מהלכים מתועדפים לפי פוטנציאל הכנסה.
+לכל מהלך: כותרת קצרה, כמה לקוחות/מה הוא מכסה, צפי הכנסה בשקלים, והמלצה איך לבצע.
+התחל ב"תוכנית להיום" וצפי ההכנסה הכולל. תהיה אסטרטגי ויצירתי - חשוב על כל דרך להרים מכירות, לא רק עגלות נטושות.
+אל תכלול בלוקים של ACTION/CART/CAMPAIGN בתשובה הזו - רק את התוכנית עצמה בצורה ברורה וקריאה.`;
+    const result = await aiBrain.askBrain(shop, shopName, planPrompt, []);
+    res.json({ ok: true, plan: result.answer, generated_at: new Date().toISOString() });
+  } catch (err) {
+    console.error("Daily plan error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ======================
 // DAILY SUMMARY: the advisor's morning briefing (principle 5)
 // ======================
 
@@ -645,6 +666,12 @@ app.get("/api/campaign/status", (req, res) => {
     } } });
   }
   res.json({ ok: true, active: campaignEngine.listActiveCampaigns("seven770.myshopify.com") });
+});
+
+app.post("/api/campaign/stop", express.json(), (req, res) => {
+  if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  const result = campaignEngine.stopCampaign(req.body.id);
+  res.json(result);
 });
 
 // ======================
@@ -1938,32 +1965,43 @@ app.listen(PORT, async () => {
     console.log("🔄 Orders + customers sync scheduled (every 3h)");
   }
 
-  // === Daily report at 21:00 Israel time ===
-  // Checks each minute; when it's 21:0x Israel and we haven't run today, generate
-  // the daily summary and store it so it surfaces for the merchant.
-  let lastDailyReportDate = null;
+  // === Daily reports: 09:00 (overnight) and 21:00 (end of day) Israel time ===
+  let lastReport09 = null, lastReport21 = null;
   setInterval(async () => {
     try {
       const israelNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jerusalem" }));
       const hour = israelNow.getHours();
       const dateStr = israelNow.toISOString().slice(0, 10);
-      if (hour === 21 && lastDailyReportDate !== dateStr) {
-        lastDailyReportDate = dateStr;
-        const shop = "seven770.myshopify.com";
+      const shop = "seven770.myshopify.com";
+
+      // 09:00 - overnight report (what happened during the night)
+      if (hour === 9 && lastReport09 !== dateStr) {
+        lastReport09 = dateStr;
         const summary = await dailySummary.getDailySummary(shop);
-        // Persist as a special row so it can be surfaced in the chat on next open.
+        await db.query(
+          `INSERT INTO advisor_actions (shop_domain, action_type, details)
+           VALUES ($1, 'morning_report', $2)`,
+          [shop, JSON.stringify({ report: summary, date: dateStr, kind: 'overnight' })]
+        ).catch(e => console.error("morning report log:", e.message));
+        console.log(`🌅 [Morning report] generated for ${dateStr} (09:00 Israel)`);
+      }
+
+      // 21:00 - end of day report
+      if (hour === 21 && lastReport21 !== dateStr) {
+        lastReport21 = dateStr;
+        const summary = await dailySummary.getDailySummary(shop);
         await db.query(
           `INSERT INTO advisor_actions (shop_domain, action_type, details)
            VALUES ($1, 'daily_report', $2)`,
-          [shop, JSON.stringify({ report: summary, date: dateStr })]
+          [shop, JSON.stringify({ report: summary, date: dateStr, kind: 'end_of_day' })]
         ).catch(e => console.error("daily report log:", e.message));
         console.log(`📋 [Daily report] generated for ${dateStr} (21:00 Israel)`);
       }
     } catch (e) {
-      console.error("daily report scheduler:", e.message);
+      console.error("report scheduler:", e.message);
     }
   }, 60 * 1000);
-  console.log("📋 Daily report scheduled (21:00 Israel time)");
+  console.log("📋 Reports scheduled (09:00 overnight + 21:00 end-of-day, Israel time)");
 
   console.log("---\n");
 });
