@@ -660,6 +660,50 @@ async function getCustomerSizes(shopDomain, options = {}) {
   });
 }
 
+// ---------- 18. getTodayActivity ----------
+// What the advisor did TODAY (since midnight Israel time) - for mid-day "what
+// have you done so far?" reports and the end-of-day summary.
+async function getTodayActivity(shopDomain, options = {}) {
+  return safe('getTodayActivity', async () => {
+    const r = await db.query(
+      `SELECT action_type,
+              COUNT(*)::int AS count,
+              COUNT(*) FILTER (WHERE outcome='converted')::int AS converted,
+              COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome='converted'),0)::numeric(12,2) AS revenue
+       FROM advisor_actions
+       WHERE shop_domain = $1
+         AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Asia/Jerusalem')
+       GROUP BY action_type
+       ORDER BY count DESC`,
+      [shopDomain]
+    );
+    const totals = await db.query(
+      `SELECT COUNT(*)::int AS total_actions,
+              COUNT(DISTINCT target_email) FILTER (WHERE target_email IS NOT NULL)::int AS unique_customers,
+              COUNT(*) FILTER (WHERE outcome='converted')::int AS conversions,
+              COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome='converted'),0)::numeric(12,2) AS revenue,
+              COUNT(*) FILTER (WHERE coupon_code IS NOT NULL)::int AS coupons_created
+       FROM advisor_actions
+       WHERE shop_domain = $1
+         AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Asia/Jerusalem')`,
+      [shopDomain]
+    );
+    const t = totals.rows[0] || {};
+    return {
+      ok: true,
+      today: {
+        total_actions: t.total_actions || 0,
+        customers_contacted: t.unique_customers || 0,
+        coupons_created: t.coupons_created || 0,
+        conversions: t.conversions || 0,
+        revenue_so_far: Math.round(parseFloat(t.revenue || 0))
+      },
+      by_type: r.rows,
+      note: 'this is what the advisor accomplished today so far'
+    };
+  });
+}
+
 module.exports = {
   getTopCustomers,
   getDormantCustomers,
@@ -677,5 +721,6 @@ module.exports = {
   getCrossSellData,
   getCampaignPerformance,
   getProductVariants,
-  getCustomerSizes
+  getCustomerSizes,
+  getTodayActivity
 };

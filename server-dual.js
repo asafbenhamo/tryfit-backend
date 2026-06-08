@@ -1937,5 +1937,33 @@ app.listen(PORT, async () => {
     setInterval(runDataSync, 3 * 60 * 60 * 1000);
     console.log("🔄 Orders + customers sync scheduled (every 3h)");
   }
+
+  // === Daily report at 21:00 Israel time ===
+  // Checks each minute; when it's 21:0x Israel and we haven't run today, generate
+  // the daily summary and store it so it surfaces for the merchant.
+  let lastDailyReportDate = null;
+  setInterval(async () => {
+    try {
+      const israelNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jerusalem" }));
+      const hour = israelNow.getHours();
+      const dateStr = israelNow.toISOString().slice(0, 10);
+      if (hour === 21 && lastDailyReportDate !== dateStr) {
+        lastDailyReportDate = dateStr;
+        const shop = "seven770.myshopify.com";
+        const summary = await dailySummary.getDailySummary(shop);
+        // Persist as a special row so it can be surfaced in the chat on next open.
+        await db.query(
+          `INSERT INTO advisor_actions (shop_domain, action_type, details)
+           VALUES ($1, 'daily_report', $2)`,
+          [shop, JSON.stringify({ report: summary, date: dateStr })]
+        ).catch(e => console.error("daily report log:", e.message));
+        console.log(`📋 [Daily report] generated for ${dateStr} (21:00 Israel)`);
+      }
+    } catch (e) {
+      console.error("daily report scheduler:", e.message);
+    }
+  }, 60 * 1000);
+  console.log("📋 Daily report scheduled (21:00 Israel time)");
+
   console.log("---\n");
 });
