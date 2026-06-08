@@ -820,6 +820,47 @@ app.post("/api/agent/stop-plan", express.json(), async (req, res) => {
 // STATS: how much money the advisor has made (live counter)
 // Only counts CONVERTED actions - credit only for what the advisor truly closed.
 // ======================
+app.get("/api/advisor-actions-log", async (req, res) => {
+  try {
+    if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const r = await db.query(
+      `SELECT action_type, target_email, target_phone, coupon_code,
+              attributed_revenue, outcome, created_at, closed_at
+       FROM advisor_actions
+       WHERE shop_domain = $1
+         AND action_type NOT IN ('daily_report','morning_report')
+       ORDER BY created_at DESC
+       FETCH FIRST 100 ROWS ONLY`,
+      [shop]
+    );
+    // Friendly labels for action types
+    const TYPE_LABELS = {
+      abandoned_cart: 'שחזור עגלה נטושה',
+      dormant_vip: 'החזרת לקוחה VIP',
+      one_time: 'דחיפה לקנייה שנייה',
+      hot_product: 'קידום מוצר חם',
+      personalized_cart: 'עגלה מותאמת אישית',
+      winback: 'win-back',
+      campaign: 'קמפיין'
+    };
+    const actions = r.rows.map(a => ({
+      type: a.action_type,
+      type_label: TYPE_LABELS[a.action_type] || a.action_type,
+      target: a.target_email || a.target_phone || '—',
+      coupon: a.coupon_code,
+      revenue: Math.round(parseFloat(a.attributed_revenue || 0)),
+      outcome: a.outcome,
+      created_at: a.created_at,
+      closed_at: a.closed_at
+    }));
+    res.json({ ok: true, actions });
+  } catch (err) {
+    console.error("Actions log error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/api/advisor-stats", async (req, res) => {
   try {
     if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
