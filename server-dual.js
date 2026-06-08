@@ -15,6 +15,7 @@ const dailySummary = require("./daily-summary");
 const insightsEngine = require("./insights-engine");
 const mailer = require("./mailer");
 const compliance = require("./compliance");
+const agentEngine = require("./agent-engine");
 
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
@@ -671,6 +672,126 @@ app.get("/api/campaign/status", (req, res) => {
 app.post("/api/campaign/stop", express.json(), (req, res) => {
   if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
   const result = campaignEngine.stopCampaign(req.body.id);
+  res.json(result);
+});
+
+// ======================
+// AGENT: autonomous daily plan (propose -> approve selected -> execute alone)
+// ======================
+
+// Propose a structured plan: detect opportunities and save as agent_plans + agent_tasks.
+// Returns the plan with its tasks (each with a checkbox-ready structure).
+app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
+  try {
+    if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Build candidate moves from real data
+    const moves = [];
+
+    // 1. Abandoned carts
+    const carts = await aiTools.getAbandonedCheckouts(shop, { limit: 50, days: 30 });
+    const cartList = carts.recoverable_carts || carts.carts || [];
+    if (cartList.length > 0) {
+      const val = cartList.reduce((s, c) => s + parseFloat(c.total_price || 0), 0);
+      moves.push({ priority: 1, move_type: 'abandoned_cart', segment: 'abandoned',
+        title: `שחזור ${cartList.length} עגלות נטושות`, percentage: 10,
+        est_customers: cartList.length, projected_revenue: Math.round(val * 0.25) });
+    }
+
+    // 2. Dormant VIPs
+    const vips = await aiTools.getDormantCustomers(shop, { limit: 50, daysInactive: 30, minSpent: 1000 });
+    if ((vips.customers || []).length > 0) {
+      const val = vips.customers.reduce((s, c) => s + parseFloat(c.total_spent || 0) * 0.15, 0);
+      moves.push({ priority: 2, move_type: 'dormant_vip', segment: 'dormant_vip',
+        title: `החזרת ${vips.customers.length} לקוחות VIP שנעלמו`, percentage: 15,
+        est_customers: vips.customers.length, projected_revenue: Math.round(val) });
+    }
+
+    // 3. One-time buyers
+    const oneTime = (vips.customers || []).filter(c => (c.orders_count || 0) === 1);
+    if (oneTime.length > 0) {
+      const val = oneTime.reduce((s, c) => s + parseFloat(c.total_spent || 0), 0);
+      moves.push({ priority: 3, move_type: 'one_time', segment: 'one_time',
+        title: `דחיפת ${oneTime.length} לקוחות לקנייה שנייה`, percentage: 12,
+        est_customers: oneTime.length, projected_revenue: Math.round(val * 0.4) });
+    }
+
+    // 4. Hot product promotion
+    const hot = await aiTools.getTopProducts(shop, { limit: 3 });
+    const repeat = await aiTools.getRepeatCustomers(shop, { limit: 50 });
+    if ((repeat.customers || []).length > 0 && (hot.products || hot.top_products || []).length > 0) {
+      const val = repeat.customers.reduce((s, c) => s + parseFloat(c.total_spent || 0) * 0.1, 0);
+      moves.push({ priority: 4, move_type: 'hot_product', segment: 'repeat',
+        title: `קידום מוצר חם ל-${repeat.customers.length} לקוחות נאמנים`, percentage: 10,
+        est_customers: repeat.customers.length, projected_revenue: Math.round(val) });
+    }
+
+    if (moves.length === 0) {
+      return res.json({ ok: true, plan: null, message: "אין מספיק נתונים לתוכנית היום" });
+    }
+
+    const totalProjected = moves.reduce((s, m) => s + m.projected_revenue, 0);
+
+    // Save plan
+    const planRes = await db.query(
+      `INSERT INTO agent_plans (shop_domain, plan_date, status, projected_revenue)
+       VALUES ($1, $2, 'proposed', $3) RETURNING id`,
+      [shop, today, totalProjected]
+    );
+    const planId = planRes.rows[0].id;
+
+    // Save tasks
+    for (const m of moves) {
+      await db.query(
+        `INSERT INTO agent_tasks (plan_id, shop_domain, priority, move_type, title, segment, percentage, projected_revenue, est_customers)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [planId, shop, m.priority, m.move_type, m.title, m.segment, m.percentage, m.projected_revenue, m.est_customers]
+      );
+    }
+
+    const status = await agentEngine.getPlanStatus(planId);
+    res.json({ ok: true, plan_id: planId, projected_revenue: totalProjected, ...status });
+  } catch (err) {
+    console.error("Propose plan error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Approve selected tasks and start execution.
+app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
+  try {
+    if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const { plan_id, selected_task_ids } = req.body;
+    if (!plan_id || !Array.isArray(selected_task_ids)) {
+      return res.status(400).json({ ok: false, error: "חסר plan_id או רשימת מהלכים" });
+    }
+    // Mark selected vs unselected
+    await db.query(`UPDATE agent_tasks SET selected = (id = ANY($2)) WHERE plan_id=$1`,
+      [plan_id, selected_task_ids]);
+    await db.query(`UPDATE agent_plans SET status='approved', approved_at=NOW() WHERE id=$1`, [plan_id]);
+
+    // Kick off execution in the background
+    agentEngine.startPlan(shop, plan_id);
+    res.json({ ok: true, started: true, plan_id });
+  } catch (err) {
+    console.error("Approve plan error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/agent/plan-status", async (req, res) => {
+  if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  const status = await agentEngine.getPlanStatus(req.query.plan_id);
+  if (!status) return res.json({ ok: false, error: "not found" });
+  res.json({ ok: true, ...status });
+});
+
+app.post("/api/agent/stop-plan", express.json(), async (req, res) => {
+  if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  const result = await agentEngine.stopPlan(req.body.plan_id);
   res.json(result);
 });
 
@@ -2051,6 +2172,9 @@ app.listen(PORT, async () => {
     }
   }, 60 * 1000);
   console.log("📋 Reports scheduled (09:00 overnight + 21:00 end-of-day, Israel time)");
+
+  // Resume any agent plan that was mid-execution when the server restarted.
+  agentEngine.resumeInterruptedPlans();
 
   console.log("---\n");
 });
