@@ -1797,6 +1797,55 @@ function handleOrderWebhook(req, res) {
 app.post("/webhooks/orders/create", express.raw({ type: "application/json" }), handleOrderWebhook);
 
 // === Register checkout webhooks with Shopify (TEMPORARY - call once) ===
+app.get("/admin/setup-agent-tables", async (req, res) => {
+  const password = req.query.password;
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS agent_plans (
+      id BIGSERIAL PRIMARY KEY,
+      shop_domain VARCHAR(255) NOT NULL,
+      plan_date DATE NOT NULL,
+      status VARCHAR(40) DEFAULT 'proposed',
+      summary TEXT,
+      projected_revenue NUMERIC(12,2) DEFAULT 0,
+      created_at TIMESTAMP DEFAULT NOW(),
+      approved_at TIMESTAMP,
+      finished_at TIMESTAMP
+    )`);
+    await db.query(`CREATE TABLE IF NOT EXISTS agent_tasks (
+      id BIGSERIAL PRIMARY KEY,
+      plan_id BIGINT NOT NULL,
+      shop_domain VARCHAR(255) NOT NULL,
+      priority INTEGER DEFAULT 1,
+      move_type VARCHAR(60) NOT NULL,
+      title TEXT,
+      segment VARCHAR(60),
+      percentage INTEGER DEFAULT 10,
+      projected_revenue NUMERIC(12,2) DEFAULT 0,
+      est_customers INTEGER DEFAULT 0,
+      params JSONB DEFAULT '{}'::jsonb,
+      selected BOOLEAN DEFAULT TRUE,
+      status VARCHAR(40) DEFAULT 'pending',
+      result JSONB DEFAULT '{}'::jsonb,
+      created_at TIMESTAMP DEFAULT NOW(),
+      finished_at TIMESTAMP
+    )`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_agent_plans_shop ON agent_plans(shop_domain, plan_date DESC)`);
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_agent_tasks_plan ON agent_tasks(plan_id, priority)`);
+
+    // Verify
+    const check = await db.query(`SELECT
+      (SELECT COUNT(*) FROM agent_plans)::int AS plans,
+      (SELECT COUNT(*) FROM agent_tasks)::int AS tasks`);
+    res.json({ ok: true, message: "טבלאות הסוכן נוצרו בהצלחה", verification: check.rows[0] });
+  } catch (err) {
+    console.error("Setup agent tables error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/admin/register-webhooks", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
