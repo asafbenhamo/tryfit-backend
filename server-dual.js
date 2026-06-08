@@ -816,6 +816,72 @@ app.post("/api/agent/stop-plan", express.json(), async (req, res) => {
   res.json(result);
 });
 
+// Revise a proposed plan based on a free-text request from the merchant.
+// Uses the AI to interpret the request into structured updates to agent_tasks.
+app.post("/api/agent/revise-plan", express.json(), async (req, res) => {
+  try {
+    if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const { plan_id, request } = req.body;
+    if (!plan_id || !request) return res.status(400).json({ ok: false, error: "חסר plan_id או בקשה" });
+
+    // Load current tasks
+    const cur = await db.query(
+      `SELECT id, priority, move_type, title, percentage, est_customers, projected_revenue
+       FROM agent_tasks WHERE plan_id=$1 ORDER BY priority ASC`, [plan_id]);
+    if (cur.rows.length === 0) return res.json({ ok: false, error: "התוכנית לא נמצאה" });
+
+    // Ask the AI to translate the request into structured updates.
+    const tasksJson = JSON.stringify(cur.rows.map(t => ({
+      id: t.id, move: t.move_type, title: t.title, percentage: t.percentage,
+      customers: t.est_customers
+    })));
+    const prompt = `זוהי תוכנית עבודה נוכחית (מערך מהלכים) בפורמט JSON:
+${tasksJson}
+
+בעל החנות מבקש לשנות: "${request}"
+
+החזר JSON בלבד (בלי טקסט נוסף, בלי markdown) במבנה:
+{"updates":[{"id":<מזהה המהלך>,"percentage":<אחוז חדש או null>,"max_customers":<מקסימום לקוחות חדש או null>,"new_title":<כותרת חדשה או null>,"remove":<true אם להסיר את המהלך, אחרת false>}]}
+כלול רק מהלכים שצריך לשנות. אם הבקשה לא ברורה או לא רלוונטית, החזר {"updates":[]}.`;
+
+    const result = await aiBrain.askBrain(shop, "770", prompt, []);
+    let updates = [];
+    try {
+      const clean = (result.answer || '').replace(/```json|```/g, '').trim();
+      const parsed = JSON.parse(clean);
+      updates = parsed.updates || [];
+    } catch (e) {
+      return res.json({ ok: false, error: "לא הצלחתי להבין את הבקשה, נסה לנסח אחרת" });
+    }
+
+    // Apply updates
+    for (const u of updates) {
+      if (!u.id) continue;
+      if (u.remove) {
+        await db.query(`DELETE FROM agent_tasks WHERE id=$1 AND plan_id=$2`, [u.id, plan_id]);
+        continue;
+      }
+      const sets = [], vals = [u.id, plan_id];
+      if (u.percentage != null) { vals.push(u.percentage); sets.push(`percentage=$${vals.length}`); }
+      if (u.max_customers != null) { vals.push(Math.min(u.max_customers, 50)); sets.push(`est_customers=$${vals.length}`); }
+      if (u.new_title) { vals.push(u.new_title); sets.push(`title=$${vals.length}`); }
+      if (sets.length > 0) {
+        await db.query(`UPDATE agent_tasks SET ${sets.join(', ')} WHERE id=$1 AND plan_id=$2`, vals);
+      }
+    }
+
+    // Recompute projected total and return the refreshed plan
+    const refreshed = await agentEngine.getPlanStatus(plan_id);
+    const projected = (refreshed.tasks || []).reduce((s, t) => s + parseFloat(t.projected_revenue || 0), 0);
+    await db.query(`UPDATE agent_plans SET projected_revenue=$2 WHERE id=$1`, [plan_id, projected]);
+    res.json({ ok: true, plan_id, projected_revenue: Math.round(projected), ...refreshed });
+  } catch (err) {
+    console.error("Revise plan error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ======================
 // STATS: how much money the advisor has made (live counter)
 // Only counts CONVERTED actions - credit only for what the advisor truly closed.

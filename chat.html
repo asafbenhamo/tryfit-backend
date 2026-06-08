@@ -244,6 +244,18 @@
   .td-row { font-size: 13px; color: #2f3a48; line-height: 1.65; margin-bottom: 8px; }
   .td-row:last-child { margin-bottom: 0; }
   .td-label { font-weight: 700; color: #0a2540; }
+  .plan-edit { display: flex; gap: 8px; margin: 4px 0 12px; }
+  .plan-edit-input {
+    flex: 1; border: 1px solid #dbe6fb; border-radius: 10px; padding: 10px 12px;
+    font-family: 'Heebo',sans-serif; font-size: 13px; color: #1a2230; outline: none;
+  }
+  .plan-edit-input:focus { border-color: #0a6fe0; }
+  .plan-edit-btn {
+    border: none; background: #eef4ff; color: #0a6fe0; font-family: 'Heebo',sans-serif;
+    font-size: 13.5px; font-weight: 700; padding: 0 18px; border-radius: 10px; cursor: pointer;
+  }
+  .plan-edit-btn:hover { background: #dce8ff; }
+  .plan-edit-btn:disabled { opacity: 0.5; cursor: default; }
   .plan-exec-status { margin-top: 6px; }
   .agent-working { font-size: 15px; font-weight: 700; color: #0a6fe0; margin-bottom: 10px; }
   .agent-task-line { font-size: 13.5px; color: #2a3441; padding: 5px 0; line-height: 1.5; }
@@ -461,6 +473,18 @@
     setInterval(loadMoneyCounter, 60000);
   }
 
+  /* Remove the entire home screen (summary + plan + insights + welcome)
+     when the user starts interacting, so nothing stays stuck on top. */
+  function clearHomeScreen() {
+    ['homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.remove();
+    });
+    const w = $('welcome'); if (w) w.remove();
+    const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
+    const sc = document.querySelector('.summary-card'); if (sc) sc.remove();
+    const pc = document.querySelector('.plan-card'); if (pc) pc.remove();
+  }
+
   /* Anchor the home screen sections in a fixed order so load timing
      never changes the layout: summary -> plan -> insights -> welcome */
   function setupHomeSections() {
@@ -604,10 +628,19 @@
       html += '</div>';
     });
     html += '</div>';
+    html += '<div class="plan-edit">'
+      + '<input type="text" class="plan-edit-input" id="planEditInput" placeholder="רוצה לשנות משהו? למשל: תוריד ל-20 לקוחות, תקדם מוצר אחר...">'
+      + '<button class="plan-edit-btn" id="planEditBtn">שנה</button>'
+      + '</div>';
     html += '<button class="plan-approve" id="execPlanBtn">בצע את מה שסימנתי ←</button>';
     html += '<div class="plan-exec-status" id="planExecStatus" style="display:none"></div>';
     wrap.innerHTML = html;
     wrap.querySelector('#execPlanBtn').onclick = () => executeAgentPlan(wrap);
+    const editBtn = wrap.querySelector('#planEditBtn');
+    const editInput = wrap.querySelector('#planEditInput');
+    const doEdit = () => reviseAgentPlan(wrap, editInput.value);
+    editBtn.onclick = doEdit;
+    editInput.onkeydown = (e) => { if (e.key === 'Enter') doEdit(); };
     wrap.querySelectorAll('.task-expand').forEach(btn => {
       btn.onclick = () => {
         const det = wrap.querySelector('#taskDet' + btn.getAttribute('data-idx'));
@@ -618,6 +651,28 @@
         }
       };
     });
+  }
+  async function reviseAgentPlan(wrap, request) {
+    if (!request || !request.trim()) return;
+    const btn = wrap.querySelector('#planEditBtn');
+    const input = wrap.querySelector('#planEditInput');
+    btn.disabled = true; input.disabled = true; btn.textContent = 'מעדכן...';
+    try {
+      const res = await fetch('/api/agent/revise-plan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD, plan_id: window._agentPlanId, request: request.trim() })
+      });
+      const data = await res.json();
+      if (data.ok && data.tasks) {
+        renderAgentPlan(wrap, data); // re-render with updated plan
+      } else {
+        btn.disabled = false; input.disabled = false; btn.textContent = 'שנה';
+        alert(data.error || 'לא הצלחתי לעדכן, נסה לנסח אחרת');
+      }
+    } catch (err) {
+      btn.disabled = false; input.disabled = false; btn.textContent = 'שנה';
+      alert('שגיאה: ' + err.message);
+    }
   }
   async function executeAgentPlan(wrap) {
     const checks = [...wrap.querySelectorAll('.task-check:checked')].map(c => parseInt(c.value));
@@ -1162,9 +1217,7 @@
   }
 
   function addMessageDom(role, text) {
-    const w = $('welcome'); if (w) w.remove();
-    const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
-    const sc = document.querySelector('.summary-card'); if (sc) sc.remove();
+    clearHomeScreen();
     const row = document.createElement('div');
     row.className = 'row ' + role;
     const bubble = document.createElement('div');
@@ -1315,9 +1368,7 @@
       const campaign = parseCampaign(fullText);
       const displayText = campaign ? campaign.cleanText : (cart ? cart.cleanText : (action ? action.cleanText : fullText));
 
-      const w = $('welcome'); if (w) w.remove();
-      const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
-    const sc = document.querySelector('.summary-card'); if (sc) sc.remove();
+      clearHomeScreen();
       const row = document.createElement('div');
       row.className = 'row ai';
       const bubble = document.createElement('div');
