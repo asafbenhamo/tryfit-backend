@@ -527,14 +527,17 @@
     html += '<div class="summary-stat"><div class="num">' + c.orders_today + '</div><div class="lbl">הזמנות היום (' + (c.orders_yesterday) + ' אתמול)</div></div>';
     html += '<div class="summary-stat"><div class="num">₪' + c.revenue_today.toLocaleString() + '</div><div class="lbl">מכירות היום</div></div>';
     if (did.actions > 0) {
-      html += '<div class="summary-stat"><div class="num">' + did.actions + '</div><div class="lbl">פעולות שביצעתי</div></div>';
+      html += '<div class="summary-stat"><div class="num">' + did.actions + '</div><div class="lbl">פעולות שבוצעו</div></div>';
     }
     if (ach.total_revenue > 0 || ach.total_conversions > 0) {
       html += '<div class="summary-stat"><div class="num green">₪' + ach.total_revenue.toLocaleString() + '</div><div class="lbl">הכנסתי לך סה"כ (' + ach.total_conversions + ' המרות)</div></div>';
     }
     html += '</div>';
     if (ach.pending > 0) {
-      html += '<div class="summary-line">⏳ ' + ach.pending + ' פעולות ממתינות לתוצאה. אני עוקב ואעדכן ברגע שייסגרו.</div>';
+      html += '<div class="summary-line">⏳ ' + ach.pending + ' פעולות ממתינות לביצוע. אני עוקב ואעדכן ברגע שייסגרו.</div>';
+    }
+    if (ach.expired > 0) {
+      html += '<div class="summary-line">○ ' + ach.expired + ' פעולות פג תוקפן / לא הומרו (עברו 3 ימים).</div>';
     }
     if ((did.actions > 0) || (ach.total_actions > 0)) {
       html += '<button class="summary-detail-btn" onclick="showActionsLog()">📋 פירוט - מה ביצעתי</button>';
@@ -567,8 +570,8 @@
       data.actions.forEach(a => {
         const date = new Date(a.created_at);
         const dateStr = date.toLocaleDateString('he-IL', { day: 'numeric', month: 'numeric' }) + ' ' + date.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
-        const statusIcon = a.outcome === 'converted' ? '✅' : (a.outcome === 'pending' ? '⏳' : '○');
-        const statusText = a.outcome === 'converted' ? ('הומר! ₪' + a.revenue.toLocaleString()) : (a.outcome === 'pending' ? 'ממתין לתוצאה' : '');
+        const statusIcon = a.outcome === 'converted' ? '✅' : (a.outcome === 'pending' ? '⏳' : (a.outcome === 'expired' ? '○' : '○'));
+        const statusText = a.outcome === 'converted' ? ('הומר! ₪' + a.revenue.toLocaleString()) : (a.outcome === 'pending' ? 'ממתין לתוצאה' : (a.outcome === 'expired' ? 'פג תוקף / לא הומר' : ''));
         html += '<div class="log-item">';
         html += '<div class="log-item-top">' + statusIcon + ' <span class="log-type">' + esc(a.type_label) + '</span> <span class="log-date">' + dateStr + '</span></div>';
         html += '<div class="log-item-sub">' + esc(a.target);

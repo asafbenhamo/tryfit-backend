@@ -42,7 +42,10 @@ async function getDailySummary(shop) {
     return r.rows[0] || {};
   }, {});
 
-  // 3. What I achieved: conversions + revenue attributed (all-time + last 24h)
+  // 3. What I achieved: conversions + revenue attributed (all-time + last 24h).
+  //    'pending' counts ONLY actions still inside the 3-day attribution window
+  //    (still able to convert). Anything older that never converted is 'expired'
+  //    (the attribution-engine marks it, and we also count any stragglers here).
   const achieved = await safe('achieved', async () => {
     const r = await db.query(
       `SELECT
@@ -50,7 +53,8 @@ async function getDailySummary(shop) {
          COUNT(*) FILTER (WHERE outcome='converted')::int AS total_conversions,
          COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome='converted' AND closed_at >= NOW() - INTERVAL '24 hours'),0)::numeric(12,2) AS revenue_today,
          COUNT(*) FILTER (WHERE outcome='converted' AND closed_at >= NOW() - INTERVAL '24 hours')::int AS conversions_today,
-         COUNT(*) FILTER (WHERE outcome='pending')::int AS pending
+         COUNT(*) FILTER (WHERE outcome='pending' AND created_at >= NOW() - INTERVAL '3 days')::int AS pending,
+         COUNT(*) FILTER (WHERE outcome='expired' OR (outcome='pending' AND created_at < NOW() - INTERVAL '3 days'))::int AS expired
        FROM advisor_actions
        WHERE shop_domain = $1`,
       [shop]
@@ -84,7 +88,8 @@ async function getDailySummary(shop) {
       total_conversions: achieved.total_conversions || 0,
       revenue_today: Math.round(parseFloat(achieved.revenue_today || 0)),
       conversions_today: achieved.conversions_today || 0,
-      pending: achieved.pending || 0
+      pending: achieved.pending || 0,
+      expired: achieved.expired || 0
     },
     next: opportunities.slice(0, 3)
   };

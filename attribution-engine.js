@@ -171,11 +171,40 @@ async function runAttribution(shopDomain = SHOP) {
     }
     console.log(`🔁 [Attribution] scanned ${scanned} orders, closed ${closed}, +${Math.round(totalAmount)}₪`,
       JSON.stringify(breakdown));
-    return { ok: true, scanned, closed, total_amount: Math.round(totalAmount), breakdown };
+    // After closing what we can, retire pending actions that are past the 3-day window.
+    const expired = await expireOldActions(shopDomain);
+    return { ok: true, scanned, closed, total_amount: Math.round(totalAmount), breakdown, expired };
   } catch (err) {
     console.error("⚠️  [Attribution] run failed:", err.message);
     return { ok: false, error: err.message };
   }
 }
 
-module.exports = { runAttribution, attributeOrder };
+// Mark pending actions that can no longer convert as 'expired'. An action is past
+// hope once more than 3 days have elapsed since it was created (the attribution
+// window has closed) — keeping it 'pending' forever would inflate the "waiting"
+// count. We move it to 'expired' so the UI can show it separately as not-converted.
+// Idempotent and safe: only touches outcome='pending'.
+async function expireOldActions(shopDomain) {
+  try {
+    const r = await db.query(
+      `UPDATE advisor_actions
+       SET outcome = 'expired'
+       WHERE shop_domain = $1
+         AND outcome = 'pending'
+         AND created_at < NOW() - INTERVAL '3 days'
+         AND action_type NOT IN ('daily_report','morning_report')
+       RETURNING id`,
+      [shopDomain]
+    );
+    if (r.rows.length > 0) {
+      console.log(`⌛ [Attribution] expired ${r.rows.length} stale pending actions (>3 days)`);
+    }
+    return r.rows.length;
+  } catch (err) {
+    console.error("⚠️  [Attribution] expireOldActions failed:", err.message);
+    return 0;
+  }
+}
+
+module.exports = { runAttribution, attributeOrder, expireOldActions };
