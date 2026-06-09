@@ -803,8 +803,8 @@ app.get("/api/advisor-actions-log", async (req, res) => {
        FROM advisor_actions
        WHERE shop_domain = $1
          AND action_type NOT IN ('daily_report','morning_report')
-       ORDER BY created_at DESC
-       FETCH FIRST 100 ROWS ONLY`,
+       ORDER BY (outcome = 'converted') DESC, created_at DESC
+       FETCH FIRST 500 ROWS ONLY`,
       [shop]
     );
     const TYPE_LABELS = {
