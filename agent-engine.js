@@ -26,21 +26,21 @@ async function pullSegment(shop, task) {
         est_value: parseFloat(c.total_price || 0)
       }));
     } else if (task.move_type === 'dormant_vip') {
-      const r = await aiTools.getDormantCustomers(shop, { limit, daysInactive: 30, minSpent: 1000 });
+      const r = await aiTools.getDormantCustomers(shop, { limit, daysInactive: 30, minSpent: 1000, excludeContacted: true });
       rows = (r.customers || []).map(c => ({
         name: [c.first_name, c.last_name].filter(Boolean).join(' '), email: c.email || '', phone: c.phone || '',
         est_value: parseFloat(c.total_spent || 0) * 0.15 // expect ~15% of lifetime as next order
       }));
     } else if (task.move_type === 'one_time') {
       // bought exactly once - nudge for a second order
-      const r = await aiTools.getDormantCustomers(shop, { limit, daysInactive: 20, minSpent: 0 });
+      const r = await aiTools.getDormantCustomers(shop, { limit, daysInactive: 20, minSpent: 0, excludeContacted: true });
       rows = (r.customers || []).filter(c => (c.orders_count || 0) === 1).map(c => ({
         name: [c.first_name, c.last_name].filter(Boolean).join(' '), email: c.email || '', phone: c.phone || '',
         est_value: parseFloat(c.total_spent || 0)
       }));
     } else if (task.move_type === 'hot_product') {
       // promote a hot product to repeat buyers
-      const r = await aiTools.getRepeatCustomers(shop, { limit });
+      const r = await aiTools.getRepeatCustomers(shop, { limit, excludeContacted: true });
       rows = (r.customers || []).map(c => ({
         name: [c.first_name, c.last_name].filter(Boolean).join(' '), email: c.email || '', phone: c.phone || '',
         est_value: parseFloat(c.total_spent || 0) * 0.1
@@ -92,7 +92,7 @@ async function runTask(shop, task) {
   const { id: campId } = campaignEngine.startCampaign(shop, {
     campaign_type: task.move_type,
     segment,
-    template: { percentage: task.percentage || 10, days_valid: 14, subject: tmpl.subject, body: tmpl.body }
+    template: { percentage: task.percentage || 10, days_valid: 2, subject: tmpl.subject, body: tmpl.body }
   });
 
   // Wait for the campaign to finish (poll its in-memory status)
@@ -105,9 +105,13 @@ async function runTask(shop, task) {
   const result = {
     campaign_id: campId,
     sent: status ? status.sent : 0,
+    prepared: status ? status.prepared : 0,
     skipped: status ? status.skipped : 0,
     failed: status ? status.failed : 0,
-    revenue_potential: status ? Math.round(status.revenue_potential || 0) : 0
+    revenue_potential: status ? Math.round(status.revenue_potential || 0) : 0,
+    // Carry the per-customer WhatsApp squares so the UI can show them in the chat,
+    // exactly like a manual campaign. Each: { name, phone, coupon, link, sent:false }.
+    whatsapp: status ? (status.whatsapp || []) : []
   };
   await db.query(`UPDATE agent_tasks SET status='done', finished_at=NOW(), result=$2 WHERE id=$1`,
     [task.id, JSON.stringify(result)]).catch(()=>{});
@@ -132,7 +136,7 @@ async function runPlan(shop, planId) {
     }
     try {
       const r = await runTask(shop, task);
-      console.log(`✅ [Agent] task ${task.id} (${task.move_type}): ${r.sent} sent`);
+      console.log(`✅ [Agent] task ${task.id} (${task.move_type}): ${r.sent} sent, ${r.prepared} prepared`);
     } catch (e) {
       console.error(`[agent] task ${task.id} failed:`, e.message);
       await db.query(`UPDATE agent_tasks SET status='failed', finished_at=NOW(), result=$2 WHERE id=$1`,

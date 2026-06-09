@@ -593,7 +593,8 @@ app.get("/api/campaign/status", (req, res) => {
     if (!s) return res.json({ ok: false, error: "not found" });
     return res.json({ ok: true, campaign: { id, ...{
       status: s.status, total: s.total, done: s.done, sent: s.sent,
-      skipped: s.skipped, failed: s.failed,
+      skipped: s.skipped, failed: s.failed, prepared: s.prepared,
+      whatsapp: s.whatsapp || [],
       revenue_potential: Math.round(s.revenue_potential || 0),
       finished_at: s.finished_at
     } } });

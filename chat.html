@@ -605,7 +605,7 @@
       wrap.remove();
     }
   }
-  function renderAgentPlan(wrap, data) {
+  function renderAgentPlan(wrap, data, checkedSet) {
     window._agentPlanId = data.plan_id;
     let html = '<div class="plan-head">📋 התוכנית שלי להיום</div>';
     html += '<div class="plan-intro">ניתחתי את החנות ובניתי תוכנית עבודה. סמן מה לבצע ואני אריץ הכל לבד. צפי הכנסה כולל: <strong>₪' + (data.projected_revenue||0).toLocaleString() + '</strong></div>';
@@ -614,9 +614,10 @@
       let det = {};
       try { det = (typeof t.params === 'string' ? JSON.parse(t.params) : t.params || {}).details || {}; } catch(e) {}
       const hasDetails = det.what || det.goal || det.why;
+      const isChecked = checkedSet && checkedSet.has(t.id) ? ' checked' : '';
       html += '<div class="plan-task-wrap">';
       html += '<label class="plan-task">'
-        + '<input type="checkbox" class="task-check" value="' + t.id + '" checked>'
+        + '<input type="checkbox" class="task-check" value="' + t.id + '"' + isChecked + '>'
         + '<div class="task-info">'
         + '<div class="task-title">' + (idx+1) + '. ' + esc(t.title) + '</div>'
         + '<div class="task-meta">' + t.est_customers + ' לקוחות · צפי ₪' + Math.round(t.projected_revenue||0).toLocaleString() + '</div>'
@@ -668,7 +669,9 @@
       });
       const data = await res.json();
       if (data.ok && data.tasks) {
-        renderAgentPlan(wrap, data);
+        // Remember which tasks the user had checked, so an edit doesn't reset them.
+        const stillChecked = new Set([...wrap.querySelectorAll('.task-check:checked')].map(c => parseInt(c.value)));
+        renderAgentPlan(wrap, data, stillChecked);
       } else {
         btn.disabled = false; input.disabled = false; btn.textContent = 'שנה';
         alert(data.error || 'לא הצלחתי לעדכן, נסה לנסח אחרת');
@@ -716,36 +719,86 @@
         const data = await res.json();
         if (data.ok && data.tasks) {
           const planStatus = data.plan.status;
-          let lines = data.tasks.map(t => {
-            const icon = t.status === 'done' ? '✅' : (t.status === 'running' ? '⚙️' : (t.status === 'skipped' ? '⏭️' : (t.status === 'failed' ? '⚠️' : '⏳')));
-            let line = icon + ' ' + esc(t.title);
-            if (t.status === 'done' && t.result && t.result.sent != null) line += ' — נשלח ל-' + t.result.sent;
-            return '<div class="agent-task-line">' + line + '</div>';
-          }).join('');
           if (planStatus === 'done' || planStatus === 'stopped') {
             done = true;
-            const totalSent = data.tasks.reduce((s,t) => s + ((t.result&&t.result.sent)||0), 0);
-            const totalPot = data.tasks.reduce((s,t) => s + ((t.result&&t.result.revenue_potential)||0), 0);
-            const verb = planStatus === 'stopped' ? 'נעצר' : 'סיים';
-            el.innerHTML = '<div class="agent-working">🏁 הסוכן ' + verb + '!</div>' + lines
-              + '<div class="agent-summary">פניתי ל-' + totalSent + ' לקוחות · צפי הכנסה ₪' + totalPot.toLocaleString()
-              + '<br><span style="font-size:12px;color:#666">אעקוב ואדווח כשייסגרו מעגלים. הרווח בפועל יופיע למעלה.</span></div>';
+            renderAgentResult(el, data, planStatus);
             loadMoneyCounter();
           } else {
-            const stopBtn = el.querySelector('#stopPlanBtn');
-            el.innerHTML = '<div class="agent-working">🤖 הסוכן עובד...</div>' + lines;
-            if (stopBtn) el.appendChild(stopBtn);
-            else {
-              const b = document.createElement('button'); b.className='action-stop'; b.id='stopPlanBtn'; b.textContent='🛑 עצור את הסוכן';
-              b.onclick = async () => { await fetch('/api/agent/stop-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:PASSWORD,plan_id:planId})}); };
-              el.appendChild(b);
-            }
+            // still working - show simple progress lines
+            let lines = data.tasks.map(t => {
+              const icon = t.status === 'done' ? '✅' : (t.status === 'running' ? '⚙️' : (t.status === 'skipped' ? '⏭️' : (t.status === 'failed' ? '⚠️' : '⏳')));
+              return '<div class="agent-task-line">' + icon + ' ' + esc(t.title) + '</div>';
+            }).join('');
+            el.innerHTML = '<div class="agent-working">🤖 הסוכן מכין הכל ברקע...</div>' + lines;
+            const b = document.createElement('button'); b.className='action-stop'; b.id='stopPlanBtn'; b.textContent='🛑 עצור את הסוכן';
+            b.onclick = async () => { await fetch('/api/agent/stop-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:PASSWORD,plan_id:planId})}); };
+            el.appendChild(b);
           }
         }
       } catch (e) {}
       if (!done) setTimeout(tick, 2500);
     }
     tick();
+  }
+  // Renders the finished agent plan: for each executed move, show its WhatsApp
+  // squares (one per customer, send -> sent) exactly like a manual campaign,
+  // plus a summary of emails auto-sent and coupons created.
+  function renderAgentResult(el, data, planStatus) {
+    const verb = planStatus === 'stopped' ? 'נעצר' : 'סיים';
+    let totalSent = 0, totalPrepared = 0, totalPot = 0;
+    let waSquares = []; // {label, coupon, link}
+    let html = '<div class="agent-working">🏁 הסוכן ' + verb + '!</div>';
+
+    data.tasks.forEach(t => {
+      const r = t.result || {};
+      const wa = r.whatsapp || [];
+      totalSent += (r.sent || 0);
+      totalPrepared += (wa.length || r.prepared || 0);
+      totalPot += (r.revenue_potential || 0);
+      const icon = t.status === 'done' ? '✅' : (t.status === 'skipped' ? '⏭️' : (t.status === 'failed' ? '⚠️' : '⏳'));
+      html += '<div class="agent-task-line">' + icon + ' ' + esc(t.title)
+        + (wa.length ? ' — ' + wa.length + ' וואטסאפ מוכנים' : '')
+        + ((r.sent||0) ? ' · ' + r.sent + ' מיילים נשלחו' : '')
+        + '</div>';
+      wa.forEach(w => waSquares.push(w));
+    });
+
+    // All WhatsApp squares from all moves, one after another.
+    if (waSquares.length > 0) {
+      html += '<div class="wa-progress">📱 ' + waSquares.length + ' הודעות וואטסאפ מוכנות. לחץ "שלח" ליד כל לקוחה. <strong id="agWaSent">0</strong>/' + waSquares.length + ' נשלחו</div>';
+      html += '<div class="wa-list">';
+      waSquares.forEach((w, i) => {
+        const label = w.name || w.phone || 'לקוחה';
+        const coup = w.coupon ? ('קוד: ' + w.coupon) : '';
+        html += '<div class="wa-item">'
+          + '<div><div class="wa-name">' + esc(label) + '</div>'
+          + (coup ? '<div class="wa-coupon">' + esc(coup) + '</div>' : '')
+          + '</div>'
+          + '<a class="wa-send-btn" href="' + w.link + '" target="_blank" rel="noopener" data-i="' + i + '">שלח ←</a>'
+          + '</div>';
+      });
+      html += '</div>';
+    }
+
+    html += '<div class="agent-summary">';
+    html += 'סיכום: ' + totalPrepared + ' וואטסאפ מוכנים · ' + totalSent + ' מיילים נשלחו אוטומטית';
+    if (totalPot > 0) html += '<br>צפי הכנסה ₪' + totalPot.toLocaleString();
+    html += '<br><span style="font-size:12px;color:#666">אעקוב ואדווח כשייסגרו מעגלים. הרווח בפועל יופיע למעלה.</span></div>';
+
+    el.innerHTML = html;
+
+    // Wire send -> sent toggle, same behavior as single-customer and campaign.
+    let sentCount = 0;
+    el.querySelectorAll('.wa-send-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.classList.contains('sent')) return;
+        btn.classList.add('sent');
+        btn.textContent = '✓ נשלח';
+        sentCount++;
+        const counter = el.querySelector('#agWaSent');
+        if (counter) counter.textContent = sentCount;
+      });
+    });
   }
 
   /* ===== LIVE MONEY COUNTER ===== */
