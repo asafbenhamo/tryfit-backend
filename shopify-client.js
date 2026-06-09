@@ -1013,6 +1013,12 @@ async function createDiscountCode(shopDomain, opts = {}) {
   const headers = { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' };
 
   const code = (opts.code || `SAVE${Math.floor(Math.random() * 9000 + 1000)}`).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // Discount can be either a PERCENTAGE (e.g. 15%) or a FIXED amount in ILS
+  // (e.g. ₪77 off). The advisor decides which based on how the merchant phrased it.
+  const isFixed = !!(opts.amount_ils || opts.fixed_amount || opts.discount_type === 'fixed');
+  const fixedAmount = isFixed
+    ? Math.max(parseFloat(opts.amount_ils || opts.fixed_amount) || 0, 1)
+    : null;
   const percentage = Math.min(Math.max(parseFloat(opts.percentage) || 10, 1), 90);
   const daysValid = parseInt(opts.days_valid) || 30;
   const startsAt = new Date();
@@ -1029,16 +1035,13 @@ async function createDiscountCode(shopDomain, opts = {}) {
         target_type: 'line_item',
         target_selection: 'all',
         allocation_method: 'across',
-        value_type: 'percentage',
-        value: `-${percentage}.0`,
+        value_type: isFixed ? 'fixed_amount' : 'percentage',
+        value: isFixed ? `-${fixedAmount}.0` : `-${percentage}.0`,
         customer_selection: 'all',
         once_per_customer: true,
         usage_limit: opts.usage_limit || null,
         starts_at: startsAt.toISOString(),
         ends_at: endsAt.toISOString(),
-        // Allow this code to stack with the store's automatic order/product/shipping
-        // discounts. Without this, the code REPLACES the automatic 10% instead of
-        // adding to it. (Shopify REST PriceRule combines_with, API 2026-01.)
         combines_with: {
           order_discounts: allowCombine,
           product_discounts: allowCombine,
@@ -1068,11 +1071,13 @@ async function createDiscountCode(shopDomain, opts = {}) {
     }
     const dcData = await dcRes.json();
 
-    console.log(`🎟️  [Coupon] Created ${code} (${percentage}% off, ${daysValid}d, combine=${allowCombine}) for ${shopDomain}`);
+    console.log(`🎟️  [Coupon] Created ${code} (${isFixed ? fixedAmount + '₪' : percentage + '%'} off, ${daysValid}d, combine=${allowCombine}) for ${shopDomain}`);
     return {
       ok: true,
       code,
-      percentage,
+      percentage: isFixed ? null : percentage,
+      amount_ils: isFixed ? fixedAmount : null,
+      discount_type: isFixed ? 'fixed' : 'percentage',
       days_valid: daysValid,
       combines: allowCombine,
       ends_at: endsAt.toISOString(),

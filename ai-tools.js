@@ -29,20 +29,54 @@ const CUSTOMER_SORT = {
   last_order_date: 'last_order_date'
 };
 
+// How long a customer stays "off the list" after the advisor prepared an action
+// for them. After this many days they return to the pool automatically.
+const CONTACTED_COOLDOWN_DAYS = 4;
+
+// Builds a SQL fragment that excludes customers the advisor already prepared an
+// action for within the cooldown window. Matches on email OR phone against
+// advisor_actions. Returns { clause, params } to append to a query.
+// `startIndex` is the current highest $N placeholder already used; the fragment
+// adds exactly ONE new placeholder ($startIndex+1) for the cooldown day count.
+// The clause references store_customers.email / store_customers.phone, so the
+// outer query MUST use the table name (not an alias) — all queries here do.
+function buildExcludeContacted(enabled, startIndex) {
+  if (!enabled) return { clause: '', params: [] };
+  const idx = startIndex + 1;
+  const clause = `
+    AND NOT EXISTS (
+      SELECT 1 FROM advisor_actions aa
+      WHERE aa.shop_domain = store_customers.shop_domain
+        AND aa.created_at >= NOW() - ($${idx} || ' days')::interval
+        AND aa.action_type NOT IN ('daily_report','morning_report')
+        AND (
+          (aa.target_email IS NOT NULL AND lower(aa.target_email) = lower(store_customers.email))
+          OR
+          (aa.target_phone IS NOT NULL AND store_customers.phone IS NOT NULL
+           AND regexp_replace(aa.target_phone,'[^0-9]','','g') = regexp_replace(store_customers.phone,'[^0-9]','','g'))
+        )
+    )`;
+  return { clause, params: [String(CONTACTED_COOLDOWN_DAYS)] };
+}
+
 // ---------- 1. getTopCustomers ----------
 // Best customers by lifetime spend (or orders). Includes everyone by default.
 async function getTopCustomers(shopDomain, options = {}) {
   return safe('getTopCustomers', async () => {
     const limit = Math.min(parseInt(options.limit) || 10, 100);
     const sortBy = CUSTOMER_SORT[options.sortBy] || 'total_spent';
+    const params = [shopDomain];
+    const ex = buildExcludeContacted(options.excludeContacted, params.length);
+    params.push(...ex.params);
+    params.push(limit);
     const result = await db.query(
       `SELECT email, first_name, last_name, phone, city,
               total_spent, orders_count, last_order_date
        FROM store_customers
-       WHERE shop_domain = $1
+       WHERE shop_domain = $1${ex.clause}
        ORDER BY ${sortBy} DESC
-       LIMIT $2`,
-      [shopDomain, limit]
+       LIMIT $${params.length}`,
+      params
     );
     return { count: result.rows.length, customers: result.rows };
   });
@@ -55,6 +89,10 @@ async function getDormantCustomers(shopDomain, options = {}) {
     const daysInactive = parseInt(options.daysInactive) || 30;
     const minSpent = parseFloat(options.minSpent) || 0;
     const limit = Math.min(parseInt(options.limit) || 20, 100);
+    const params = [shopDomain, minSpent, String(daysInactive)];
+    const ex = buildExcludeContacted(options.excludeContacted, params.length);
+    params.push(...ex.params);
+    params.push(limit);
     const result = await db.query(
       `SELECT email, first_name, last_name, phone, city,
               total_spent, orders_count, last_order_date
@@ -63,10 +101,10 @@ async function getDormantCustomers(shopDomain, options = {}) {
          AND orders_count > 0
          AND total_spent >= $2
          AND (last_order_date IS NULL
-              OR last_order_date < NOW() - ($3 || ' days')::interval)
+              OR last_order_date < NOW() - ($3 || ' days')::interval)${ex.clause}
        ORDER BY total_spent DESC
-       LIMIT $4`,
-      [shopDomain, minSpent, String(daysInactive), limit]
+       LIMIT $${params.length}`,
+      params
     );
     return {
       days_inactive: daysInactive,
@@ -81,14 +119,18 @@ async function getDormantCustomers(shopDomain, options = {}) {
 async function getNeverPurchased(shopDomain, options = {}) {
   return safe('getNeverPurchased', async () => {
     const limit = Math.min(parseInt(options.limit) || 20, 100);
+    const params = [shopDomain];
+    const ex = buildExcludeContacted(options.excludeContacted, params.length);
+    params.push(...ex.params);
+    params.push(limit);
     const result = await db.query(
       `SELECT email, first_name, last_name, phone, city, marketing_consent
        FROM store_customers
        WHERE shop_domain = $1
-         AND (orders_count = 0 OR orders_count IS NULL)
+         AND (orders_count = 0 OR orders_count IS NULL)${ex.clause}
        ORDER BY last_synced_at DESC NULLS LAST
-       LIMIT $2`,
-      [shopDomain, limit]
+       LIMIT $${params.length}`,
+      params
     );
     return { count: result.rows.length, customers: result.rows };
   });
@@ -99,15 +141,19 @@ async function getNeverPurchased(shopDomain, options = {}) {
 async function getRepeatCustomers(shopDomain, options = {}) {
   return safe('getRepeatCustomers', async () => {
     const limit = Math.min(parseInt(options.limit) || 20, 100);
+    const params = [shopDomain];
+    const ex = buildExcludeContacted(options.excludeContacted, params.length);
+    params.push(...ex.params);
+    params.push(limit);
     const result = await db.query(
       `SELECT email, first_name, last_name, phone, city,
               total_spent, orders_count, last_order_date
        FROM store_customers
        WHERE shop_domain = $1
-         AND orders_count > 1
+         AND orders_count > 1${ex.clause}
        ORDER BY orders_count DESC, total_spent DESC
-       LIMIT $2`,
-      [shopDomain, limit]
+       LIMIT $${params.length}`,
+      params
     );
     return { count: result.rows.length, customers: result.rows };
   });

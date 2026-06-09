@@ -1000,7 +1000,8 @@
     let html = '<div class="action-head">🚀 קמפיין מוכן להפעלה</div>';
     html += '<div class="action-row"><span>סגמנט:</span> ' + esc(f.type || 'קמפיין') + '</div>';
     html += '<div class="action-row"><span>לקוחות:</span> ' + custs.length + '</div>';
-    if (f.percentage) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ' + esc(f.percentage) + '%</div>';
+    if (f.amount_ils) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ₪' + esc(f.amount_ils) + '</div>';
+    else if (f.percentage) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ' + esc(f.percentage) + '%</div>';
     if (totalValue > 0) html += '<div class="action-row"><span>צפי הכנסה:</span> ₪' + Math.round(totalValue).toLocaleString() + '</div>';
     html += '<div class="action-btns"><button class="action-approve">הפעל קמפיין ←</button><button class="action-cancel">בטל</button></div>';
     html += '<div class="action-result" style="display:none"></div>';
@@ -1020,7 +1021,9 @@
             password: PASSWORD, campaign_type: f.type || 'campaign',
             segment: custs,
             template: { percentage: f.percentage ? parseInt(f.percentage) : 10,
-              days_valid: f.days ? parseInt(f.days) : 14,
+              amount_ils: f.amount_ils ? parseFloat(f.amount_ils) : null,
+              combine: (f.combine === 'no' || f.combine === 'false') ? 'no' : 'yes',
+              days_valid: f.days ? parseInt(f.days) : 2,
               subject: f.subject || 'הודעה מ-770', body: f.body || '' }
           })
         });
@@ -1213,10 +1216,12 @@
             email: f.email || null,
             phone: f.phone || null,
             customer_name: f.name || null,
-            create_coupon: !!f.coupon,
+            create_coupon: !!(f.coupon || f.coupon_ils),
             coupon_percentage: f.coupon ? parseInt(f.coupon) : null,
+            coupon_ils: f.coupon_ils ? parseFloat(f.coupon_ils) : null,
             coupon_code: f.coupon_code || null,
-            coupon_days: f.coupon_days ? parseInt(f.coupon_days) : 30,
+            coupon_days: f.coupon_days ? parseInt(f.coupon_days) : 2,
+            coupon_combine: (f.combine === 'no' || f.combine === 'false') ? false : true,
             message_subject: f.subject || 'הודעה מ-770',
             message_body: f.body || ''
           })

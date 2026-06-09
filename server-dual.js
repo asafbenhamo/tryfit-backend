@@ -865,13 +865,15 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
     const {
       password, action_type,
       email, phone, customer_name,
-      create_coupon, coupon_percentage, coupon_code, coupon_days,
+      create_coupon, coupon_percentage, coupon_ils, coupon_code, coupon_days, coupon_combine,
       message_subject, message_body, cta_url, cta_label
     } = req.body;
 
     if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = "seven770.myshopify.com";
     const result = { ok: true, steps: {} };
+
+    const isFixed = !!coupon_ils && parseFloat(coupon_ils) > 0;
 
     let couponCode = null;
     if (create_coupon) {
@@ -885,12 +887,14 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
         }
         if (!namePart && email) namePart = email.split("@")[0].replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8);
         if (!namePart) namePart = "VIP";
-        const pct = coupon_percentage || 10;
+        const amt = isFixed ? Math.round(parseFloat(coupon_ils)) : (coupon_percentage || 10);
         const suffix = Math.floor(Math.random() * 900 + 100);
-        finalCode = `${namePart}${pct}${suffix}`;
+        finalCode = `${namePart}${amt}${suffix}`;
       }
       const c = await shopify.createDiscountCode(shop, {
-        percentage: coupon_percentage || 10,
+        percentage: isFixed ? null : (coupon_percentage || 10),
+        amount_ils: isFixed ? parseFloat(coupon_ils) : null,
+        combine: coupon_combine === false ? false : true,
         code: finalCode,
         days_valid: coupon_days || 2,
         title: `יועץ: ${action_type || 'campaign'} - ${customer_name || email || ''}`

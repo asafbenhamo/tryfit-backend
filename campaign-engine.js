@@ -119,6 +119,9 @@ function startCampaign(shop, { campaign_type, segment, template }) {
 async function runCampaign(id, shop, segment, template) {
   const c = campaigns[id];
   const pct = parseInt(template.percentage) || 10;
+  const amountIls = template.amount_ils ? parseFloat(template.amount_ils) : null;
+  const isFixed = !!amountIls && amountIls > 0;
+  const allowCombine = (template.combine === 'no' || template.combine === false) ? false : true;
   const days = parseInt(template.days_valid) || 2; // 48-hour validity by default
 
   for (const cust of segment) {
@@ -144,9 +147,12 @@ async function runCampaign(id, shop, segment, template) {
       }
 
       // Personal coupon (stacks on the store's automatic discount by default)
-      const code = personalCode(cust.name || cust.email, pct);
+      const code = personalCode(cust.name || cust.email, isFixed ? Math.round(amountIls) : pct);
       const coupon = await shopify.createDiscountCode(shop, {
-        percentage: pct, code, days_valid: days,
+        percentage: isFixed ? null : pct,
+        amount_ils: isFixed ? amountIls : null,
+        combine: allowCombine,
+        code, days_valid: days,
         title: `קמפיין ${c.campaign_type} - ${cust.name || cust.email || ''}`
       });
       const finalCode = coupon.ok ? coupon.code : null;
