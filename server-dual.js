@@ -1020,7 +1020,18 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     } catch (e) {}
 
     const linkForMessage = editableCartUrl || payUrl;
-    let finalBody = (message_body || "") + `\n\nהעגלה מחכה לך - אפשר לשנות, להוסיף, ולסיים את ההזמנה כאן:\n${linkForMessage}`;
+    // Replace the {COUPON} placeholder with the REAL code we just created, so the
+    // customer gets a working code (not the literal text "{COUPON}"). If the body
+    // has no placeholder but we created a code, append it explicitly.
+    let finalBody = message_body || "";
+    if (cartCoupon) {
+      if (finalBody.includes("{COUPON}")) {
+        finalBody = finalBody.replace(/\{COUPON\}/g, cartCoupon);
+      } else if (!finalBody.includes(cartCoupon)) {
+        finalBody += `\n\nהקוד האישי שלך: ${cartCoupon}`;
+      }
+    }
+    finalBody += `\n\nהעגלה מחכה לך - אפשר לשנות, להוסיף, ולסיים את ההזמנה כאן:\n${linkForMessage}`;
 
     const result = { ok: true, steps: { cart: { ok: true, total: draft.total, pay_url: payUrl, editable_url: editableCartUrl, coupon: cartCoupon } } };
 
@@ -1054,6 +1065,113 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Build cart error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ======================
+// BATCH personalized carts: build many carts at once (like a campaign).
+// Each cart: { name, email, phone, items:[{variant_id,quantity}], discount, subject, body }
+// Returns { whatsapp:[{name,phone,coupon,link}], emails_sent, failed } so the UI
+// can show one WhatsApp square per customer, exactly like a campaign.
+// ======================
+app.post("/api/cart/build-batch", express.json(), async (req, res) => {
+  try {
+    if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = "seven770.myshopify.com";
+    const carts = Array.isArray(req.body.carts) ? req.body.carts : [];
+    if (carts.length === 0) return res.status(400).json({ ok: false, error: "אין עגלות לבנות" });
+
+    const whatsapp = [];
+    let emailsSent = 0, failed = 0, skipped = 0;
+
+    for (const cart of carts) {
+      try {
+        const email = cart.email || null;
+        const phone = cart.phone || null;
+        const customer_name = cart.name || null;
+        const items = Array.isArray(cart.items) ? cart.items : [];
+        const discount = cart.discount ? parseInt(cart.discount) : null;
+        if (items.length === 0) { failed++; continue; }
+
+        // Opt-out gate
+        if (await compliance.isOptedOut(shop, { email, phone })) { skipped++; continue; }
+
+        // Build the draft order (the cart itself)
+        const draft = await shopify.createDraftOrder(shop, {
+          items, email: email || null,
+          discount_percentage: discount || null,
+          note: `עגלה מותאמת ל${customer_name || 'לקוחה'} - הוכן על ידי היועץ`
+        });
+        if (!draft.ok) { failed++; continue; }
+
+        // Personal coupon (real code the customer can use)
+        let cartCoupon = null;
+        if (discount) {
+          const namePart = (customer_name || (email ? email.split("@")[0] : "") || "VIP").replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8) || "VIP";
+          const suffix = Math.floor(Math.random() * 900 + 100);
+          const c = await shopify.createDiscountCode(shop, {
+            percentage: discount,
+            code: `${namePart}${discount}${suffix}`,
+            days_valid: 2,
+            combine: true,
+            title: `יועץ: עגלה מותאמת - ${customer_name || email || ''}`
+          });
+          if (c.ok) cartCoupon = c.code;
+        }
+
+        // Editable cart link (carries the coupon so it auto-applies)
+        let editableCartUrl = null;
+        try {
+          const cartParts = items.map(it => `${it.variant_id}:${it.quantity || 1}`).join(',');
+          editableCartUrl = `https://sevenseventy.co.il/cart/${cartParts}`;
+          if (cartCoupon) editableCartUrl += `?discount=${encodeURIComponent(cartCoupon)}`;
+        } catch (e) {}
+        const linkForMessage = editableCartUrl || draft.invoice_url;
+
+        // Build the message body with the REAL coupon code
+        let finalBody = cart.body || "";
+        if (cartCoupon) {
+          if (finalBody.includes("{COUPON}")) finalBody = finalBody.replace(/\{COUPON\}/g, cartCoupon);
+          else if (!finalBody.includes(cartCoupon)) finalBody += `\n\nהקוד האישי שלך: ${cartCoupon}`;
+        }
+        finalBody += `\n\nהעגלה מחכה לך - אפשר לשנות, להוסיף, ולסיים את ההזמנה כאן:\n${linkForMessage}`;
+
+        const hasPhone = phone && String(phone).replace(/[^0-9]/g, "").length >= 8;
+        if (hasPhone) {
+          let waPhone = String(phone).replace(/[^0-9]/g, "");
+          if (waPhone.startsWith("0")) waPhone = "972" + waPhone.slice(1);
+          const waUrl = `https://wa.me/${waPhone}?text=${encodeURIComponent(finalBody)}`;
+          whatsapp.push({ name: customer_name || "", phone, coupon: cartCoupon, link: waUrl, sent: false });
+        } else if (email) {
+          const gate = await compliance.canContactCustomer(shop, { email, phone });
+          if (!gate.allowed) { skipped++; }
+          else {
+            const html = mailer.buildHtmlEmail(cart.body || "הכנו לך עגלה אישית!", {
+              cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: "770", to: email
+            });
+            const sent = await mailer.sendEmail({ to: email, subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
+            if (sent.ok) emailsSent++; else failed++;
+          }
+        } else { failed++; }
+
+        // Log the action (for attribution)
+        await db.query(
+          `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+           VALUES ($1, 'personalized_cart', $2, $3, $4, $5)`,
+          [shop, email || null, phone || null,
+           JSON.stringify({ draft_order_id: draft.draft_order_id, total: draft.total, customer_name: customer_name || null }), cartCoupon]
+        ).catch(e => console.error("log:", e.message));
+
+      } catch (e) {
+        console.error("[cart-batch] one cart failed:", e.message);
+        failed++;
+      }
+    }
+
+    res.json({ ok: true, whatsapp, emails_sent: emailsSent, failed, skipped, total: carts.length });
+  } catch (err) {
+    console.error("Build cart batch error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });

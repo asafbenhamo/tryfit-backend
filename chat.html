@@ -1067,6 +1067,22 @@
     });
     return { fields, cleanText: text.replace(m[0], '').trim() };
   }
+  // Capture ALL CART blocks (for batch personalized carts to many customers).
+  function parseAllCarts(text) {
+    const matches = [...text.matchAll(/\[\[CART:([\s\S]*?)\]\]/g)];
+    if (matches.length === 0) return null;
+    const carts = matches.map(m => {
+      const fields = {};
+      m[1].split('|').forEach(part => {
+        const idx = part.indexOf('=');
+        if (idx > -1) fields[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+      });
+      return fields;
+    });
+    let cleanText = text;
+    matches.forEach(m => { cleanText = cleanText.replace(m[0], ''); });
+    return { carts, cleanText: cleanText.trim() };
+  }
   function parseCampaign(text) {
     const m = text.match(/\[\[CAMPAIGN:([\s\S]*?)\]\]/);
     if (!m) return null;
@@ -1274,6 +1290,82 @@
       }
     };
   }
+  // Batch card: build many personalized carts at once, then show one WhatsApp
+  // square per customer (same UX as a campaign).
+  function renderCartBatchCard(batch, container) {
+    const carts = batch.carts;
+    const card = document.createElement('div');
+    card.className = 'action-card campaign-card';
+    let html = '<div class="action-head">🛍️ ' + carts.length + ' עגלות מותאמות מוכנות להפעלה</div>';
+    html += '<div class="action-row"><span>לקוחות:</span> ' + carts.length + '</div>';
+    html += '<div class="action-row"><span>הנחה אישית לכל אחת:</span> ' + esc(carts[0].discount || '15') + '%</div>';
+    html += '<div class="action-btns"><button class="action-approve">בנה את כל העגלות ←</button><button class="action-cancel">בטל</button></div>';
+    html += '<div class="action-result" style="display:none"></div>';
+    card.innerHTML = html;
+    container.appendChild(card);
+
+    const approveBtn = card.querySelector('.action-approve');
+    const cancelBtn = card.querySelector('.action-cancel');
+    const resultDiv = card.querySelector('.action-result');
+    cancelBtn.onclick = () => card.remove();
+    approveBtn.onclick = async () => {
+      approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'בונה את כל העגלות...';
+      try {
+        const payload = carts.map(f => ({
+          name: f.name || null, email: f.email || null, phone: f.phone || null,
+          discount: f.discount ? parseInt(f.discount) : null,
+          subject: f.subject || 'הכנו לך עגלה אישית 🛍️',
+          body: f.body || '',
+          items: (f.items || '').split(',').filter(Boolean).map(pair => {
+            const [vid, qty] = pair.split(':');
+            return { variant_id: parseInt(vid.trim()), quantity: parseInt(qty || '1') };
+          })
+        }));
+        const res = await fetch('/api/cart/build-batch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: PASSWORD, carts: payload })
+        });
+        const data = await res.json();
+        card.querySelector('.action-btns').style.display = 'none';
+        resultDiv.style.display = 'block';
+        if (!data.ok) { resultDiv.className = 'action-result error'; resultDiv.innerHTML = '❌ ' + (data.error || 'שגיאה'); return; }
+        resultDiv.className = 'action-result success';
+        const wa = data.whatsapp || [];
+        let h = '<div class="camp-status">✅ ' + (data.total) + ' עגלות נבנו!';
+        if (data.emails_sent > 0) h += ' ' + data.emails_sent + ' מיילים נשלחו אוטומטית.';
+        if (data.failed > 0) h += ' (' + data.failed + ' נכשלו)';
+        h += '</div>';
+        if (wa.length > 0) {
+          h += '<div class="wa-progress">📱 ' + wa.length + ' הודעות וואטסאפ מוכנות. לחץ "שלח" ליד כל לקוחה. <strong id="cartWaSent">0</strong>/' + wa.length + ' נשלחו</div>';
+          h += '<div class="wa-list">';
+          wa.forEach((w, i) => {
+            const label = w.name || w.phone || 'לקוחה';
+            const coup = w.coupon ? ('קוד: ' + w.coupon) : '';
+            h += '<div class="wa-item"><div><div class="wa-name">' + esc(label) + '</div>'
+              + (coup ? '<div class="wa-coupon">' + esc(coup) + '</div>' : '') + '</div>'
+              + '<a class="wa-send-btn" href="' + w.link + '" target="_blank" rel="noopener" data-i="' + i + '">שלח ←</a></div>';
+          });
+          h += '</div>';
+        }
+        resultDiv.innerHTML = h;
+        let sentCount = 0;
+        resultDiv.querySelectorAll('.wa-send-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            if (btn.classList.contains('sent')) return;
+            btn.classList.add('sent'); btn.textContent = '✓ נשלח';
+            sentCount++;
+            const counter = resultDiv.querySelector('#cartWaSent');
+            if (counter) counter.textContent = sentCount;
+          });
+        });
+        loadMoneyCounter();
+      } catch (err) {
+        resultDiv.style.display = 'block';
+        resultDiv.className = 'action-result error';
+        resultDiv.innerHTML = '❌ שגיאה: ' + err.message;
+      }
+    };
+  }
   function renderActionCard(action, container) {
     const f = action.fields;
     const card = document.createElement('div');
@@ -1356,9 +1448,11 @@
     bubble.className = 'bubble';
     if (role === 'ai') {
       const action = parseAction(text);
-      const cart = parseCart(text);
+      const allCarts = parseAllCarts(text);
+      const isBatchCart = allCarts && allCarts.carts.length > 1;
+      const cart = isBatchCart ? null : parseCart(text);
       const campaign = parseCampaign(text);
-      const displayText = campaign ? campaign.cleanText : (cart ? cart.cleanText : (action ? action.cleanText : text));
+      const displayText = campaign ? campaign.cleanText : (isBatchCart ? allCarts.cleanText : (cart ? cart.cleanText : (action ? action.cleanText : text)));
       bubble.innerHTML = render(displayText);
       row.appendChild(bubble);
       $('messages').appendChild(row);
@@ -1366,6 +1460,11 @@
         const cardRow = document.createElement('div');
         cardRow.className = 'action-row-wrap';
         renderCampaignCard(campaign, cardRow);
+        $('messages').appendChild(cardRow);
+      } else if (isBatchCart) {
+        const cardRow = document.createElement('div');
+        cardRow.className = 'action-row-wrap';
+        renderCartBatchCard(allCarts, cardRow);
         $('messages').appendChild(cardRow);
       } else if (cart) {
         const cardRow = document.createElement('div');
@@ -1495,9 +1594,11 @@
   function streamAnswer(fullText) {
     return new Promise(resolve => {
       const action = parseAction(fullText);
-      const cart = parseCart(fullText);
+      const allCarts = parseAllCarts(fullText);
+      const isBatchCart = allCarts && allCarts.carts.length > 1;
+      const cart = isBatchCart ? null : parseCart(fullText);
       const campaign = parseCampaign(fullText);
-      const displayText = campaign ? campaign.cleanText : (cart ? cart.cleanText : (action ? action.cleanText : fullText));
+      const displayText = campaign ? campaign.cleanText : (isBatchCart ? allCarts.cleanText : (cart ? cart.cleanText : (action ? action.cleanText : fullText)));
 
       clearHomeScreen();
       const row = document.createElement('div');
@@ -1517,6 +1618,11 @@
             const cardRow = document.createElement('div');
             cardRow.className = 'action-row-wrap';
             renderCampaignCard(campaign, cardRow);
+            $('messages').appendChild(cardRow);
+          } else if (isBatchCart) {
+            const cardRow = document.createElement('div');
+            cardRow.className = 'action-row-wrap';
+            renderCartBatchCard(allCarts, cardRow);
             $('messages').appendChild(cardRow);
           } else if (cart) {
             const cardRow = document.createElement('div');
