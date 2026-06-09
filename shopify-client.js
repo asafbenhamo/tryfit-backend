@@ -216,7 +216,7 @@ async function saveStoreCustomer(shopDomain, shopifyCustomer) {
       shopifyCustomer.email || null,
       shopifyCustomer.first_name || null,
       shopifyCustomer.last_name || null,
-      cleanPhone(shopifyCustomer.default_address?.phone || shopifyCustomer.phone),
+      cleanPhone(shopifyCustomer.phone || shopifyCustomer.default_address?.phone),
       shopifyCustomer.default_address?.city || null,
       shopifyCustomer.default_address?.province || null,
       shopifyCustomer.default_address?.country || null,
