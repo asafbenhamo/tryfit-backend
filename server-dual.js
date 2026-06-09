@@ -2093,6 +2093,49 @@ app.get("/admin/fix-data", async (req, res) => {
 });
 
 // ======================
+// MULTI-STORE onboarding (super-admin). Register a new store's custom-app token
+// so the advisor can serve it. 770 stays env-based and is unaffected.
+// Add:  /admin/add-store?password=...&shop=xxx.myshopify.com&token=shpat_...&advisor_password=...&name=...&public_domain=...
+// List: /admin/list-stores?password=...
+// ======================
+app.get("/admin/add-store", async (req, res) => {
+  if (req.query.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const { shop, token, advisor_password, name, public_domain } = req.query;
+  if (!shop || !token) {
+    return res.status(400).json({ ok: false, error: "חובה shop ו-token" });
+  }
+  try {
+    const r = await shopify.upsertStore({
+      shop_domain: shop,
+      access_token: token,
+      advisor_password: advisor_password || null,
+      display_name: name || null,
+      public_domain: public_domain || null
+    });
+    // Verify the token actually works against Shopify before declaring success.
+    const verify = await shopify.verifyConnection(shop);
+    res.json({
+      ok: true,
+      store: r.shop_domain,
+      connection: verify.connected ? `מחובר: ${verify.shopName}` : `אזהרה: החיבור נכשל - ${verify.reason}`,
+      note: "החנות נוספה. הרץ backfill עבורה כדי לטעון לקוחות/הזמנות."
+    });
+  } catch (err) {
+    console.error("add-store error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/admin/list-stores", (req, res) => {
+  if (req.query.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  res.json({ ok: true, stores: shopify.listStores() });
+});
+
+// ======================
 // ATTRIBUTION: pull recent orders and close advisor actions (HMAC-independent).
 // Run manually now to close existing orders; also runs automatically every 5 min.
 // Call: /admin/run-attribution?password=...
@@ -2310,6 +2353,9 @@ app.listen(PORT, async () => {
     if (connected) {
       await db.initializeSchema();
       console.log("Data platform: READY");
+      // Load any DB-backed advisor stores into the in-memory token cache.
+      // (770 stays env-based; this just adds support for new shops.)
+      await shopify.loadStores();
       const enabledShops = featureFlags.getDataCollectionShops();
       for (const shop of enabledShops) {
         if (shopify.hasTokenForShop(shop)) {

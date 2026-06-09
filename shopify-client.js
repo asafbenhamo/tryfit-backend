@@ -6,21 +6,113 @@ const db = require('./database');
 
 const SHOPIFY_API_VERSION = '2026-01';
 
-// Map shop domain -> environment variable name for its token
+// Map shop domain -> environment variable name for its token.
+// 770 stays here as an env-based token (unchanged). Any NEW store is added to
+// the database (advisor_stores) and loaded into the cache below — so we never
+// have to touch env or code to onboard a new shop.
 const SHOP_TOKEN_MAP = {
   'seven770.myshopify.com': 'SHOPIFY_770_TOKEN'
 };
 
+// In-memory cache of DB-backed stores: shop_domain -> { token, password, name, public_domain, active }
+// getTokenForShop stays SYNCHRONOUS (many call sites depend on that), so we read
+// from this cache, which is refreshed from the DB at startup and after changes.
+const storeCache = new Map();
+
+// Create the advisor_stores table if missing. Safe to call repeatedly.
+async function ensureStoreTable() {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS advisor_stores (
+        shop_domain   TEXT PRIMARY KEY,
+        access_token  TEXT NOT NULL,
+        advisor_password TEXT,
+        display_name  TEXT,
+        public_domain TEXT,
+        active        BOOLEAN DEFAULT TRUE,
+        created_at    TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } catch (err) {
+    console.error('⚠️  [stores] ensureStoreTable failed:', err.message);
+  }
+}
+
+// Load all DB-backed stores into the in-memory cache.
+async function loadStores() {
+  try {
+    await ensureStoreTable();
+    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active FROM advisor_stores WHERE active = TRUE`);
+    storeCache.clear();
+    for (const row of r.rows) {
+      storeCache.set(row.shop_domain.toLowerCase().trim(), {
+        token: row.access_token,
+        password: row.advisor_password,
+        name: row.display_name,
+        public_domain: row.public_domain,
+        active: row.active
+      });
+    }
+    console.log(`🏪 [stores] loaded ${storeCache.size} store(s) from DB`);
+    return storeCache.size;
+  } catch (err) {
+    console.error('⚠️  [stores] loadStores failed:', err.message);
+    return 0;
+  }
+}
+
+// Add or update a store, then refresh the cache.
+async function upsertStore({ shop_domain, access_token, advisor_password, display_name, public_domain }) {
+  const domain = shop_domain.toLowerCase().trim();
+  await ensureStoreTable();
+  await db.query(
+    `INSERT INTO advisor_stores (shop_domain, access_token, advisor_password, display_name, public_domain, active)
+     VALUES ($1,$2,$3,$4,$5,TRUE)
+     ON CONFLICT (shop_domain) DO UPDATE SET
+       access_token = EXCLUDED.access_token,
+       advisor_password = COALESCE(EXCLUDED.advisor_password, advisor_stores.advisor_password),
+       display_name = COALESCE(EXCLUDED.display_name, advisor_stores.display_name),
+       public_domain = COALESCE(EXCLUDED.public_domain, advisor_stores.public_domain),
+       active = TRUE`,
+    [domain, access_token, advisor_password || null, display_name || null, public_domain || null]
+  );
+  await loadStores();
+  return { ok: true, shop_domain: domain };
+}
+
+// Return the store config (from DB cache) for a domain, or null.
+function getStore(shopDomain) {
+  if (!shopDomain) return null;
+  return storeCache.get(shopDomain.toLowerCase().trim()) || null;
+}
+
+// List all known stores (env-based 770 + DB-backed), for admin/onboarding views.
+function listStores() {
+  const out = [];
+  for (const [domain, envVar] of Object.entries(SHOP_TOKEN_MAP)) {
+    if (process.env[envVar]) out.push({ shop_domain: domain, source: 'env' });
+  }
+  for (const [domain, cfg] of storeCache.entries()) {
+    if (!SHOP_TOKEN_MAP[domain]) out.push({ shop_domain: domain, source: 'db', name: cfg.name });
+  }
+  return out;
+}
+
 /**
  * Get the access token for a specific shop.
+ * Resolution order: env map (770) first, then the DB-backed store cache.
  * Returns null if no token is configured for this shop.
  */
 function getTokenForShop(shopDomain) {
   if (!shopDomain) return null;
   const normalized = shopDomain.toLowerCase().trim();
+  // 1. env-based (770) — unchanged behavior
   const envVar = SHOP_TOKEN_MAP[normalized];
-  if (!envVar) return null;
-  return process.env[envVar] || null;
+  if (envVar && process.env[envVar]) return process.env[envVar];
+  // 2. DB-backed stores (new shops)
+  const store = storeCache.get(normalized);
+  if (store && store.token) return store.token;
+  return null;
 }
 
 /**
@@ -1158,6 +1250,11 @@ module.exports = {
   shopifyGet,
   hasTokenForShop,
   getTokenForShop,
+  loadStores,
+  upsertStore,
+  getStore,
+  listStores,
+  ensureStoreTable,
   findCustomerByEmail,
   findCustomerByPhone,
   getCustomerById,
