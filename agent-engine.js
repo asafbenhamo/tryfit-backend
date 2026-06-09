@@ -16,7 +16,12 @@ const TASK_GAP_MS = 3000; // small pause between moves
 // Pull the customer segment for a given move type.
 // Returns array of { name, email, phone, est_value }.
 async function pullSegment(shop, task) {
-  const limit = campaignEngine.MAX_PER_CAMPAIGN;
+  // The plan (and any edits via revise-plan) set est_customers = how many
+  // customers this move should target. Honor it, capped at the campaign max.
+  // Fall back to the campaign max only if no count was set.
+  const requested = parseInt(task.est_customers) || 0;
+  const cap = campaignEngine.MAX_PER_CAMPAIGN;
+  const limit = requested > 0 ? Math.min(requested, cap) : cap;
   let rows = [];
   try {
     if (task.move_type === 'abandoned_cart') {

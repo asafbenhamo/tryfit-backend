@@ -616,7 +616,7 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
 
     const moves = [];
 
-    const carts = await aiTools.getAbandonedCheckouts(shop, { limit: 50, days: 30 });
+    const carts = await aiTools.getAbandonedCheckouts(shop, { limit: 20, days: 30 });
     const cartList = carts.recoverable_carts || carts.carts || [];
     if (cartList.length > 0) {
       const val = cartList.reduce((s, c) => s + parseFloat(c.total_price || 0), 0);
@@ -630,7 +630,7 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
         }});
     }
 
-    const vips = await aiTools.getDormantCustomers(shop, { limit: 50, daysInactive: 30, minSpent: 1000 });
+    const vips = await aiTools.getDormantCustomers(shop, { limit: 20, daysInactive: 30, minSpent: 1000 });
     if ((vips.customers || []).length > 0) {
       const val = vips.customers.reduce((s, c) => s + parseFloat(c.total_spent || 0) * 0.15, 0);
       moves.push({ priority: 2, move_type: 'dormant_vip', segment: 'dormant_vip',
@@ -657,7 +657,7 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
     }
 
     const hot = await aiTools.getTopProducts(shop, { limit: 3 });
-    const repeat = await aiTools.getRepeatCustomers(shop, { limit: 50 });
+    const repeat = await aiTools.getRepeatCustomers(shop, { limit: 20 });
     if ((repeat.customers || []).length > 0 && (hot.products || hot.top_products || []).length > 0) {
       const val = repeat.customers.reduce((s, c) => s + parseFloat(c.total_spent || 0) * 0.1, 0);
       const hotName = ((hot.products || hot.top_products || [])[0] || {}).title || 'המוצר החם';
@@ -913,6 +913,10 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       finalBody = finalBody.replace(/\{COUPON\}/g, couponCode);
     } else if (couponCode && !finalBody.includes(couponCode)) {
       finalBody += `\n\nקוד הקופון שלך: ${couponCode}`;
+    }
+    // Always include a link to the store so the customer can act on the offer.
+    if (!finalBody.includes("sevenseventy.co.il")) {
+      finalBody += `\n\nלרכישה: https://sevenseventy.co.il`;
     }
 
     const hasPhone = phone && String(phone).trim().length >= 8;

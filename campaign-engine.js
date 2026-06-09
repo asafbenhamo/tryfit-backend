@@ -165,6 +165,9 @@ async function runCampaign(id, shop, segment, template) {
       // Always state the 48-hour validity so it matches the real coupon expiry,
       // and to create urgency. Only add it if not already mentioned.
       if (finalCode && !body.includes('48 שעות')) body += `\nהקוד תקף ל-48 שעות בלבד ⏰`;
+      // Always include a link to the store so the customer can act on the offer.
+      const STORE_URL = 'https://sevenseventy.co.il';
+      if (!body.includes('sevenseventy.co.il')) body += `\n\nלרכישה: ${STORE_URL}`;
 
       if (hasPhone) {
         // WhatsApp: PREPARE a ready link. Do NOT count as "sent" - the merchant

@@ -750,6 +750,9 @@
     let html = '<div class="agent-working">🏁 הסוכן ' + verb + '!</div>';
 
     data.tasks.forEach(t => {
+      // Only show moves that actually ran. Unselected moves stay 'pending' and
+      // must not appear in the results.
+      if (t.status === 'pending') return;
       const r = t.result || {};
       const wa = r.whatsapp || [];
       totalSent += (r.sent || 0);
@@ -960,14 +963,27 @@
   }
 
   /* ===== RENDER ===== */
+  // We keep the FULL history in memory (for context + saving), but only display
+  // the last 10 messages on screen to keep the chat clean. Older messages are
+  // not shown but the advisor still remembers them.
+  const MAX_VISIBLE_MSGS = 10;
   function renderHistory() {
     const m = $('messages');
     m.innerHTML = '';
-    history.forEach(msg => {
+    const visible = history.slice(-MAX_VISIBLE_MSGS);
+    visible.forEach(msg => {
       const role = msg.role === 'user' ? 'user' : 'ai';
       addMessageDom(role, msg.content);
     });
     scrollDown();
+  }
+  // Keep the on-screen message count capped. Called after adding a new row.
+  function trimVisibleMessages() {
+    const m = $('messages');
+    const rows = m.querySelectorAll('.row');
+    if (rows.length > MAX_VISIBLE_MSGS) {
+      for (let i = 0; i < rows.length - MAX_VISIBLE_MSGS; i++) rows[i].remove();
+    }
   }
   function linkify(s) {
     s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
@@ -1349,6 +1365,7 @@
   }
   function addMessage(role, text) {
     const b = addMessageDom(role, text);
+    trimVisibleMessages();
     scrollDown();
     return b;
   }
