@@ -1987,6 +1987,92 @@ app.get("/admin/run-attribution", async (req, res) => {
   }
 });
 
+// ======================
+// FIX: reverse a specific WRONG attribution (order placed BEFORE the outreach).
+// Preview:  /admin/unattribute?password=...&amount=9428.4&name=אנה רזניק
+// Execute:  /admin/unattribute?password=...&amount=9428.4&name=אנה רזניק&confirm=yes
+// Without confirm=yes it only SHOWS what would be reversed (safe).
+// ======================
+app.get("/admin/unattribute", async (req, res) => {
+  if (req.query.password !== ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = "seven770.myshopify.com";
+  const amount = req.query.amount ? parseFloat(req.query.amount) : null;
+  const name = (req.query.name || "").trim();
+  const doConfirm = req.query.confirm === "yes";
+  if (!amount && !name) {
+    return res.status(400).json({ ok: false, error: "ציין amount ו/או name" });
+  }
+  try {
+    // Find matching converted actions. Match on amount (within 1₪) AND/OR the
+    // customer name appearing either in details.customer_name or in the title
+    // (personalized_cart titles include the customer name).
+    const matches = await db.query(
+      `SELECT id, action_type, target_email, target_phone, coupon_code,
+              attributed_revenue, outcome, created_at, closed_at,
+              details->>'customer_name' AS detail_name,
+              details->>'title' AS detail_title, details
+       FROM advisor_actions
+       WHERE shop_domain = $1
+         AND outcome = 'converted'
+         AND ($2::numeric IS NULL OR ABS(attributed_revenue - $2::numeric) < 1)
+         AND ($3::text = '' OR
+              lower(coalesce(details->>'customer_name','')) LIKE '%' || lower($3) || '%')
+       ORDER BY closed_at DESC NULLS LAST, created_at DESC`,
+      [shop, amount, name]
+    );
+
+    if (matches.rows.length === 0) {
+      return res.json({ ok: true, found: 0,
+        message: "לא נמצאה זקיפה תואמת. נסה רק לפי amount (בלי name), כי ייתכן שהשם לא נשמר בזקיפות ישנות." });
+    }
+
+    const preview = matches.rows.map(r => ({
+      action_id: r.id,
+      type: r.action_type,
+      amount: Math.round(parseFloat(r.attributed_revenue || 0)),
+      coupon: r.coupon_code,
+      customer_name: r.detail_name || null,
+      target: r.target_email || r.target_phone || null,
+      created_at: r.created_at,
+      closed_at: r.closed_at
+    }));
+
+    if (!doConfirm) {
+      return res.json({
+        ok: true,
+        preview_only: true,
+        found: preview.length,
+        will_reverse: preview,
+        total_to_remove: preview.reduce((s, p) => s + p.amount, 0),
+        note: "זו תצוגה מקדימה בלבד. כדי לבצע בפועל, הוסף &confirm=yes ל-URL."
+      });
+    }
+
+    // Execute: reverse them back to pending and zero the revenue.
+    const ids = matches.rows.map(r => r.id);
+    const upd = await db.query(
+      `UPDATE advisor_actions
+       SET outcome = 'pending', attributed_revenue = 0, closed_at = NULL,
+           details = details || '{"attribution":"reversed_wrong_date"}'::jsonb
+       WHERE id = ANY($1)
+       RETURNING id`,
+      [ids]
+    );
+    res.json({
+      ok: true,
+      reversed: upd.rows.length,
+      removed_amount: preview.reduce((s, p) => s + p.amount, 0),
+      ids: ids,
+      message: "הזקיפה השגויה בוטלה. המונה יתעדכן."
+    });
+  } catch (err) {
+    console.error("unattribute error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/admin/setup-agent-tables", async (req, res) => {
   const password = req.query.password;
   if (password !== ADMIN_PASSWORD) {
