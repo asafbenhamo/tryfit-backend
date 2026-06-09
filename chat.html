@@ -177,6 +177,8 @@
     padding: 10px; border-radius: 11px; cursor: pointer; transition: background 0.15s;
   }
   .summary-detail-btn:hover { background: #f4f8ff; }
+  .summary-detail-row { display: flex; gap: 8px; }
+  .summary-detail-row .summary-detail-btn { flex: 1; }
   .log-modal {
     position: fixed; inset: 0; background: rgba(10,20,40,0.45); z-index: 1000;
     display: flex; align-items: center; justify-content: center; padding: 16px;
@@ -526,11 +528,11 @@
     html += '<div class="summary-grid">';
     html += '<div class="summary-stat"><div class="num">' + c.orders_today + '</div><div class="lbl">הזמנות היום (' + (c.orders_yesterday) + ' אתמול)</div></div>';
     html += '<div class="summary-stat"><div class="num">₪' + c.revenue_today.toLocaleString() + '</div><div class="lbl">מכירות היום</div></div>';
-    if (did.actions > 0) {
-      html += '<div class="summary-stat"><div class="num">' + did.actions + '</div><div class="lbl">פעולות שבוצעו</div></div>';
+    if (ach.total_conversions > 0 || did.actions > 0) {
+      html += '<div class="summary-stat"><div class="num">' + (ach.total_conversions || 0) + '</div><div class="lbl">פעולות שבוצעו (המרות)</div></div>';
     }
     if (ach.total_revenue > 0 || ach.total_conversions > 0) {
-      html += '<div class="summary-stat"><div class="num green">₪' + ach.total_revenue.toLocaleString() + '</div><div class="lbl">הכנסתי לך סה"כ (' + ach.total_conversions + ' המרות)</div></div>';
+      html += '<div class="summary-stat"><div class="num green">₪' + ach.total_revenue.toLocaleString() + '</div><div class="lbl">הכנסתי לך סה"כ</div></div>';
     }
     html += '</div>';
     if (ach.pending > 0) {
@@ -539,8 +541,11 @@
     if (ach.expired > 0) {
       html += '<div class="summary-line">○ ' + ach.expired + ' פעולות פג תוקפן / לא הומרו (עברו 3 ימים).</div>';
     }
-    if ((did.actions > 0) || (ach.total_actions > 0)) {
-      html += '<button class="summary-detail-btn" onclick="showActionsLog()">📋 פירוט - מה ביצעתי</button>';
+    if ((did.actions > 0) || (ach.total_conversions > 0) || (ach.pending > 0)) {
+      html += '<div class="summary-detail-row">';
+      html += '<button class="summary-detail-btn" onclick="showActionsLog(\'done\')">✅ פירוט - מה שבוצע</button>';
+      html += '<button class="summary-detail-btn" onclick="showActionsLog(\'pending\')">⏳ פירוט - מה שעוד לא בוצע</button>';
+      html += '</div>';
     }
     card.innerHTML = html;
     const slot = document.getElementById('homeSummarySlot');
@@ -548,30 +553,44 @@
     else w.parentNode.insertBefore(card, w);
   }
 
-  /* ===== ACTIONS LOG (detail view of what the agent did) ===== */
-  async function showActionsLog() {
+  /* ===== ACTIONS LOG (detail view) =====
+     mode 'done'    -> only converted actions (closed a loop, brought money)
+     mode 'pending' -> actions not yet converted: still-waiting + expired */
+  async function showActionsLog(mode) {
+    mode = mode || 'done';
+    const title = mode === 'done' ? '✅ מה שבוצע (המרות)' : '⏳ מה שעוד לא בוצע';
     let modal = document.getElementById('actionsLogModal');
-    if (modal) { modal.style.display = 'flex'; return; }
+    if (modal) modal.remove(); // rebuild so switching between the two views works
     modal = document.createElement('div');
     modal.id = 'actionsLogModal';
     modal.className = 'log-modal';
-    modal.innerHTML = '<div class="log-box"><div class="log-head"><span>📋 מה ביצעתי בשבילך</span><button class="log-close" onclick="document.getElementById(\'actionsLogModal\').style.display=\'none\'">✕</button></div><div class="log-body" id="logBody">טוען...</div></div>';
+    modal.innerHTML = '<div class="log-box"><div class="log-head"><span>' + title + '</span><button class="log-close" onclick="document.getElementById(\'actionsLogModal\').style.display=\'none\'">✕</button></div><div class="log-body" id="logBody">טוען...</div></div>';
     document.body.appendChild(modal);
     modal.onclick = (e) => { if (e.target === modal) modal.style.display = 'none'; };
     try {
       const res = await fetch('/api/advisor-actions-log?password=' + encodeURIComponent(PASSWORD));
       const data = await res.json();
       const body = document.getElementById('logBody');
-      if (!data.ok || !data.actions || data.actions.length === 0) {
-        body.innerHTML = '<div class="log-empty">עדיין לא ביצעתי פעולות. ברגע שאתחיל לעבוד על התוכנית, הכל יופיע כאן.</div>';
+      let actions = (data.ok && data.actions) ? data.actions : [];
+      // Filter by mode.
+      if (mode === 'done') {
+        actions = actions.filter(a => a.outcome === 'converted');
+      } else {
+        actions = actions.filter(a => a.outcome === 'pending' || a.outcome === 'expired');
+      }
+      if (actions.length === 0) {
+        const emptyMsg = mode === 'done'
+          ? 'עדיין לא נסגרו המרות. ברגע שלקוחה תקנה בעקבות פנייה, היא תופיע כאן.'
+          : 'אין כרגע פעולות שממתינות לביצוע.';
+        body.innerHTML = '<div class="log-empty">' + emptyMsg + '</div>';
         return;
       }
       let html = '';
-      data.actions.forEach(a => {
+      actions.forEach(a => {
         const date = new Date(a.created_at);
         const dateStr = date.toLocaleDateString('he-IL', { day: 'numeric', month: 'numeric' }) + ' ' + date.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
-        const statusIcon = a.outcome === 'converted' ? '✅' : (a.outcome === 'pending' ? '⏳' : (a.outcome === 'expired' ? '○' : '○'));
-        const statusText = a.outcome === 'converted' ? ('הומר! ₪' + a.revenue.toLocaleString()) : (a.outcome === 'pending' ? 'ממתין לתוצאה' : (a.outcome === 'expired' ? 'פג תוקף / לא הומר' : ''));
+        const statusIcon = a.outcome === 'converted' ? '✅' : (a.outcome === 'pending' ? '⏳' : '○');
+        const statusText = a.outcome === 'converted' ? ('הומר! ₪' + a.revenue.toLocaleString()) : (a.outcome === 'pending' ? 'ממתין לתוצאה' : 'פג תוקף / לא הומר');
         html += '<div class="log-item">';
         html += '<div class="log-item-top">' + statusIcon + ' <span class="log-type">' + esc(a.type_label) + '</span> <span class="log-date">' + dateStr + '</span></div>';
         html += '<div class="log-item-sub">' + esc(a.target);
@@ -581,7 +600,8 @@
       });
       body.innerHTML = html;
     } catch (err) {
-      document.getElementById('logBody').innerHTML = '<div class="log-empty">שגיאה בטעינה</div>';
+      const b = document.getElementById('logBody');
+      if (b) b.innerHTML = '<div class="log-empty">שגיאה בטעינה</div>';
     }
   }
 
