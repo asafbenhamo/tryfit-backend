@@ -504,20 +504,54 @@ app.post("/api/auth/login", express.json(), (req, res) => {
 
     // 770's existing password
     if (pw === ADMIN_PASSWORD) {
-      return res.json({ ok: true, mode: "store", shop: DEFAULT_SHOP, name: "770" });
+      return res.json({ ok: true, mode: "store", shop: DEFAULT_SHOP, name: "770", terms_accepted: true });
     }
 
     // Per-store password
     const shop = resolveShop(req);
     if (shop) {
       const cfg = shopify.getStore(shop);
-      return res.json({ ok: true, mode: "store", shop, name: (cfg && cfg.name) || shop.replace(".myshopify.com", "") });
+      return res.json({
+        ok: true, mode: "store", shop,
+        name: (cfg && cfg.name) || shop.replace(".myshopify.com", ""),
+        terms_accepted: shopify.hasAcceptedTerms(shop)
+      });
     }
 
     return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
   } catch (err) {
     console.error("auth/login error:", err);
     return res.status(500).json({ ok: false, error: "שגיאת שרת בהתחברות" });
+  }
+});
+
+// Record that the current store accepted the terms of service.
+app.post("/api/terms/accept", express.json(), async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const r = await shopify.acceptTerms(shop);
+    res.json(r);
+  } catch (err) {
+    console.error("terms/accept error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Manually remove a customer from the advisor's outreach (opt-out). The merchant
+// uses this when a customer replies "remove me" to their email/WhatsApp. Once
+// here, the advisor will never contact this email/phone again.
+app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const { email, phone } = req.body;
+    if (!email && !phone) return res.status(400).json({ ok: false, error: "צריך מייל או טלפון" });
+    const r = await compliance.addOptOut(shop, { email: email || null, phone: phone || null, reason: "merchant_manual" });
+    res.json({ ok: true, removed: { email: email || null, phone: phone || null }, result: r });
+  } catch (err) {
+    console.error("optout/remove-customer error:", err);
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 

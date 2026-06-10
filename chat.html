@@ -443,6 +443,10 @@
       <button class="new-chat-btn" onclick="newChat()">+ שיחה חדשה</button>
     </div>
     <div class="convo-list" id="convoList"></div>
+    <div class="sidebar-foot" style="margin-top:auto;padding:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:6px">
+      <button onclick="showRemoveCustomer()" style="background:none;border:1px solid var(--border);border-radius:8px;padding:9px;font-size:13px;color:#444;cursor:pointer;text-align:right">🚫 הסר לקוח מהדיוור</button>
+      <button onclick="showTermsModal()" style="background:none;border:none;padding:6px;font-size:12px;color:#888;cursor:pointer;text-align:right">תנאי שימוש</button>
+    </div>
   </aside>
 
   <div class="main" id="main" style="display:none">
@@ -506,6 +510,152 @@
     };
   })();
 
+  // ===== TERMS OF SERVICE (generic placeholder — replace with lawyer text) =====
+  function getTermsHtml() {
+    return `
+      <h3>תנאי שימוש - היועץ החכם</h3>
+      <p>השימוש ביועץ החכם ("השירות") כפוף לתנאים הבאים. אנא קראו אותם בעיון.</p>
+      <p><strong>1. מהות השירות.</strong> השירות הוא כלי תוכנה (SaaS) המסייע לבעל החנות לזהות הזדמנויות שיווקיות, לנסח הודעות, ולנהל פניות ללקוחות. השירות הוא ספק הכלי בלבד; בעל החנות הוא השולח בפועל של ההודעות ונושא באחריות המלאה לשימוש בהן.</p>
+      <p><strong>2. הסכמת לקוחות לדיוור.</strong> בעל החנות מצהיר ומתחייב כי קיבל מכל לקוח שאליו נשלחת הודעה את ההסכמה הנדרשת על פי דין לקבלת דיוור פרסומי, לרבות בערוץ הספציפי (מייל, WhatsApp, SMS). באחריות בעל החנות לוודא שטופס ההרשמה שלו כיסה את הערוצים הרלוונטיים.</p>
+      <p><strong>3. בקשות הסרה.</strong> על פי דין, לקוח רשאי לבקש הסרה מהדיוור בכל עת. בעל החנות מתחייב לטפל בכל בקשת הסרה המגיעה אליו (לרבות תשובות להודעות מייל או WhatsApp) באופן מיידי, ולהזין את הלקוח לרשימת ההסרה בשירות באמצעות הכלי הייעודי. השירות לא יפנה שוב ללקוח שהוזן לרשימת ההסרה.</p>
+      <p><strong>4. אחריות.</strong> בעל החנות נושא באחריות המלאה והבלעדית לכל שימוש בשירות, לרבות תוכן ההודעות, עיתוין, וחוקיותן. ספק השירות לא יישא באחריות לכל נזק, תביעה או קנס הנובעים משימוש שאינו תואם את הדין.</p>
+      <p><strong>5. ערוץ WhatsApp.</strong> שליחת הודעות WhatsApp כפופה לתנאי השימוש של WhatsApp/Meta. בעל החנות אחראי לעמוד בהם, לרבות שימוש בהסכמה מתאימה ובמספר עסקי תקין.</p>
+      <p style="color:#888;font-size:12px;margin-top:16px">נוסח זה הוא ראשוני וכללי, ויוחלף בנוסח משפטי מחייב. אישור התנאים מהווה הסכמה לפעול לפיהם.</p>
+    `;
+  }
+
+  function showTermsGate(storeName) {
+    $('gatePass').style.display = 'none';
+    document.querySelector('#gate button').style.display = 'none';
+    const sp = $('storePicker'); if (sp) sp.style.display = 'none';
+    let box = document.getElementById('termsGate');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'termsGate';
+      box.style.cssText = 'margin-top:14px;text-align:right;max-width:520px';
+      $('gate').appendChild(box);
+    }
+    box.innerHTML =
+      '<div style="max-height:300px;overflow-y:auto;background:#f8f9fc;border:1px solid #e3e8f3;border-radius:12px;padding:16px;font-size:13.5px;line-height:1.7;color:#333">'
+      + getTermsHtml() + '</div>'
+      + '<label style="display:flex;gap:8px;align-items:flex-start;margin:14px 2px;font-size:14px;cursor:pointer">'
+      + '<input type="checkbox" id="termsChk" style="margin-top:3px"> קראתי ואני מאשר/ת את תנאי השימוש</label>'
+      + '<button id="termsAcceptBtn" style="width:100%;padding:12px;border:none;border-radius:10px;background:#0a6fe0;color:#fff;font-size:15px;font-weight:600;cursor:pointer;opacity:.5" disabled>המשך ליועץ</button>'
+      + '<div class="err" id="termsErr" style="color:#d33;font-size:13px;min-height:16px;margin-top:6px"></div>';
+    box.style.display = 'block';
+    const chk = document.getElementById('termsChk');
+    const btn = document.getElementById('termsAcceptBtn');
+    chk.onchange = () => { btn.disabled = !chk.checked; btn.style.opacity = chk.checked ? '1' : '.5'; };
+    btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = 'רושם...';
+      try {
+        const res = await fetch('/api/terms/accept', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: PASSWORD, shop: SELECTED_SHOP || undefined })
+        });
+        const d = await res.json();
+        if (!d.ok) { document.getElementById('termsErr').textContent = d.error || 'שגיאה'; btn.disabled = false; btn.textContent = 'המשך ליועץ'; return; }
+        box.style.display = 'none';
+        enterAdvisor(storeName);
+      } catch (e) {
+        document.getElementById('termsErr').textContent = 'שגיאה בשמירה';
+        btn.disabled = false; btn.textContent = 'המשך ליועץ';
+      }
+    };
+  }
+
+  // Show terms again from inside the advisor (read-only, via the menu).
+  function showTermsModal() {
+    let m = document.getElementById('termsModal');
+    if (m) { m.style.display = 'flex'; return; }
+    m = document.createElement('div');
+    m.id = 'termsModal';
+    m.className = 'log-modal';
+    m.innerHTML = '<div class="log-box"><div class="log-head"><span>תנאי שימוש</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'termsModal\').style.display=\'none\'">✕</button></div>'
+      + '<div class="log-body" style="text-align:right;line-height:1.7;font-size:13.5px">' + getTermsHtml() + '</div></div>';
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.style.display = 'none'; };
+  }
+
+  // Light pre-send confirmation. The merchant already agreed to the terms at
+  // login, so this is just a friendly "here's what's about to happen" — no
+  // checkbox, no blocking. A small footnote reminds them about consent.
+  function confirmSendGate(count, channel, onConfirm) {
+    const channelLabel = channel === 'whatsapp' ? 'WhatsApp' : (channel === 'email' ? 'אימייל' : 'הודעות');
+    let m = document.getElementById('sendConsentModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'sendConsentModal';
+    m.className = 'log-modal';
+    m.style.display = 'flex';
+    m.innerHTML =
+      '<div class="log-box" style="max-width:420px">'
+      + '<div class="log-head"><span>אישור שליחה</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'sendConsentModal\').remove()">✕</button></div>'
+      + '<div class="log-body" style="text-align:right;line-height:1.7">'
+      + '<p style="font-size:15.5px">להכין <strong>' + count + '</strong> הודעות ' + channelLabel + ' ל-<strong>' + count + '</strong> לקוחות?</p>'
+      + '<div style="display:flex;gap:8px;margin-top:14px">'
+      + '<button id="consentGo" style="flex:1;padding:12px;border:none;border-radius:10px;background:#16a34a;color:#fff;font-weight:600;cursor:pointer">כן, להכין</button>'
+      + '<button onclick="document.getElementById(\'sendConsentModal\').remove()" style="padding:12px 18px;border:1px solid #ddd;border-radius:10px;background:#fff;cursor:pointer">ביטול</button>'
+      + '</div>'
+      + '<p style="font-size:11.5px;color:#aaa;margin-top:12px;line-height:1.5">* בשליחה את/ה מאשר/ת שללקוחות אלה יש הסכמה לקבל הודעות ' + channelLabel + ', בהתאם לתנאי השימוש.</p>'
+      + '</div></div>';
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.remove(); };
+    document.getElementById('consentGo').onclick = () => { m.remove(); onConfirm(); };
+  }
+
+  // Manual opt-out: merchant enters a customer's email/phone to remove them from
+  // all future outreach (e.g. after the customer replied "remove me").
+  function showRemoveCustomer() {
+    let m = document.getElementById('removeCustModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'removeCustModal';
+    m.className = 'log-modal';
+    m.style.display = 'flex';
+    m.innerHTML =
+      '<div class="log-box" style="max-width:420px">'
+      + '<div class="log-head"><span>🚫 הסרת לקוח מהדיוור</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'removeCustModal\').remove()">✕</button></div>'
+      + '<div class="log-body" style="text-align:right;line-height:1.6">'
+      + '<p style="font-size:13.5px;color:#555">אם לקוח/ה ביקש/ה להפסיק לקבל הודעות, הזן/י כאן את המייל או הטלפון. היועץ לא יפנה אליו/ה שוב.</p>'
+      + '<input id="rcEmail" type="email" placeholder="אימייל (אופציונלי)" style="width:100%;padding:10px;margin:8px 0;border:1px solid #ddd;border-radius:8px;font-size:14px">'
+      + '<input id="rcPhone" type="tel" placeholder="טלפון (אופציונלי)" style="width:100%;padding:10px;margin:0 0 8px;border:1px solid #ddd;border-radius:8px;font-size:14px">'
+      + '<button id="rcGo" style="width:100%;padding:11px;border:none;border-radius:9px;background:#d33;color:#fff;font-weight:600;cursor:pointer">הסר מהדיוור</button>'
+      + '<div id="rcMsg" style="font-size:13px;min-height:18px;margin-top:8px"></div>'
+      + '</div></div>';
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.remove(); };
+    document.getElementById('rcGo').onclick = async () => {
+      const email = document.getElementById('rcEmail').value.trim();
+      const phone = document.getElementById('rcPhone').value.trim();
+      const msg = document.getElementById('rcMsg');
+      if (!email && !phone) { msg.style.color = '#d33'; msg.textContent = 'הזן מייל או טלפון'; return; }
+      const btn = document.getElementById('rcGo');
+      btn.disabled = true; btn.textContent = 'מסיר...';
+      try {
+        const res = await fetch('/api/optout/remove-customer', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: PASSWORD, email: email || null, phone: phone || null })
+        });
+        const d = await res.json();
+        if (d.ok) {
+          msg.style.color = '#16a34a';
+          msg.textContent = '✅ הלקוח הוסר מהדיוור. לא נפנה אליו שוב.';
+          document.getElementById('rcEmail').value = '';
+          document.getElementById('rcPhone').value = '';
+        } else {
+          msg.style.color = '#d33'; msg.textContent = d.error || 'שגיאה';
+        }
+      } catch (e) {
+        msg.style.color = '#d33'; msg.textContent = 'שגיאה בהסרה';
+      }
+      btn.disabled = false; btn.textContent = 'הסר מהדיוור';
+    };
+  }
+
   async function unlock() {
     const pass = $('gatePass').value.trim();
     if (!pass) { $('gateErr').textContent = 'הזיני סיסמה'; return; }
@@ -526,7 +676,11 @@
         showStorePicker(data.stores || []);
       } else {
         SELECTED_SHOP = ''; // store login: password identifies the store
-        enterAdvisor(data.name || '');
+        if (data.terms_accepted === false) {
+          showTermsGate(data.name || '');
+        } else {
+          enterAdvisor(data.name || '');
+        }
       }
     } catch (err) {
       $('gateErr').textContent = 'שגיאה בהתחברות: ' + (err.message || '');
@@ -819,6 +973,9 @@
   async function executeAgentPlan(wrap) {
     const checks = [...wrap.querySelectorAll('.task-check:checked')].map(c => parseInt(c.value));
     if (checks.length === 0) { alert('סמן לפחות מהלך אחד'); return; }
+    confirmSendGate(checks.length, 'whatsapp', () => runAgentPlanExec(wrap, checks));
+  }
+  async function runAgentPlanExec(wrap, checks) {
     const btn = wrap.querySelector('#execPlanBtn');
     btn.disabled = true; btn.textContent = 'מפעיל את הסוכן...';
     try {
@@ -1232,7 +1389,8 @@
     const cancelBtn = card.querySelector('.action-cancel');
     const resultDiv = card.querySelector('.action-result');
     cancelBtn.onclick = () => card.remove();
-    approveBtn.onclick = async () => {
+    const custCount = (f.customers || '').split(';;').filter(Boolean).length || 0;
+    approveBtn.onclick = () => confirmSendGate(custCount, 'whatsapp', async () => {
       approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'מתחיל...';
       try {
         const res = await fetch('/api/campaign/start', {
@@ -1262,7 +1420,7 @@
         resultDiv.className = 'action-result error';
         resultDiv.innerHTML = '❌ שגיאה: ' + err.message;
       }
-    };
+    });
   }
   async function pollCampaign(id, total, el) {
     let done = false;
@@ -1420,7 +1578,7 @@
     const cancelBtn = card.querySelector('.action-cancel');
     const resultDiv = card.querySelector('.action-result');
     cancelBtn.onclick = () => card.remove();
-    approveBtn.onclick = async () => {
+    approveBtn.onclick = () => confirmSendGate(carts.length, 'whatsapp', async () => {
       approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'בונה את כל העגלות...';
       try {
         const payload = carts.map(f => ({
@@ -1476,7 +1634,7 @@
         resultDiv.className = 'action-result error';
         resultDiv.innerHTML = '❌ שגיאה: ' + err.message;
       }
-    };
+    });
   }
   function renderActionCard(action, container) {
     const f = action.fields;

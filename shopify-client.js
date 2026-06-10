@@ -30,9 +30,12 @@ async function ensureStoreTable() {
         display_name  TEXT,
         public_domain TEXT,
         active        BOOLEAN DEFAULT TRUE,
+        terms_accepted_at TIMESTAMPTZ,
         created_at    TIMESTAMPTZ DEFAULT NOW()
       )
     `);
+    // For tables created before this column existed.
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ`).catch(()=>{});
   } catch (err) {
     console.error('⚠️  [stores] ensureStoreTable failed:', err.message);
   }
@@ -42,7 +45,7 @@ async function ensureStoreTable() {
 async function loadStores() {
   try {
     await ensureStoreTable();
-    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active FROM advisor_stores WHERE active = TRUE`);
+    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at FROM advisor_stores WHERE active = TRUE`);
     storeCache.clear();
     for (const row of r.rows) {
       storeCache.set(row.shop_domain.toLowerCase().trim(), {
@@ -50,7 +53,8 @@ async function loadStores() {
         password: row.advisor_password,
         name: row.display_name,
         public_domain: row.public_domain,
-        active: row.active
+        active: row.active,
+        terms_accepted_at: row.terms_accepted_at
       });
     }
     console.log(`🏪 [stores] loaded ${storeCache.size} store(s) from DB`);
@@ -84,6 +88,26 @@ async function upsertStore({ shop_domain, access_token, advisor_password, displa
 function getStore(shopDomain) {
   if (!shopDomain) return null;
   return storeCache.get(shopDomain.toLowerCase().trim()) || null;
+}
+
+// Has this store accepted the terms of service? 770 (env) is treated as accepted.
+function hasAcceptedTerms(shopDomain) {
+  const domain = (shopDomain || '').toLowerCase().trim();
+  if (SHOP_TOKEN_MAP[domain]) return true; // 770 / env stores: implicitly accepted
+  const s = storeCache.get(domain);
+  return !!(s && s.terms_accepted_at);
+}
+
+// Record that a store accepted the terms (idempotent).
+async function acceptTerms(shopDomain) {
+  const domain = (shopDomain || '').toLowerCase().trim();
+  if (SHOP_TOKEN_MAP[domain]) return { ok: true, already: true }; // 770: nothing to store
+  await db.query(
+    `UPDATE advisor_stores SET terms_accepted_at = NOW() WHERE shop_domain = $1 AND terms_accepted_at IS NULL`,
+    [domain]
+  );
+  await loadStores();
+  return { ok: true };
 }
 
 // List all known stores (env-based 770 + DB-backed), for admin/onboarding views.
@@ -1254,6 +1278,8 @@ module.exports = {
   upsertStore,
   getStore,
   listStores,
+  hasAcceptedTerms,
+  acceptTerms,
   ensureStoreTable,
   findCustomerByEmail,
   findCustomerByPhone,
