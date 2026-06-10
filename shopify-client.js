@@ -31,11 +31,15 @@ async function ensureStoreTable() {
         public_domain TEXT,
         active        BOOLEAN DEFAULT TRUE,
         terms_accepted_at TIMESTAMPTZ,
+        d360_api_key  TEXT,
+        wa_language   TEXT DEFAULT 'he',
         created_at    TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-    // For tables created before this column existed.
+    // For tables created before these columns existed.
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ`).catch(()=>{});
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS d360_api_key TEXT`).catch(()=>{});
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS wa_language TEXT DEFAULT 'he'`).catch(()=>{});
   } catch (err) {
     console.error('⚠️  [stores] ensureStoreTable failed:', err.message);
   }
@@ -45,7 +49,7 @@ async function ensureStoreTable() {
 async function loadStores() {
   try {
     await ensureStoreTable();
-    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at FROM advisor_stores WHERE active = TRUE`);
+    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at, d360_api_key, wa_language FROM advisor_stores WHERE active = TRUE`);
     storeCache.clear();
     for (const row of r.rows) {
       storeCache.set(row.shop_domain.toLowerCase().trim(), {
@@ -54,7 +58,9 @@ async function loadStores() {
         name: row.display_name,
         public_domain: row.public_domain,
         active: row.active,
-        terms_accepted_at: row.terms_accepted_at
+        terms_accepted_at: row.terms_accepted_at,
+        d360_api_key: row.d360_api_key,
+        wa_language: row.wa_language || 'he'
       });
     }
     console.log(`🏪 [stores] loaded ${storeCache.size} store(s) from DB`);
@@ -82,6 +88,28 @@ async function upsertStore({ shop_domain, access_token, advisor_password, displa
   );
   await loadStores();
   return { ok: true, shop_domain: domain };
+}
+
+// Set a store's 360dialog WhatsApp API key (and optional template language).
+async function setWhatsAppConfig(shopDomain, { d360_api_key, wa_language }) {
+  const domain = (shopDomain || '').toLowerCase().trim();
+  await ensureStoreTable();
+  await db.query(
+    `UPDATE advisor_stores
+     SET d360_api_key = COALESCE($2, d360_api_key),
+         wa_language  = COALESCE($3, wa_language)
+     WHERE shop_domain = $1`,
+    [domain, d360_api_key || null, wa_language || null]
+  );
+  await loadStores();
+  return { ok: true };
+}
+
+// Get a store's WhatsApp config (api key + language), or null.
+function getWhatsAppConfig(shopDomain) {
+  const s = getStore(shopDomain);
+  if (!s) return null;
+  return { d360_api_key: s.d360_api_key || null, wa_language: s.wa_language || 'he' };
 }
 
 // Return the store config (from DB cache) for a domain, or null.
@@ -1280,6 +1308,8 @@ module.exports = {
   listStores,
   hasAcceptedTerms,
   acceptTerms,
+  setWhatsAppConfig,
+  getWhatsAppConfig,
   ensureStoreTable,
   findCustomerByEmail,
   findCustomerByPhone,

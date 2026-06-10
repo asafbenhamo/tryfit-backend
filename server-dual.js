@@ -14,6 +14,8 @@ const aiBrain = require("./ai-brain");
 const dailySummary = require("./daily-summary");
 const insightsEngine = require("./insights-engine");
 const creditsEngine = require("./credits-engine");
+const waTemplates = require("./wa-templates");
+const whatsappSender = require("./whatsapp-sender");
 const mailer = require("./mailer");
 const compliance = require("./compliance");
 const agentEngine = require("./agent-engine");
@@ -606,6 +608,79 @@ app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
 
 // ====== WhatsApp credits ======
 // (WhatsApp credit endpoints are defined above as /api/credits/* using creditsEngine.)
+
+// ===== WhatsApp config + templates (multi-store) =====
+
+// Admin/master: set a store's 360dialog API key (+ optional template language).
+// /admin/set-wa-key?password=...&shop=xxx.myshopify.com&key=...&language=he
+app.get("/admin/set-wa-key", async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
+    const shop = (req.query.shop || "").toLowerCase().trim();
+    const key = req.query.key || null;
+    const language = req.query.language || null;
+    if (!shop || !key) return res.status(400).json({ ok: false, error: "צריך shop ו-key" });
+    await shopify.setWhatsAppConfig(shop, { d360_api_key: key, wa_language: language });
+    res.json({ ok: true, shop, configured: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Admin/master: add/update an approved template (the "mirror" of a 360dialog template).
+//   POST { password, shop, action_type, template_name, language, sample_text,
+//          body_vars:[...], url_button_base, url_button_label, site_url }
+app.post("/api/wa-templates/upsert", express.json(), async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const b = req.body || {};
+    const shop = (b.shop || "").toLowerCase().trim();
+    if (!shop) return res.status(400).json({ ok: false, error: "חסר shop" });
+    const r = await waTemplates.upsertTemplate({
+      shop_domain: shop,
+      action_type: b.action_type,
+      template_name: b.template_name,
+      language: b.language || 'he',
+      sample_text: b.sample_text || '',
+      body_vars: Array.isArray(b.body_vars) ? b.body_vars : [],
+      url_button_base: b.url_button_base || null,
+      url_button_label: b.url_button_label || null,
+      site_url: b.site_url || null
+    });
+    res.json(r);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Admin/master: remove (soft-delete) a template.
+app.post("/api/wa-templates/remove", express.json(), async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const shop = (req.body.shop || "").toLowerCase().trim();
+    const name = req.body.template_name;
+    if (!shop || !name) return res.status(400).json({ ok: false, error: "צריך shop ו-template_name" });
+    const r = await waTemplates.removeTemplate(shop, name);
+    res.json(r);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Any logged-in store: list its approved templates (optionally by action_type).
+// The merchant uses this to PREVIEW what an automatic send looks like.
+app.get("/api/wa-templates/list", async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const actionType = req.query.action_type || null;
+    const list = await waTemplates.listTemplates(shop, actionType);
+    const configured = whatsappSender.isConfigured(shop);
+    res.json({ ok: true, configured, templates: list });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 app.post("/api/chat", express.json(), async (req, res) => {
   try {
@@ -2568,6 +2643,8 @@ app.listen(PORT, async () => {
       await shopify.loadStores();
       // WhatsApp credits tables (balance + ledger per shop).
       await creditsEngine.ensureCreditsTables();
+      // WhatsApp approved-template registry.
+      await waTemplates.ensureTemplatesTable();
       const enabledShops = featureFlags.getDataCollectionShops();
       for (const shop of enabledShops) {
         if (shopify.hasTokenForShop(shop)) {
