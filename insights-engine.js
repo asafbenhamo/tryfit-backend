@@ -10,6 +10,26 @@
 
 const db = require('./database');
 
+// How many days to rest a customer after we've contacted them (created a coupon /
+// reached out), so the insights don't keep surfacing the same people every day.
+const CONTACTED_COOLDOWN_DAYS = 4;
+
+// SQL fragment: exclude customers we've already contacted in the cooldown window.
+// Matches on email OR phone against advisor_actions (ignoring report rows).
+// $1 must be shop_domain. Use as: AND <emailCol> NOT IN (...) style via NOT EXISTS.
+function notRecentlyContacted(emailCol, phoneCol) {
+  return `NOT EXISTS (
+    SELECT 1 FROM advisor_actions aa
+    WHERE aa.shop_domain = $1
+      AND aa.action_type NOT IN ('daily_report','morning_report')
+      AND aa.created_at >= NOW() - INTERVAL '${CONTACTED_COOLDOWN_DAYS} days'
+      AND (
+        (aa.target_email IS NOT NULL AND aa.target_email = ${emailCol}) OR
+        (aa.target_phone IS NOT NULL AND aa.target_phone = ${phoneCol})
+      )
+  )`;
+}
+
 // ---------- helper: run a detector safely ----------
 async function runDetector(label, fn) {
   try {
@@ -35,6 +55,7 @@ async function detectDormantVIPs(shop) {
          AND orders_count >= 2
          AND last_order_date IS NOT NULL
          AND last_order_date < NOW() - INTERVAL '45 days'
+         AND ${notRecentlyContacted('email', 'phone')}
        ORDER BY total_spent DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
@@ -114,6 +135,7 @@ async function detectHighValueAbandoned(shop) {
          AND email IS NOT NULL AND email <> ''
          AND total_price >= 400
          AND shopify_created_at >= NOW() - INTERVAL '7 days'
+         AND ${notRecentlyContacted('email', 'phone')}
        ORDER BY total_price DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]

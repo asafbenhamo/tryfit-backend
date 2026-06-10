@@ -1390,7 +1390,7 @@ app.get("/api/chat/list", async (req, res) => {
        FROM chat_conversations
        WHERE shop_domain = $1
        ORDER BY updated_at DESC
-       LIMIT 100`,
+       LIMIT 10`,
       [shop]
     );
     res.json({ ok: true, conversations: result.rows });
