@@ -610,6 +610,21 @@
     document.getElementById('consentGo').onclick = () => { m.remove(); onConfirm(); };
   }
 
+  // Load this store's WhatsApp auto-send config (is it configured? which templates?).
+  // Used to decide whether to even OFFER manual/automatic on campaigns.
+  window._waConfigured = false;
+  window._waTemplates = [];
+  async function loadWaConfig() {
+    try {
+      const res = await fetch('/api/wa-templates/list?password=' + encodeURIComponent(PASSWORD));
+      const d = await res.json();
+      if (d.ok) {
+        window._waConfigured = !!d.configured && (d.templates || []).length > 0;
+        window._waTemplates = d.templates || [];
+      }
+    } catch (e) { window._waConfigured = false; }
+  }
+
   // Load and show the store's WhatsApp credit balance in the sidebar.
   async function loadCreditsBalance() {
     try {
@@ -832,6 +847,7 @@
     loadInsights();
     loadMoneyCounter();
     loadCreditsBalance();
+    loadWaConfig();
     setInterval(loadMoneyCounter, 60000);
   }
 
@@ -1477,6 +1493,15 @@
     if (f.amount_ils) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ₪' + esc(f.amount_ils) + '</div>';
     else if (f.percentage) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ' + esc(f.percentage) + '%</div>';
     if (totalValue > 0) html += '<div class="action-row"><span>צפי הכנסה:</span> ₪' + Math.round(totalValue).toLocaleString() + '</div>';
+    // Show send-mode toggle ONLY for stores that have automatic WhatsApp configured.
+    const autoAvailable = window._waConfigured && window._waTemplates && window._waTemplates.length > 0;
+    if (autoAvailable) {
+      html += '<div class="action-row" style="margin-top:6px"><span>אופן שליחה:</span></div>';
+      html += '<div class="send-mode" style="display:flex;gap:8px;margin:4px 0 8px">'
+        + '<label style="flex:1;border:1px solid #dbe6fb;border-radius:8px;padding:8px;cursor:pointer;font-size:13px;text-align:center"><input type="radio" name="sendmode_' + camp.id + '" value="manual" checked> ידני (אני שולח)</label>'
+        + '<label style="flex:1;border:1px solid #dbe6fb;border-radius:8px;padding:8px;cursor:pointer;font-size:13px;text-align:center"><input type="radio" name="sendmode_' + camp.id + '" value="auto"> אוטומטי 💬</label>'
+        + '</div>';
+    }
     html += '<div class="action-btns"><button class="action-approve">הפעל קמפיין ←</button><button class="action-cancel">בטל</button></div>';
     html += '<div class="action-result" style="display:none"></div>';
     card.innerHTML = html;
@@ -1486,8 +1511,18 @@
     const cancelBtn = card.querySelector('.action-cancel');
     const resultDiv = card.querySelector('.action-result');
     cancelBtn.onclick = () => card.remove();
-    const custCount = (f.customers || '').split(';;').filter(Boolean).length || 0;
-    approveBtn.onclick = () => confirmSendGate(custCount, 'whatsapp', async () => {
+    const custCount = (f.customers || '').split(';;').filter(Boolean).length || custs.length || 0;
+
+    function getSendMode() {
+      const sel = card.querySelector('input[name="sendmode_' + camp.id + '"]:checked');
+      return sel ? sel.value : 'manual';
+    }
+
+    approveBtn.onclick = () => {
+      const mode = getSendMode();
+      if (mode === 'auto') { startAutoCampaign(card, f, custs, custCount, approveBtn, cancelBtn, resultDiv); return; }
+      // ---- manual (existing flow) ----
+      confirmSendGate(custCount, 'whatsapp', async () => {
       approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'מתחיל...';
       try {
         const res = await fetch('/api/campaign/start', {
@@ -1517,7 +1552,102 @@
         resultDiv.className = 'action-result error';
         resultDiv.innerHTML = '❌ שגיאה: ' + err.message;
       }
+      });
+    };
+  }
+
+  // Automatic campaign: pick an approved template, preview it, send via the API
+  // (deducts credits). Only reachable when the store is WhatsApp-configured.
+  function startAutoCampaign(card, f, custs, custCount, approveBtn, cancelBtn, resultDiv) {
+    // Filter templates relevant to this campaign's action type (fallback: all).
+    const actionType = f.type || '';
+    let templates = (window._waTemplates || []);
+    const matched = templates.filter(t => t.action_type === mapCampaignToAction(actionType));
+    const choices = matched.length > 0 ? matched : templates;
+    if (choices.length === 0) {
+      resultDiv.style.display = 'block';
+      resultDiv.className = 'action-result error';
+      resultDiv.innerHTML = '❌ אין תבניות מאושרות. פנה למנהל המערכת.';
+      return;
+    }
+    // Build a template picker modal.
+    let m = document.getElementById('tplPickModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'tplPickModal';
+    m.className = 'log-modal';
+    m.style.display = 'flex';
+    let h = '<div class="log-box" style="max-width:460px"><div class="log-head"><span>💬 בחר תבנית לשליחה אוטומטית</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'tplPickModal\').remove()">✕</button></div>'
+      + '<div class="log-body" style="text-align:right">'
+      + '<p style="font-size:13px;color:#888;margin-bottom:10px">' + custCount + ' לקוחות · ' + custCount + ' קרדיטים יידרשו (יתרה: ' + (window._creditsBalance||0) + ')</p>';
+    choices.forEach((t, i) => {
+      h += '<label style="display:block;border:1px solid #dbe6fb;border-radius:10px;padding:12px;margin:8px 0;cursor:pointer">'
+        + '<input type="radio" name="tplpick" value="' + esc(t.template_name) + '"' + (i===0?' checked':'') + '> <strong>' + esc(t.template_name) + '</strong>'
+        + '<div style="font-size:12.5px;color:#555;margin-top:6px;white-space:pre-wrap">' + esc(t.sample_text || '') + '</div></label>';
     });
+    h += '<div style="display:flex;gap:8px;margin-top:12px">'
+      + '<button id="tplSendBtn" style="flex:1;padding:12px;border:none;border-radius:10px;background:#16a34a;color:#fff;font-weight:600;cursor:pointer">שלח אוטומטית ל-' + custCount + ' לקוחות</button>'
+      + '<button onclick="document.getElementById(\'tplPickModal\').remove()" style="padding:12px 18px;border:1px solid #ddd;border-radius:10px;background:#fff;cursor:pointer">ביטול</button>'
+      + '</div></div></div>';
+    m.innerHTML = h;
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.remove(); };
+    document.getElementById('tplSendBtn').onclick = async () => {
+      const sel = m.querySelector('input[name="tplpick"]:checked');
+      if (!sel) return;
+      const templateName = sel.value;
+      m.remove();
+      approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'שולח אוטומטית...';
+      try {
+        const res = await fetch('/api/campaign/send-auto', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            password: PASSWORD,
+            template_name: templateName,
+            segment: custs,
+            campaign_type: f.type || 'campaign',
+            percentage: f.percentage ? parseInt(f.percentage) : (f.amount_ils ? null : 10),
+            amount_ils: f.amount_ils ? parseFloat(f.amount_ils) : null,
+            combine: (f.combine === 'no' || f.combine === 'false') ? 'no' : 'yes',
+            days_valid: f.days ? parseInt(f.days) : 2
+          })
+        });
+        const data = await res.json();
+        card.querySelector('.action-btns').style.display = 'none';
+        resultDiv.style.display = 'block';
+        if (!data.ok) {
+          resultDiv.className = 'action-result error';
+          if (data.reason === 'no_credits' || data.error === 'no_credits') {
+            resultDiv.innerHTML = '⚠️ נגמרו הקרדיטים לשליחת WhatsApp.<br><button onclick="showBuyCredits()" style="margin-top:8px;padding:8px 14px;border:none;border-radius:8px;background:#0a6fe0;color:#fff;cursor:pointer">טען קרדיטים</button>';
+          } else {
+            resultDiv.innerHTML = '❌ ' + (data.error || 'שגיאה');
+          }
+          return;
+        }
+        resultDiv.className = 'action-result success';
+        let msg = '✅ נשלחו ' + data.sent + ' הודעות אוטומטית!';
+        if (data.failed > 0) msg += ' (' + data.failed + ' נכשלו)';
+        if (data.stopped_no_credits) msg += '<br>⚠️ נגמרו הקרדיטים באמצע — ' + (custCount - data.sent) + ' לא נשלחו. <button onclick="showBuyCredits()" style="margin-top:6px;padding:6px 12px;border:none;border-radius:8px;background:#0a6fe0;color:#fff;cursor:pointer">טען עוד</button>';
+        msg += '<br><span style="font-size:12px;color:#888">יתרת קרדיטים: ' + (data.balance != null ? data.balance : '—') + '</span>';
+        resultDiv.innerHTML = msg;
+        loadCreditsBalance();
+        loadMoneyCounter();
+      } catch (err) {
+        resultDiv.style.display = 'block';
+        resultDiv.className = 'action-result error';
+        resultDiv.innerHTML = '❌ שגיאה: ' + err.message;
+      }
+    };
+  }
+
+  // Map a campaign segment/type to one of the 4 template action types.
+  function mapCampaignToAction(type) {
+    const t = (type || '').toLowerCase();
+    if (t.includes('cart') || t.includes('עגל')) return 'abandoned_cart';
+    if (t.includes('product') || t.includes('מוצר')) return 'product_rec';
+    if (t.includes('personal') || t.includes('מותאמת')) return 'personalized_cart';
+    return 'win_back';
   }
   async function pollCampaign(id, total, el) {
     let done = false;

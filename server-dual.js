@@ -577,6 +577,90 @@ app.get("/api/wa-credits/all", async (req, res) => {
   }
 });
 
+// Automatic WhatsApp campaign: create a personal coupon per customer and send an
+// APPROVED template to each via 360dialog. Deducts 1 credit per send; stops if
+// credits run out. Only works when the store is WhatsApp-configured.
+app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    if (!whatsappSender.isConfigured(shop)) return res.status(400).json({ ok: false, error: "החנות לא מוגדרת לשליחה אוטומטית" });
+
+    const b = req.body || {};
+    const templateName = b.template_name;
+    const segment = Array.isArray(b.segment) ? b.segment : [];
+    if (!templateName) return res.status(400).json({ ok: false, error: "חסרה תבנית" });
+    if (segment.length === 0) return res.status(400).json({ ok: false, error: "אין לקוחות" });
+
+    const tpl = await waTemplates.getTemplate(shop, templateName);
+    if (!tpl) return res.status(400).json({ ok: false, error: "תבנית לא נמצאה" });
+
+    const percentage = b.percentage ? parseInt(b.percentage) : null;
+    const amount_ils = b.amount_ils ? parseFloat(b.amount_ils) : null;
+    const combine = (b.combine === 'no' || b.combine === 'false') ? false : true;
+    const days_valid = b.days_valid ? parseInt(b.days_valid) : 2;
+
+    // Build recipients: each gets a personal coupon, and template body params
+    // filled in the order declared by tpl.body_vars (e.g. ['name','coupon','discount']).
+    const recipients = [];
+    for (const c of segment) {
+      const phone = c.phone || null;
+      if (!phone) continue; // auto-send is WhatsApp only
+      const name = c.name || (c.first_name || '');
+      // Personal coupon
+      let coupon = null;
+      try {
+        const namePart = (name || 'VIP').replace(/[^A-Za-z]/g, "").toUpperCase().slice(0, 8) || "VIP";
+        const suffix = Math.floor(Math.random() * 900 + 100);
+        const cc = await shopify.createDiscountCode(shop, {
+          percentage: percentage || (amount_ils ? null : 10),
+          amount_ils: amount_ils || null,
+          code: `${namePart}${percentage || Math.round(amount_ils) || ''}${suffix}`,
+          days_valid, combine,
+          title: `יועץ אוטומטי: ${name}`
+        });
+        if (cc.ok) coupon = cc.code;
+      } catch (e) {}
+
+      const discountLabel = amount_ils ? (`₪${Math.round(amount_ils)}`) : `${percentage || 10}%`;
+      const valueMap = { name: name || 'לקוחה', coupon: coupon || '', discount: discountLabel };
+      const params = (tpl.body_vars || []).map(v => valueMap[v] != null ? valueMap[v] : '');
+
+      recipients.push({
+        to: phone,
+        params,
+        meta: { campaign_type: b.campaign_type || 'campaign', customer_name: name, coupon }
+      });
+
+      // Log the action for attribution (mirror of manual path).
+      await db.query(
+        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [shop, b.campaign_type || 'campaign', c.email || null, phone,
+         JSON.stringify({ customer_name: name, auto: true, template: templateName }), coupon]
+      ).catch(e => console.error("auto-campaign log:", e.message));
+    }
+
+    if (recipients.length === 0) return res.json({ ok: false, error: "אין לקוחות עם טלפון" });
+
+    const result = await whatsappSender.sendTemplateBatch(shop, templateName, recipients, {});
+    if (!result.ok && result.reason === 'not_configured') {
+      return res.status(400).json({ ok: false, error: "החנות לא מוגדרת" });
+    }
+    const balance = await creditsEngine.getBalance(shop);
+    res.json({
+      ok: true,
+      sent: result.sent || 0,
+      failed: result.failed || 0,
+      stopped_no_credits: !!result.stopped_no_credits,
+      balance
+    });
+  } catch (err) {
+    console.error("send-auto error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post("/api/terms/accept", express.json(), async (req, res) => {
   try {
     const shop = resolveShop(req);
