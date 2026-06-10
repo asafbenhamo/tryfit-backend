@@ -14,7 +14,6 @@ const aiBrain = require("./ai-brain");
 const dailySummary = require("./daily-summary");
 const insightsEngine = require("./insights-engine");
 const creditsEngine = require("./credits-engine");
-const waCredits = require("./wa-credits");
 const mailer = require("./mailer");
 const compliance = require("./compliance");
 const agentEngine = require("./agent-engine");
@@ -606,66 +605,7 @@ app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
 });
 
 // ====== WhatsApp credits ======
-// Balance + price for the current store (used by the "credits" UI).
-app.get("/api/wa-credits/balance", async (req, res) => {
-  try {
-    const shop = resolveShop(req);
-    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
-    const balance = await waCredits.getBalance(shop);
-    res.json({ ok: true, balance, price_per_credit: waCredits.PRICE_PER_CREDIT_ILS });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// Recent credit ledger (top-ups + sends) for the current store.
-app.get("/api/wa-credits/ledger", async (req, res) => {
-  try {
-    const shop = resolveShop(req);
-    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
-    const rows = await waCredits.getLedger(shop, 50);
-    res.json({ ok: true, ledger: rows });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// MANUAL top-up by admin/master (today's funding path; later replaced by billing).
-// /admin/wa-credits/add?password=...&shop=...&amount=100
-app.get("/admin/wa-credits/add", async (req, res) => {
-  try {
-    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
-    const shop = (req.query.shop || "").toLowerCase().trim();
-    const amount = parseInt(req.query.amount);
-    if (!shop || !amount) return res.status(400).json({ ok: false, error: "צריך shop ו-amount" });
-    const balance = await waCredits.addCredits(shop, amount, "manual_topup", { by: "admin" });
-    res.json({ ok: true, shop, added: amount, balance });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// Store self-service "buy credits" — STUB for now. Returns the price so the UI can
-// show it. When a payment processor is connected, this is where the charge happens
-// and addCredits() is called on success. Today it does NOT add credits.
-app.post("/api/wa-credits/purchase", express.json(), async (req, res) => {
-  try {
-    const shop = resolveShop(req);
-    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
-    const amount = parseInt(req.body.amount) || 0;
-    // TODO: charge the card via payment processor, then on success: waCredits.addCredits(...)
-    return res.json({
-      ok: false,
-      pending_billing: true,
-      message: "תשלום מקוון יחובר בקרוב. בינתיים פנה אלינו לטעינת קרדיטים.",
-      amount,
-      price_per_credit: waCredits.PRICE_PER_CREDIT_ILS,
-      total_ils: Math.round(amount * waCredits.PRICE_PER_CREDIT_ILS * 100) / 100
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
+// (WhatsApp credit endpoints are defined above as /api/credits/* using creditsEngine.)
 
 app.post("/api/chat", express.json(), async (req, res) => {
   try {
@@ -2628,7 +2568,6 @@ app.listen(PORT, async () => {
       await shopify.loadStores();
       // WhatsApp credits tables (balance + ledger per shop).
       await creditsEngine.ensureCreditsTables();
-      await waCredits.ensureTables();
       const enabledShops = featureFlags.getDataCollectionShops();
       for (const shop of enabledShops) {
         if (shopify.hasTokenForShop(shop)) {
