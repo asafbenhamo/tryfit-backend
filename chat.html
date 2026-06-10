@@ -416,12 +416,25 @@
 </head>
 <body>
   <div class="gate" id="gate">
-    <h2>היועץ החכם של 770</h2>
+    <h2 id="gateTitle">היועץ החכם</h2>
     <p>העוזר העסקי החכם שלך</p>
     <input type="password" id="gatePass" placeholder="סיסמת גישה" autocomplete="off">
     <button onclick="unlock()">כניסה</button>
     <div class="err" id="gateErr"></div>
+    <div id="storePicker" style="display:none;margin-top:18px">
+      <p style="margin-bottom:10px;font-weight:600">בחר חנות:</p>
+      <div id="storeList"></div>
+      <button onclick="backToLogin()" style="margin-top:12px;background:#eee;color:#333">חזרה</button>
+    </div>
   </div>
+
+  <style>
+    #storeList .store-pick { display:block; width:100%; text-align:right; margin:6px 0; padding:12px 14px;
+      border:1px solid #dbe6fb; background:#fff; color:#0a6fe0; border-radius:11px; cursor:pointer;
+      font-family:'Heebo',sans-serif; font-size:15px; font-weight:600; }
+    #storeList .store-pick:hover { background:#f4f8ff; }
+    #switchStoreBtn { font-size:12px; color:#0a6fe0; background:none; border:none; cursor:pointer; }
+  </style>
 
   <div class="overlay" id="overlay" onclick="closeSidebar()"></div>
 
@@ -436,8 +449,8 @@
     <div class="header">
       <button class="menu-btn" onclick="toggleSidebar()">☰</button>
       <div class="header-text">
-        <h1>היועץ החכם</h1>
-        <p><span class="status-dot"></span> מחובר לחנות 770</p>
+        <h1 id="hdrTitle">היועץ החכם</h1>
+        <p><span class="status-dot"></span> <span id="hdrStore">מחובר לחנות 770</span></p>
       </div>
       <div class="money-counter" id="moneyCounter" title="כמה כסף היועץ עשה לך מאז שהתחלתם">
         <div class="money-label">הכסף שעשיתי לך</div>
@@ -461,19 +474,104 @@
 
 <script>
   let PASSWORD = '';
+  let SELECTED_SHOP = '';   // set when master picks a store; appended to all API calls
+  let IS_MASTER = false;
   let history = [];
   let busy = false;
   let currentConvoId = null;
   const $ = id => document.getElementById(id);
 
-  function unlock() {
+  // When a master has selected a store, automatically attach ?shop=/shop: to our
+  // own API requests so the backend serves the right store. Store logins don't
+  // need this (their password already identifies the store).
+  (function patchFetchForShop(){
+    const _fetch = window.fetch;
+    window.fetch = function(url, opts) {
+      try {
+        if (SELECTED_SHOP && typeof url === 'string' && url.indexOf('/api/') === 0) {
+          // query-string requests
+          if (url.indexOf('password=') > -1 && url.indexOf('shop=') === -1) {
+            url += (url.indexOf('?') > -1 ? '&' : '?') + 'shop=' + encodeURIComponent(SELECTED_SHOP);
+          }
+          // JSON body requests
+          if (opts && opts.body && typeof opts.body === 'string') {
+            try {
+              const b = JSON.parse(opts.body);
+              if (b && b.password && !b.shop) { b.shop = SELECTED_SHOP; opts.body = JSON.stringify(b); }
+            } catch(e) {}
+          }
+        }
+      } catch(e) {}
+      return _fetch(url, opts);
+    };
+  })();
+
+  async function unlock() {
     const pass = $('gatePass').value.trim();
     if (!pass) { $('gateErr').textContent = 'הזיני סיסמה'; return; }
-    PASSWORD = pass;
+    $('gateErr').textContent = '';
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pass })
+      });
+      const data = await res.json();
+      if (!data.ok) { $('gateErr').textContent = data.error || 'סיסמה שגויה'; return; }
+      PASSWORD = pass;
+      if (data.mode === 'master') {
+        IS_MASTER = true;
+        showStorePicker(data.stores || []);
+      } else {
+        SELECTED_SHOP = ''; // store login: password identifies the store
+        enterAdvisor(data.name || '');
+      }
+    } catch (err) {
+      $('gateErr').textContent = 'שגיאה בהתחברות';
+    }
+  }
+
+  function showStorePicker(stores) {
+    $('gatePass').style.display = 'none';
+    document.querySelector('#gate button').style.display = 'none';
+    const picker = $('storePicker');
+    const list = $('storeList');
+    list.innerHTML = '';
+    if (stores.length === 0) {
+      list.innerHTML = '<p style="color:#888">אין חנויות רשומות עדיין.</p>';
+    }
+    stores.forEach(s => {
+      const b = document.createElement('button');
+      b.className = 'store-pick';
+      b.textContent = s.name + '  ·  ' + s.shop_domain;
+      b.onclick = () => { SELECTED_SHOP = s.shop_domain; enterAdvisor(s.name); };
+      list.appendChild(b);
+    });
+    picker.style.display = 'block';
+  }
+
+  function backToLogin() {
+    $('storePicker').style.display = 'none';
+    $('gatePass').style.display = '';
+    $('gatePass').value = '';
+    document.querySelector('#gate button').style.display = '';
+    IS_MASTER = false; PASSWORD = ''; SELECTED_SHOP = '';
+  }
+
+  function enterAdvisor(storeName) {
+    if (storeName) {
+      $('gateTitle').textContent = 'היועץ החכם של ' + storeName;
+      const hdrTitle = document.getElementById('hdrTitle');
+      if (hdrTitle) hdrTitle.textContent = 'יועץ אישי - ' + storeName;
+      const hdrStore = document.getElementById('hdrStore');
+      if (hdrStore) hdrStore.textContent = 'מחובר לחנות ' + storeName;
+      document.title = 'יועץ אישי - ' + storeName;
+    }
     $('gate').style.display = 'none';
     $('sidebar').style.display = 'flex';
     $('main').style.display = 'flex';
     $('input').focus();
+    // Master can switch stores: show a small button in the sidebar.
+    if (IS_MASTER) addSwitchStoreButton();
     loadConvoList();
     setupHomeSections();
     loadDailySummary();
@@ -481,6 +579,17 @@
     loadInsights();
     loadMoneyCounter();
     setInterval(loadMoneyCounter, 60000);
+  }
+
+  function addSwitchStoreButton() {
+    if (document.getElementById('switchStoreBtn')) return;
+    const sb = $('sidebar');
+    if (!sb) return;
+    const btn = document.createElement('button');
+    btn.id = 'switchStoreBtn';
+    btn.textContent = '🔄 החלף חנות';
+    btn.onclick = () => { location.reload(); };
+    sb.insertBefore(btn, sb.firstChild);
   }
 
   function clearHomeScreen() {
