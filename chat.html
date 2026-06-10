@@ -1086,15 +1086,64 @@
   async function executeAgentPlan(wrap) {
     const checks = [...wrap.querySelectorAll('.task-check:checked')].map(c => parseInt(c.value));
     if (checks.length === 0) { alert('סמן לפחות מהלך אחד'); return; }
-    confirmSendGate(checks.length, 'whatsapp', () => runAgentPlanExec(wrap, checks));
+    const autoAvail = window._waConfigured && window._waTemplates && window._waTemplates.length > 0;
+    if (autoAvail) {
+      // Offer manual vs automatic for the agent's sends.
+      askAgentSendMode(checks.length, (mode, templateName) => {
+        confirmSendGate(checks.length, 'whatsapp', () => runAgentPlanExec(wrap, checks, mode, templateName));
+      });
+    } else {
+      confirmSendGate(checks.length, 'whatsapp', () => runAgentPlanExec(wrap, checks, 'manual', null));
+    }
   }
-  async function runAgentPlanExec(wrap, checks) {
+
+  // Ask the merchant: should the agent send manually (wa.me squares) or
+  // automatically (via approved template)? If auto, pick a template.
+  function askAgentSendMode(count, cb) {
+    let m = document.getElementById('agentModeModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'agentModeModal';
+    m.className = 'log-modal';
+    m.style.display = 'flex';
+    const tpls = window._waTemplates || [];
+    let tplOpts = tpls.map((t, i) => '<option value="' + esc(t.template_name) + '"' + (i===0?' selected':'') + '>' + esc(t.template_name) + '</option>').join('');
+    m.innerHTML = '<div class="log-box" style="max-width:420px"><div class="log-head"><span>איך הסוכן ישלח?</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'agentModeModal\').remove()">✕</button></div>'
+      + '<div class="log-body" style="text-align:right;line-height:1.7">'
+      + '<button id="agentManual" style="width:100%;padding:12px;border:1px solid #dbe6fb;border-radius:10px;background:#fff;cursor:pointer;margin-bottom:8px;font-size:14px">ידני — אכין לך הודעות ואתה שולח</button>'
+      + '<div style="border:1px solid #dbe6fb;border-radius:10px;padding:12px">'
+      + '<div style="font-size:13px;margin-bottom:6px">אוטומטי 💬 (' + count + ' קרדיטים, יתרה: ' + (window._creditsBalance||0) + ')</div>'
+      + '<select id="agentTpl" style="width:100%;padding:9px;border:1px solid #ddd;border-radius:8px;margin-bottom:8px">' + tplOpts + '</select>'
+      + '<div id="agentTplSample" style="font-size:12.5px;color:#555;background:#f8f9fc;border-radius:8px;padding:10px;margin-bottom:8px;white-space:pre-wrap;text-align:right"></div>'
+      + '<button id="agentAuto" style="width:100%;padding:11px;border:none;border-radius:9px;background:#16a34a;color:#fff;font-weight:600;cursor:pointer">שלח אוטומטית</button>'
+      + '</div></div></div>';
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.remove(); };
+    // Show a sample of the selected template (preview on one customer).
+    function updateAgentSample() {
+      const name = document.getElementById('agentTpl').value;
+      const t = (window._waTemplates || []).find(x => x.template_name === name);
+      const el = document.getElementById('agentTplSample');
+      if (el) el.textContent = t && t.sample_text ? ('דוגמה: ' + t.sample_text) : '';
+    }
+    document.getElementById('agentTpl').onchange = updateAgentSample;
+    updateAgentSample();
+    document.getElementById('agentManual').onclick = () => { m.remove(); cb('manual', null); };
+    document.getElementById('agentAuto').onclick = () => {
+      const tpl = document.getElementById('agentTpl').value;
+      m.remove(); cb('auto', tpl);
+    };
+  }
+
+  async function runAgentPlanExec(wrap, checks, sendMode, templateName) {
     const btn = wrap.querySelector('#execPlanBtn');
     btn.disabled = true; btn.textContent = 'מפעיל את הסוכן...';
     try {
       const res = await fetch('/api/agent/approve-plan', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: PASSWORD, plan_id: window._agentPlanId, selected_task_ids: checks })
+        body: JSON.stringify({ password: PASSWORD, plan_id: window._agentPlanId, selected_task_ids: checks,
+          send_mode: sendMode || 'manual', template_name: templateName || null })
       });
       const data = await res.json();
       if (data.ok) {
@@ -1796,6 +1845,14 @@
     let html = '<div class="action-head">🛍️ ' + carts.length + ' עגלות מותאמות מוכנות להפעלה</div>';
     html += '<div class="action-row"><span>לקוחות:</span> ' + carts.length + '</div>';
     html += '<div class="action-row"><span>הנחה אישית לכל אחת:</span> ' + esc(carts[0].discount || '15') + '%</div>';
+    const autoAvailableCart = window._waConfigured && window._waTemplates && window._waTemplates.length > 0;
+    const cartModeId = 'cm_' + Math.random().toString(36).slice(2, 8);
+    if (autoAvailableCart) {
+      html += '<div class="send-mode" style="display:flex;gap:8px;margin:6px 0 8px">'
+        + '<label style="flex:1;border:1px solid #dbe6fb;border-radius:8px;padding:8px;cursor:pointer;font-size:13px;text-align:center"><input type="radio" name="' + cartModeId + '" value="manual" checked> ידני (אני שולח)</label>'
+        + '<label style="flex:1;border:1px solid #dbe6fb;border-radius:8px;padding:8px;cursor:pointer;font-size:13px;text-align:center"><input type="radio" name="' + cartModeId + '" value="auto"> אוטומטי 💬</label>'
+        + '</div>';
+    }
     html += '<div class="action-btns"><button class="action-approve">בנה את כל העגלות ←</button><button class="action-cancel">בטל</button></div>';
     html += '<div class="action-result" style="display:none"></div>';
     card.innerHTML = html;
@@ -1805,7 +1862,20 @@
     const cancelBtn = card.querySelector('.action-cancel');
     const resultDiv = card.querySelector('.action-result');
     cancelBtn.onclick = () => card.remove();
-    approveBtn.onclick = () => confirmSendGate(carts.length, 'whatsapp', async () => {
+    function cartSendMode() {
+      const sel = card.querySelector('input[name="' + cartModeId + '"]:checked');
+      return sel ? sel.value : 'manual';
+    }
+    approveBtn.onclick = () => {
+      if (cartSendMode() === 'auto') {
+        // Map carts to a segment and reuse the automatic template sender.
+        const segment = carts.map(c => ({ name: c.name || '', phone: c.phone || null, email: c.email || null,
+          est_value: 0 }));
+        const fakeFields = { type: 'personalized_cart', percentage: carts[0].discount || 15 };
+        startAutoCampaign(card, fakeFields, segment, carts.length, approveBtn, cancelBtn, resultDiv);
+        return;
+      }
+      confirmSendGate(carts.length, 'whatsapp', async () => {
       approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'בונה את כל העגלות...';
       try {
         const payload = carts.map(f => ({
@@ -1861,7 +1931,8 @@
         resultDiv.className = 'action-result error';
         resultDiv.innerHTML = '❌ שגיאה: ' + err.message;
       }
-    });
+      });
+    };
   }
   function renderActionCard(action, container) {
     const f = action.fields;
@@ -1874,6 +1945,15 @@
     if (f.coupon) html += '<div class="action-row"><span>קופון:</span> ' + esc(f.coupon) + '% הנחה' + (f.coupon_days ? ', ' + esc(f.coupon_days) + ' ימים' : '') + '</div>';
     if (f.subject) html += '<div class="action-row"><span>נושא:</span> ' + esc(f.subject) + '</div>';
     if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\{COUPON\}/g,'[הקוד האישי שלך]').replace(/\n/g,'<br>') + '</div>';
+    const isWa = (f.phone && f.phone.length >= 8);
+    const autoAvailAction = isWa && window._waConfigured && window._waTemplates && window._waTemplates.length > 0;
+    const actModeId = 'am_' + Math.random().toString(36).slice(2, 8);
+    if (autoAvailAction) {
+      html += '<div class="send-mode" style="display:flex;gap:8px;margin:6px 0 8px">'
+        + '<label style="flex:1;border:1px solid #dbe6fb;border-radius:8px;padding:8px;cursor:pointer;font-size:13px;text-align:center"><input type="radio" name="' + actModeId + '" value="manual" checked> ידני (אני שולח)</label>'
+        + '<label style="flex:1;border:1px solid #dbe6fb;border-radius:8px;padding:8px;cursor:pointer;font-size:13px;text-align:center"><input type="radio" name="' + actModeId + '" value="auto"> אוטומטי 💬</label>'
+        + '</div>';
+    }
     html += '<div class="action-btns"><button class="action-approve">אשר ושלח ←</button><button class="action-cancel">בטל</button></div>';
     html += '<div class="action-result" style="display:none"></div>';
     card.innerHTML = html;
@@ -1884,7 +1964,17 @@
     const resultDiv = card.querySelector('.action-result');
 
     cancelBtn.onclick = () => { card.remove(); };
+    function actSendMode() {
+      const sel = card.querySelector('input[name="' + actModeId + '"]:checked');
+      return sel ? sel.value : 'manual';
+    }
     approveBtn.onclick = async () => {
+      if (actSendMode() === 'auto') {
+        const segment = [{ name: f.name || '', phone: f.phone || null, email: f.email || null, est_value: 0 }];
+        startAutoCampaign(card, { type: f.type || 'win_back', percentage: f.coupon ? parseInt(f.coupon) : null,
+          amount_ils: f.coupon_ils ? parseFloat(f.coupon_ils) : null }, segment, 1, approveBtn, cancelBtn, resultDiv);
+        return;
+      }
       approveBtn.disabled = true; cancelBtn.disabled = true;
       approveBtn.textContent = 'שולח...';
       try {

@@ -1069,17 +1069,74 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
   }
 });
 
-app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
+// Preview what the agent WILL send before it sends: full recipient list across
+// the selected moves + one sample message. Used for the "who & what" confirm step.
+app.post("/api/agent/preview-plan", express.json(), async (req, res) => {
   try {
     if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const { plan_id, selected_task_ids } = req.body;
+    if (!plan_id || !Array.isArray(selected_task_ids) || selected_task_ids.length === 0) {
+      return res.status(400).json({ ok: false, error: "חסר plan_id או מהלכים" });
+    }
+    const tasksR = await db.query(
+      `SELECT * FROM agent_tasks WHERE plan_id=$1 AND id = ANY($2) ORDER BY priority ASC`,
+      [plan_id, selected_task_ids]
+    );
+    let recipients = [];
+    let sample = null;
+    for (const task of tasksR.rows) {
+      const seg = await agentEngine.pullSegment(shop, task);
+      const tmpl = agentEngine.templateFor(task);
+      for (const c of seg) {
+        recipients.push({
+          name: c.name || '—',
+          phone: c.phone || null,
+          email: c.email || null,
+          channel: (c.phone && c.phone.length >= 8) ? 'whatsapp' : 'email',
+          move: task.move_type
+        });
+      }
+      if (!sample && seg.length > 0) {
+        const first = seg[0];
+        sample = {
+          to: first.name || '—',
+          subject: tmpl.subject,
+          body: tmpl.body.replace(/\{NAME\}/g, first.name || 'לקוחה').replace(/\{COUPON\}/g, '[קוד אישי]')
+        };
+      }
+    }
+    const waCount = recipients.filter(r => r.channel === 'whatsapp').length;
+    const emailCount = recipients.filter(r => r.channel === 'email').length;
+    res.json({ ok: true, total: recipients.length, wa_count: waCount, email_count: emailCount, recipients, sample });
+  } catch (err) {
+    console.error("preview-plan error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
+  try {
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = resolveShop(req) || DEFAULT_SHOP;
+    const { plan_id, selected_task_ids, send_mode, template_name } = req.body;
     if (!plan_id || !Array.isArray(selected_task_ids)) {
       return res.status(400).json({ ok: false, error: "חסר plan_id או רשימת מהלכים" });
     }
     await db.query(`UPDATE agent_tasks SET selected = (id = ANY($2)) WHERE plan_id=$1`,
       [plan_id, selected_task_ids]);
-    await db.query(`UPDATE agent_plans SET status='approved', approved_at=NOW() WHERE id=$1`, [plan_id]);
+    // Persist the merchant's send choice so the engine knows whether to auto-send.
+    await db.query(
+      `UPDATE agent_plans SET status='approved', approved_at=NOW(),
+         send_mode=$2, template_name=$3 WHERE id=$1`,
+      [plan_id, send_mode || 'manual', template_name || null]
+    ).catch(async () => {
+      // Columns may not exist yet on older tables — add them, then retry.
+      await db.query(`ALTER TABLE agent_plans ADD COLUMN IF NOT EXISTS send_mode TEXT DEFAULT 'manual'`).catch(()=>{});
+      await db.query(`ALTER TABLE agent_plans ADD COLUMN IF NOT EXISTS template_name TEXT`).catch(()=>{});
+      await db.query(`UPDATE agent_plans SET status='approved', approved_at=NOW(), send_mode=$2, template_name=$3 WHERE id=$1`,
+        [plan_id, send_mode || 'manual', template_name || null]).catch(()=>{});
+    });
 
     agentEngine.startPlan(shop, plan_id);
     res.json({ ok: true, started: true, plan_id });
