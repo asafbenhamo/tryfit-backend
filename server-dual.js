@@ -302,6 +302,16 @@ function checkAuth(req, res) {
   return shop;
 }
 
+// Admin gate: only 770's password or the master password (super-admin actions
+// like onboarding stores, backfills, syncs). Regular store passwords are rejected.
+function isAdmin(req) {
+  const pw = extractPassword(req);
+  if (!pw) return false;
+  if (pw === ADMIN_PASSWORD) return true;
+  if (MASTER_PASSWORD && pw === MASTER_PASSWORD) return true;
+  return false;
+}
+
 const backfillStatus = {};
 
 // All shop domains the background jobs should process: 770 (env) + DB-backed stores.
@@ -415,7 +425,7 @@ async function startBackfill() {
 app.post("/admin/backfill/run", express.json(), async (req, res) => {
   try {
     const { password, shop } = req.body;
-    if (password !== ADMIN_PASSWORD) {
+    if (!isAdmin(req)) {
       return res.status(401).json({ error: "סיסמה שגויה" });
     }
     if (!shop) {
@@ -457,7 +467,7 @@ app.post("/admin/backfill/run", express.json(), async (req, res) => {
 
 app.get("/admin/backfill/status", (req, res) => {
   const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   const shop = req.query.shop || 'seven770.myshopify.com';
@@ -548,7 +558,7 @@ app.get("/chat", (req, res) => {
 
 app.get("/api/daily-plan", async (req, res) => {
   try {
-    if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const shopName = "770";
     const planPrompt = `בנה לי תוכנית פעולה עסקית להיום כדי להכניס כמה שיותר כסף. אתה מנהל השיווק של החנות.
@@ -566,7 +576,7 @@ app.get("/api/daily-plan", async (req, res) => {
 
 app.get("/api/daily-summary", async (req, res) => {
   try {
-    if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const result = await dailySummary.getDailySummary(shop);
     res.json(result);
@@ -578,7 +588,7 @@ app.get("/api/daily-summary", async (req, res) => {
 
 app.get("/api/insights", async (req, res) => {
   try {
-    if (req.query.password !== ADMIN_PASSWORD) {
+    if (!resolveShop(req)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -593,7 +603,7 @@ app.get("/api/insights", async (req, res) => {
 app.post("/api/coupon/create", express.json(), async (req, res) => {
   try {
     const { password, percentage, code, days_valid, title, usage_limit } = req.body;
-    if (password !== ADMIN_PASSWORD) {
+    if (!resolveShop(req)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -613,7 +623,7 @@ app.post("/api/coupon/create", express.json(), async (req, res) => {
 app.post("/api/send-email", express.json(), async (req, res) => {
   try {
     const { password, to, phone, subject, body, cta_url, cta_label, ignore_hours } = req.body;
-    if (password !== ADMIN_PASSWORD) {
+    if (!resolveShop(req)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     if (!mailer.isConfigured()) {
@@ -674,7 +684,7 @@ app.get("/unsubscribe", async (req, res) => {
 });
 
 app.get("/api/working-hours", (req, res) => {
-  if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   res.json(compliance.workingHoursStatus());
 });
 
@@ -683,7 +693,7 @@ const campaignEngine = require("./campaign-engine");
 app.post("/api/campaign/start", express.json(), async (req, res) => {
   try {
     const { password, campaign_type, segment, template } = req.body;
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     if (!Array.isArray(segment) || segment.length === 0) {
       return res.status(400).json({ ok: false, error: "אין לקוחות בקמפיין" });
@@ -700,7 +710,7 @@ app.post("/api/campaign/start", express.json(), async (req, res) => {
 });
 
 app.get("/api/campaign/status", (req, res) => {
-  if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   const id = req.query.id;
   if (id) {
     const s = campaignEngine.getCampaignStatus(id);
@@ -717,14 +727,14 @@ app.get("/api/campaign/status", (req, res) => {
 });
 
 app.post("/api/campaign/stop", express.json(), (req, res) => {
-  if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   const result = campaignEngine.stopCampaign(req.body.id);
   res.json(result);
 });
 
 app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
   try {
-    if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const today = new Date().toISOString().slice(0, 10);
 
@@ -816,7 +826,7 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
 
 app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
   try {
-    if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const { plan_id, selected_task_ids } = req.body;
     if (!plan_id || !Array.isArray(selected_task_ids)) {
@@ -835,21 +845,21 @@ app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
 });
 
 app.get("/api/agent/plan-status", async (req, res) => {
-  if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   const status = await agentEngine.getPlanStatus(req.query.plan_id);
   if (!status) return res.json({ ok: false, error: "not found" });
   res.json({ ok: true, ...status });
 });
 
 app.post("/api/agent/stop-plan", express.json(), async (req, res) => {
-  if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   const result = await agentEngine.stopPlan(req.body.plan_id);
   res.json(result);
 });
 
 app.post("/api/agent/revise-plan", express.json(), async (req, res) => {
   try {
-    if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const { plan_id, request } = req.body;
     if (!plan_id || !request) return res.status(400).json({ ok: false, error: "חסר plan_id או בקשה" });
@@ -909,7 +919,7 @@ ${tasksJson}
 
 app.get("/api/advisor-actions-log", async (req, res) => {
   try {
-    if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const r = await db.query(
       `SELECT action_type, target_email, target_phone, coupon_code,
@@ -949,7 +959,7 @@ app.get("/api/advisor-actions-log", async (req, res) => {
 
 app.get("/api/advisor-stats", async (req, res) => {
   try {
-    if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const r = await db.query(
       `SELECT
@@ -984,7 +994,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       message_subject, message_body, cta_url, cta_label
     } = req.body;
 
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const result = { ok: true, steps: {} };
 
@@ -1091,7 +1101,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
       message_subject, message_body
     } = req.body;
 
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
 
     if (!Array.isArray(items) || items.length === 0) {
@@ -1191,7 +1201,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
 // ======================
 app.post("/api/cart/build-batch", express.json(), async (req, res) => {
   try {
-    if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const carts = Array.isArray(req.body.carts) ? req.body.carts : [];
     if (carts.length === 0) return res.status(400).json({ ok: false, error: "אין עגלות לבנות" });
@@ -1302,7 +1312,7 @@ app.get("/apple-touch-icon.png", (req, res) => {
 app.post("/api/chat/save", express.json(), async (req, res) => {
   try {
     const { id, title, messages, password } = req.body;
-    if (password !== ADMIN_PASSWORD) {
+    if (!resolveShop(req)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -1337,7 +1347,7 @@ app.post("/api/chat/save", express.json(), async (req, res) => {
 
 app.get("/api/chat/list", async (req, res) => {
   try {
-    if (req.query.password !== ADMIN_PASSWORD) {
+    if (!resolveShop(req)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -1358,7 +1368,7 @@ app.get("/api/chat/list", async (req, res) => {
 
 app.get("/api/chat/get/:id", async (req, res) => {
   try {
-    if (req.query.password !== ADMIN_PASSWORD) {
+    if (!resolveShop(req)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -1380,7 +1390,7 @@ app.get("/api/chat/get/:id", async (req, res) => {
 
 app.delete("/api/chat/delete/:id", async (req, res) => {
   try {
-    if (req.query.password !== ADMIN_PASSWORD) {
+    if (!resolveShop(req)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -1397,7 +1407,7 @@ app.delete("/api/chat/delete/:id", async (req, res) => {
 
 app.get("/admin/sync-products", async (req, res) => {
   const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
   }
   try {
@@ -1410,7 +1420,7 @@ app.get("/admin/sync-products", async (req, res) => {
 
 app.get("/admin/sync-checkouts", async (req, res) => {
   const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   try {
@@ -2167,7 +2177,7 @@ app.post("/webhooks/orders/create", express.raw({ type: "application/json" }), h
 // Call once: /admin/fix-data?password=Ariel770%21
 // ======================
 app.get("/admin/fix-data", async (req, res) => {
-  if (req.query.password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -2213,7 +2223,7 @@ app.get("/admin/fix-data", async (req, res) => {
 // List: /admin/list-stores?password=...
 // ======================
 app.get("/admin/add-store", async (req, res) => {
-  if (req.query.password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   const { shop, token, advisor_password, name, public_domain } = req.query;
@@ -2243,7 +2253,7 @@ app.get("/admin/add-store", async (req, res) => {
 });
 
 app.get("/admin/list-stores", (req, res) => {
-  if (req.query.password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   res.json({ ok: true, stores: shopify.listStores() });
@@ -2255,7 +2265,7 @@ app.get("/admin/list-stores", (req, res) => {
 // Call: /admin/run-attribution?password=...
 // ======================
 app.get("/admin/run-attribution", async (req, res) => {
-  if (req.query.password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   try {
@@ -2274,7 +2284,7 @@ app.get("/admin/run-attribution", async (req, res) => {
 // Without confirm=yes it only SHOWS what would be reversed (safe).
 // ======================
 app.get("/admin/unattribute", async (req, res) => {
-  if (req.query.password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -2355,7 +2365,7 @@ app.get("/admin/unattribute", async (req, res) => {
 
 app.get("/admin/setup-agent-tables", async (req, res) => {
   const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   try {
@@ -2403,7 +2413,7 @@ app.get("/admin/setup-agent-tables", async (req, res) => {
 
 app.get("/admin/register-webhooks", async (req, res) => {
   const password = req.query.password;
-  if (password !== ADMIN_PASSWORD) {
+  if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   const shop = resolveShop(req) || DEFAULT_SHOP;
