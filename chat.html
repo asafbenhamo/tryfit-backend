@@ -613,7 +613,7 @@
   // Load and show the store's WhatsApp credit balance in the sidebar.
   async function loadCreditsBalance() {
     try {
-      const res = await fetch('/api/credits/balance?password=' + encodeURIComponent(PASSWORD));
+      const res = await fetch('/api/wa-credits/balance?password=' + encodeURIComponent(PASSWORD));
       const d = await res.json();
       if (!d.ok) return;
       const el = document.getElementById('creditsBalance');
@@ -766,7 +766,7 @@
     document.body.appendChild(m);
     m.onclick = (e) => { if (e.target === m) m.remove(); };
     try {
-      const res = await fetch('/api/credits/all?password=' + encodeURIComponent(PASSWORD));
+      const res = await fetch('/api/wa-credits/all?password=' + encodeURIComponent(PASSWORD));
       const d = await res.json();
       const body = document.getElementById('manageCreditsBody');
       if (!d.ok) { body.innerHTML = '<p style="color:#d33">' + (d.error || 'שגיאה') + '</p>'; return; }
@@ -789,7 +789,7 @@
     const amt = parseInt(document.getElementById('amt_' + shop).value);
     if (!amt || amt <= 0) { alert('הזן כמות'); return; }
     try {
-      const res = await fetch('/api/credits/add', {
+      const res = await fetch('/api/wa-credits/add', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: PASSWORD, shop, amount: amt })
       });

@@ -528,7 +528,7 @@ app.post("/api/auth/login", express.json(), (req, res) => {
 
 // Record that the current store accepted the terms of service.
 // Current credit balance for the resolved store (any logged-in store).
-app.get("/api/credits/balance", async (req, res) => {
+app.get("/api/wa-credits/balance", async (req, res) => {
   try {
     const shop = resolveShop(req);
     if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
@@ -541,7 +541,7 @@ app.get("/api/credits/balance", async (req, res) => {
 
 // Admin/master: add credits to a store (manual top-up for now).
 //   POST { password, shop, amount }
-app.post("/api/credits/add", express.json(), async (req, res) => {
+app.post("/api/wa-credits/add", express.json(), async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
     const shop = (req.body.shop || "").toLowerCase().trim();
@@ -556,7 +556,7 @@ app.post("/api/credits/add", express.json(), async (req, res) => {
 });
 
 // Admin/master: balances for ALL stores (for the master credit-management view).
-app.get("/api/credits/all", async (req, res) => {
+app.get("/api/wa-credits/all", async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
     const stores = shopify.listStores();
