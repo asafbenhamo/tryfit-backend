@@ -515,7 +515,10 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: pass })
       });
-      const data = await res.json();
+      if (res.status === 404) { $('gateErr').textContent = 'השרת לא עודכן (חסר /api/auth/login). דחוף את server-dual.js'; return; }
+      let data;
+      try { data = await res.json(); }
+      catch (e) { $('gateErr').textContent = 'תשובת שרת לא תקינה (קוד ' + res.status + ')'; return; }
       if (!data.ok) { $('gateErr').textContent = data.error || 'סיסמה שגויה'; return; }
       PASSWORD = pass;
       if (data.mode === 'master') {
@@ -526,7 +529,7 @@
         enterAdvisor(data.name || '');
       }
     } catch (err) {
-      $('gateErr').textContent = 'שגיאה בהתחברות';
+      $('gateErr').textContent = 'שגיאה בהתחברות: ' + (err.message || '');
     }
   }
 

@@ -464,6 +464,53 @@ app.get("/admin/backfill/status", (req, res) => {
   res.json({ shop, status: backfillStatus[shop] || null });
 });
 
+// ======================
+// LOGIN: classify a password. Returns:
+//  - { ok:true, mode:'master', stores:[...] }  if it's the master password
+//  - { ok:true, mode:'store', shop, name }      if it's a known store password
+//  - 401                                        if unrecognized
+// The frontend uses this to either show the store picker (master) or go straight in.
+// ======================
+app.post("/api/auth/login", express.json(), (req, res) => {
+  try {
+    const pw = (req.body && req.body.password) || "";
+    if (!pw) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+
+    if (MASTER_PASSWORD && pw === MASTER_PASSWORD) {
+      let stores = [];
+      try {
+        stores = shopify.listStores().map(s => {
+          const cfg = shopify.getStore(s.shop_domain);
+          return {
+            shop_domain: s.shop_domain,
+            name: (cfg && cfg.name) || (s.shop_domain === DEFAULT_SHOP ? "770" : s.shop_domain.replace(".myshopify.com", ""))
+          };
+        });
+      } catch (e) {
+        stores = [{ shop_domain: DEFAULT_SHOP, name: "770" }];
+      }
+      return res.json({ ok: true, mode: "master", stores });
+    }
+
+    // 770's existing password
+    if (pw === ADMIN_PASSWORD) {
+      return res.json({ ok: true, mode: "store", shop: DEFAULT_SHOP, name: "770" });
+    }
+
+    // Per-store password
+    const shop = resolveShop(req);
+    if (shop) {
+      const cfg = shopify.getStore(shop);
+      return res.json({ ok: true, mode: "store", shop, name: (cfg && cfg.name) || shop.replace(".myshopify.com", "") });
+    }
+
+    return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
+  } catch (err) {
+    console.error("auth/login error:", err);
+    return res.status(500).json({ ok: false, error: "שגיאת שרת בהתחברות" });
+  }
+});
+
 app.post("/api/chat", express.json(), async (req, res) => {
   try {
     const { message, history } = req.body;
