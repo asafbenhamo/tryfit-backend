@@ -248,7 +248,70 @@ app.post("/api/consent", express.json(), async (req, res) => {
 });
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "tryfit2026";
+// Master password lets Asaf (super-admin) act on ANY store. With the master
+// password, the target store is taken from the request's `shop` field.
+const MASTER_PASSWORD = process.env.MASTER_PASSWORD || null;
+const DEFAULT_SHOP = "seven770.myshopify.com";
+
+// Pull the password from wherever it arrived (query, body, or header).
+function extractPassword(req) {
+  return (req.query && req.query.password)
+      || (req.body && req.body.password)
+      || (req.headers && req.headers['x-advisor-password'])
+      || null;
+}
+
+// Resolve which shop a request is authorized for, based on its password.
+//  - 770's existing ADMIN_PASSWORD  -> seven770 (unchanged, full backward compat)
+//  - a store's own advisor_password -> that store
+//  - MASTER_PASSWORD                -> the store named in req.query/body.shop
+// Returns the shop_domain string, or null if the password is not recognized.
+function resolveShop(req) {
+  const pw = extractPassword(req);
+  if (!pw) return null;
+  // 770 keeps its existing password.
+  if (pw === ADMIN_PASSWORD) return DEFAULT_SHOP;
+  // Master: act on the requested shop.
+  if (MASTER_PASSWORD && pw === MASTER_PASSWORD) {
+    const target = (req.query && req.query.shop) || (req.body && req.body.shop) || null;
+    return target ? target.toLowerCase().trim() : null;
+  }
+  // Per-store password: find the store whose advisor_password matches.
+  try {
+    for (const s of shopify.listStores()) {
+      const cfg = shopify.getStore(s.shop_domain);
+      if (cfg && cfg.password && cfg.password === pw) return s.shop_domain;
+    }
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+// Auth gate: resolves the shop and writes it to res.locals.shop. Returns the
+// shop string if authorized, or null after sending a 401 (caller should return).
+function checkAuth(req, res) {
+  const shop = resolveShop(req);
+  if (!shop) {
+    res.status(401).json({ error: "גישה נדחתה" });
+    return null;
+  }
+  if (!shopify.hasTokenForShop(shop)) {
+    res.status(400).json({ error: "החנות לא מחוברת (אין token)" });
+    return null;
+  }
+  res.locals.shop = shop;
+  return shop;
+}
+
 const backfillStatus = {};
+
+// All shop domains the background jobs should process: 770 (env) + DB-backed stores.
+function allActiveShops() {
+  try {
+    return shopify.listStores().map(s => s.shop_domain);
+  } catch (e) {
+    return [DEFAULT_SHOP];
+  }
+}
 
 app.get("/admin/backfill", (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -403,15 +466,16 @@ app.get("/admin/backfill/status", (req, res) => {
 
 app.post("/api/chat", express.json(), async (req, res) => {
   try {
-    const { message, history, password } = req.body;
-    if (password !== ADMIN_PASSWORD) {
+    const { message, history } = req.body;
+    const shop = resolveShop(req);
+    if (!shop || !shopify.hasTokenForShop(shop)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
     if (!message || !message.trim()) {
       return res.status(400).json({ error: "הודעה ריקה" });
     }
-    const shop = "seven770.myshopify.com";
-    const shopName = "770";
+    const storeCfg = shopify.getStore(shop);
+    const shopName = (storeCfg && storeCfg.name) || (shop === DEFAULT_SHOP ? "770" : shop.replace(".myshopify.com", ""));
     const priorMessages = Array.isArray(history) ? history : [];
     const result = await aiBrain.askBrain(shop, shopName, message, priorMessages);
     const cleanHistory = [
@@ -438,7 +502,7 @@ app.get("/chat", (req, res) => {
 app.get("/api/daily-plan", async (req, res) => {
   try {
     if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const shopName = "770";
     const planPrompt = `בנה לי תוכנית פעולה עסקית להיום כדי להכניס כמה שיותר כסף. אתה מנהל השיווק של החנות.
 חשוב כמו חברת שיווק מובילה: נתח את המצב (עגלות נטושות, VIP שנעלמו, מוצרים חמים, דפוסי קנייה, cross-sell), ובנה תוכנית עם 2-4 מהלכים מתועדפים לפי פוטנציאל הכנסה.
@@ -456,7 +520,7 @@ app.get("/api/daily-plan", async (req, res) => {
 app.get("/api/daily-summary", async (req, res) => {
   try {
     if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const result = await dailySummary.getDailySummary(shop);
     res.json(result);
   } catch (err) {
@@ -470,7 +534,7 @@ app.get("/api/insights", async (req, res) => {
     if (req.query.password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const result = await insightsEngine.getInsights(shop);
     res.json(result);
   } catch (err) {
@@ -485,7 +549,7 @@ app.post("/api/coupon/create", express.json(), async (req, res) => {
     if (password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const result = await shopify.createDiscountCode(shop, {
       percentage, code, days_valid, title, usage_limit
     });
@@ -512,7 +576,7 @@ app.post("/api/send-email", express.json(), async (req, res) => {
       return res.status(400).json({ ok: false, error: "חסר נמען / נושא / תוכן" });
     }
 
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const gate = await compliance.canContactCustomer(shop, { email: to, phone }, { ignoreHours: !!ignore_hours });
     if (!gate.allowed) {
       return res.status(200).json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail });
@@ -541,9 +605,10 @@ app.post("/api/send-email", express.json(), async (req, res) => {
 
 app.post("/api/optout/add", express.json(), async (req, res) => {
   try {
-    const { password, email, phone, reason } = req.body;
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const result = await compliance.addOptOut("seven770.myshopify.com", { email, phone, reason });
+    const { email, phone, reason } = req.body;
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+    const result = await compliance.addOptOut(shop, { email, phone, reason });
     res.json(result);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -553,7 +618,9 @@ app.post("/api/optout/add", express.json(), async (req, res) => {
 app.get("/unsubscribe", async (req, res) => {
   const email = req.query.email;
   if (!email) return res.status(400).send("Missing email");
-  await compliance.addOptOut("seven770.myshopify.com", { email, reason: "email_link" });
+  // Shop can be carried in the unsubscribe link (?shop=...); fall back to 770.
+  const shop = (req.query.shop || DEFAULT_SHOP).toLowerCase().trim();
+  await compliance.addOptOut(shop, { email, reason: "email_link" });
   res.send(`<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
     <style>body{font-family:Arial,sans-serif;text-align:center;padding:60px 20px;color:#333}</style></head>
     <body><h2>הוסרת מרשימת התפוצה</h2><p>לא תקבל/י יותר הודעות שיווקיות. תודה.</p></body></html>`);
@@ -570,7 +637,7 @@ app.post("/api/campaign/start", express.json(), async (req, res) => {
   try {
     const { password, campaign_type, segment, template } = req.body;
     if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     if (!Array.isArray(segment) || segment.length === 0) {
       return res.status(400).json({ ok: false, error: "אין לקוחות בקמפיין" });
     }
@@ -599,7 +666,7 @@ app.get("/api/campaign/status", (req, res) => {
       finished_at: s.finished_at
     } } });
   }
-  res.json({ ok: true, active: campaignEngine.listActiveCampaigns("seven770.myshopify.com") });
+  res.json({ ok: true, active: campaignEngine.listActiveCampaigns(resolveShop(req) || DEFAULT_SHOP) });
 });
 
 app.post("/api/campaign/stop", express.json(), (req, res) => {
@@ -611,7 +678,7 @@ app.post("/api/campaign/stop", express.json(), (req, res) => {
 app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
   try {
     if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const today = new Date().toISOString().slice(0, 10);
 
     const moves = [];
@@ -703,7 +770,7 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
 app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
   try {
     if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const { plan_id, selected_task_ids } = req.body;
     if (!plan_id || !Array.isArray(selected_task_ids)) {
       return res.status(400).json({ ok: false, error: "חסר plan_id או רשימת מהלכים" });
@@ -736,7 +803,7 @@ app.post("/api/agent/stop-plan", express.json(), async (req, res) => {
 app.post("/api/agent/revise-plan", express.json(), async (req, res) => {
   try {
     if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const { plan_id, request } = req.body;
     if (!plan_id || !request) return res.status(400).json({ ok: false, error: "חסר plan_id או בקשה" });
 
@@ -796,7 +863,7 @@ ${tasksJson}
 app.get("/api/advisor-actions-log", async (req, res) => {
   try {
     if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const r = await db.query(
       `SELECT action_type, target_email, target_phone, coupon_code,
               attributed_revenue, outcome, created_at, closed_at
@@ -836,7 +903,7 @@ app.get("/api/advisor-actions-log", async (req, res) => {
 app.get("/api/advisor-stats", async (req, res) => {
   try {
     if (req.query.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const r = await db.query(
       `SELECT
          COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome = 'converted'), 0)::numeric(12,2) AS total_revenue,
@@ -871,7 +938,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
     } = req.body;
 
     if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const result = { ok: true, steps: {} };
 
     const isFixed = !!coupon_ils && parseFloat(coupon_ils) > 0;
@@ -978,7 +1045,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     } = req.body;
 
     if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ ok: false, error: "אין פריטים לעגלה" });
@@ -1078,7 +1145,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
 app.post("/api/cart/build-batch", express.json(), async (req, res) => {
   try {
     if (req.body.password !== ADMIN_PASSWORD) return res.status(401).json({ error: "גישה נדחתה" });
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const carts = Array.isArray(req.body.carts) ? req.body.carts : [];
     if (carts.length === 0) return res.status(400).json({ ok: false, error: "אין עגלות לבנות" });
 
@@ -1191,7 +1258,7 @@ app.post("/api/chat/save", express.json(), async (req, res) => {
     if (password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const msgs = Array.isArray(messages) ? messages : [];
     const safeTitle = (title || "שיחה חדשה").substring(0, 200);
     if (id) {
@@ -1226,7 +1293,7 @@ app.get("/api/chat/list", async (req, res) => {
     if (req.query.password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const result = await db.query(
       `SELECT id, title, updated_at
        FROM chat_conversations
@@ -1247,7 +1314,7 @@ app.get("/api/chat/get/:id", async (req, res) => {
     if (req.query.password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     const result = await db.query(
       `SELECT id, title, messages, updated_at
        FROM chat_conversations
@@ -1269,7 +1336,7 @@ app.delete("/api/chat/delete/:id", async (req, res) => {
     if (req.query.password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
-    const shop = "seven770.myshopify.com";
+    const shop = resolveShop(req) || DEFAULT_SHOP;
     await db.query(
       `DELETE FROM chat_conversations WHERE id = $1 AND shop_domain = $2`,
       [req.params.id, shop]
@@ -1287,7 +1354,7 @@ app.get("/admin/sync-products", async (req, res) => {
     return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
   }
   try {
-    const result = await shopify.syncProducts("seven770.myshopify.com");
+    const result = await shopify.syncProducts(resolveShop(req) || DEFAULT_SHOP);
     res.json(result);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -1300,7 +1367,7 @@ app.get("/admin/sync-checkouts", async (req, res) => {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   try {
-    const result = await shopify.syncAbandonedCheckouts("seven770.myshopify.com");
+    const result = await shopify.syncAbandonedCheckouts(resolveShop(req) || DEFAULT_SHOP);
     res.json(result);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -2056,7 +2123,7 @@ app.get("/admin/fix-data", async (req, res) => {
   if (req.query.password !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
-  const shop = "seven770.myshopify.com";
+  const shop = resolveShop(req) || DEFAULT_SHOP;
   try {
     const badPhones = await db.query(
       `UPDATE store_customers
@@ -2145,7 +2212,7 @@ app.get("/admin/run-attribution", async (req, res) => {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
   try {
-    const result = await attributionEngine.runAttribution("seven770.myshopify.com");
+    const result = await attributionEngine.runAttribution(resolveShop(req) || DEFAULT_SHOP);
     res.json(result);
   } catch (err) {
     console.error("run-attribution error:", err);
@@ -2163,7 +2230,7 @@ app.get("/admin/unattribute", async (req, res) => {
   if (req.query.password !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
-  const shop = "seven770.myshopify.com";
+  const shop = resolveShop(req) || DEFAULT_SHOP;
   const amount = req.query.amount ? parseFloat(req.query.amount) : null;
   const name = (req.query.name || "").trim();
   const doConfirm = req.query.confirm === "yes";
@@ -2292,7 +2359,7 @@ app.get("/admin/register-webhooks", async (req, res) => {
   if (password !== ADMIN_PASSWORD) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
-  const shop = "seven770.myshopify.com";
+  const shop = resolveShop(req) || DEFAULT_SHOP;
   const token = process.env.SHOPIFY_770_TOKEN;
   if (!token) return res.json({ ok: false, reason: "no token" });
 
@@ -2377,75 +2444,79 @@ app.listen(PORT, async () => {
   }
 
   if (process.env.DATABASE_URL) {
-    const PRODUCT_SYNC_SHOP = "seven770.myshopify.com";
     const runProductSync = async () => {
-      if (!shopify.hasTokenForShop(PRODUCT_SYNC_SHOP)) return;
-      try {
-        const r = await shopify.syncProducts(PRODUCT_SYNC_SHOP);
-        console.log("🔄 [Products] Scheduled sync:", JSON.stringify(r));
-      } catch (e) {
-        console.error("⚠️  [Products] Scheduled sync failed:", e.message);
+      for (const shop of allActiveShops()) {
+        if (!shopify.hasTokenForShop(shop)) continue;
+        try {
+          const r = await shopify.syncProducts(shop);
+          console.log(`🔄 [Products] Scheduled sync ${shop}:`, JSON.stringify(r));
+        } catch (e) {
+          console.error(`⚠️  [Products] Scheduled sync failed ${shop}:`, e.message);
+        }
       }
     };
     setTimeout(runProductSync, 30000);
     setInterval(runProductSync, 6 * 60 * 60 * 1000);
-    console.log("🔄 Product catalog sync scheduled (every 6h)");
+    console.log("🔄 Product catalog sync scheduled (every 6h, all stores)");
   }
 
   if (process.env.DATABASE_URL) {
-    const DATA_SYNC_SHOP = "seven770.myshopify.com";
     let dataSyncRunning = false;
     const runDataSync = async () => {
-      if (!shopify.hasTokenForShop(DATA_SYNC_SHOP)) return;
       if (dataSyncRunning) {
         console.log("🔄 [Data] Sync already running, skipping this cycle");
         return;
       }
-      if (!featureFlags.isDataCollectionEnabled(DATA_SYNC_SHOP)) return;
       dataSyncRunning = true;
       try {
-        const r = await shopify.backfillEntireShop(DATA_SYNC_SHOP);
-        console.log("🔄 [Data] Scheduled sync:",
-          `customers ${r.customers_saved}/${r.customers_fetched},`,
-          `orders ${r.orders_saved}/${r.orders_fetched} (${r.duration_seconds}s)`);
+        for (const DATA_SYNC_SHOP of allActiveShops()) {
+          if (!shopify.hasTokenForShop(DATA_SYNC_SHOP)) continue;
+          if (!featureFlags.isDataCollectionEnabled(DATA_SYNC_SHOP)) continue;
+          try {
+            const r = await shopify.backfillEntireShop(DATA_SYNC_SHOP);
+            console.log(`🔄 [Data] Scheduled sync ${DATA_SYNC_SHOP}:`,
+              `customers ${r.customers_saved}/${r.customers_fetched},`,
+              `orders ${r.orders_saved}/${r.orders_fetched} (${r.duration_seconds}s)`);
 
-        try {
-          const upd = await db.query(`
-            UPDATE store_customers sc
-            SET last_order_date = sub.last_order
-            FROM (
-              SELECT shopify_customer_id, MAX(ordered_at) AS last_order
-              FROM store_orders
-              WHERE shop_domain = $1 AND shopify_customer_id IS NOT NULL
-              GROUP BY shopify_customer_id
-            ) sub
-            WHERE sc.shop_domain = $1
-              AND sc.shopify_customer_id = sub.shopify_customer_id
-          `, [DATA_SYNC_SHOP]);
-          console.log("🔄 [Data] last_order_date refreshed for", upd.rowCount, "customers");
-        } catch (e) {
-          console.error("⚠️  [Data] last_order_date refresh failed:", e.message);
-        }
+            try {
+              const upd = await db.query(`
+                UPDATE store_customers sc
+                SET last_order_date = sub.last_order
+                FROM (
+                  SELECT shopify_customer_id, MAX(ordered_at) AS last_order
+                  FROM store_orders
+                  WHERE shop_domain = $1 AND shopify_customer_id IS NOT NULL
+                  GROUP BY shopify_customer_id
+                ) sub
+                WHERE sc.shop_domain = $1
+                  AND sc.shopify_customer_id = sub.shopify_customer_id
+              `, [DATA_SYNC_SHOP]);
+              console.log("🔄 [Data] last_order_date refreshed for", upd.rowCount, "customers");
+            } catch (e) {
+              console.error("⚠️  [Data] last_order_date refresh failed:", e.message);
+            }
 
-        try {
-          const ac = await shopify.syncAbandonedCheckouts(DATA_SYNC_SHOP);
-          if (ac.success) {
-            console.log("🔄 [Data] Abandoned checkouts:", `${ac.saved}/${ac.fetched} (${ac.duration_seconds}s)`);
-          } else {
-            console.log("🔄 [Data] Abandoned checkouts sync skipped:", ac.reason || ac.error);
+            try {
+              const ac = await shopify.syncAbandonedCheckouts(DATA_SYNC_SHOP);
+              if (ac.success) {
+                console.log("🔄 [Data] Abandoned checkouts:", `${ac.saved}/${ac.fetched} (${ac.duration_seconds}s)`);
+              } else {
+                console.log("🔄 [Data] Abandoned checkouts sync skipped:", ac.reason || ac.error);
+              }
+            } catch (e) {
+              console.error("⚠️  [Data] Abandoned checkouts sync failed:", e.message);
+            }
+          } catch (e) {
+            console.error(`⚠️  [Data] Scheduled sync failed ${DATA_SYNC_SHOP}:`, e.message);
           }
-        } catch (e) {
-          console.error("⚠️  [Data] Abandoned checkouts sync failed:", e.message);
         }
-      } catch (e) {
-        console.error("⚠️  [Data] Scheduled sync failed:", e.message);
       } finally {
         dataSyncRunning = false;
       }
     };
     setTimeout(runDataSync, 90000);
     setInterval(runDataSync, 3 * 60 * 60 * 1000);
-    console.log("🔄 Orders + customers sync scheduled (every 3h)");
+    console.log("🔄 Orders + customers sync scheduled (every 3h, all stores)");
   }
 
   let lastReport09 = null, lastReport21 = null;
@@ -2454,27 +2525,32 @@ app.listen(PORT, async () => {
       const israelNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jerusalem" }));
       const hour = israelNow.getHours();
       const dateStr = israelNow.toISOString().slice(0, 10);
-      const shop = "seven770.myshopify.com";
 
       if (hour === 9 && lastReport09 !== dateStr) {
         lastReport09 = dateStr;
-        const summary = await dailySummary.getDailySummary(shop);
-        await db.query(
-          `INSERT INTO advisor_actions (shop_domain, action_type, details)
-           VALUES ($1, 'morning_report', $2)`,
-          [shop, JSON.stringify({ report: summary, date: dateStr, kind: 'overnight' })]
-        ).catch(e => console.error("morning report log:", e.message));
+        for (const shop of allActiveShops()) {
+          if (!shopify.hasTokenForShop(shop)) continue;
+          const summary = await dailySummary.getDailySummary(shop);
+          await db.query(
+            `INSERT INTO advisor_actions (shop_domain, action_type, details)
+             VALUES ($1, 'morning_report', $2)`,
+            [shop, JSON.stringify({ report: summary, date: dateStr, kind: 'overnight' })]
+          ).catch(e => console.error("morning report log:", e.message));
+        }
         console.log(`🌅 [Morning report] generated for ${dateStr} (09:00 Israel)`);
       }
 
       if (hour === 21 && lastReport21 !== dateStr) {
         lastReport21 = dateStr;
-        const summary = await dailySummary.getDailySummary(shop);
-        await db.query(
-          `INSERT INTO advisor_actions (shop_domain, action_type, details)
-           VALUES ($1, 'daily_report', $2)`,
-          [shop, JSON.stringify({ report: summary, date: dateStr, kind: 'end_of_day' })]
-        ).catch(e => console.error("daily report log:", e.message));
+        for (const shop of allActiveShops()) {
+          if (!shopify.hasTokenForShop(shop)) continue;
+          const summary = await dailySummary.getDailySummary(shop);
+          await db.query(
+            `INSERT INTO advisor_actions (shop_domain, action_type, details)
+             VALUES ($1, 'daily_report', $2)`,
+            [shop, JSON.stringify({ report: summary, date: dateStr, kind: 'end_of_day' })]
+          ).catch(e => console.error("daily report log:", e.message));
+        }
         console.log(`📋 [Daily report] generated for ${dateStr} (21:00 Israel)`);
       }
     } catch (e) {
@@ -2487,14 +2563,15 @@ app.listen(PORT, async () => {
   // Pulls recent orders from Shopify and closes advisor actions. Independent of
   // the orders/create webhook, so it works even if webhook HMAC verification fails.
   if (process.env.DATABASE_URL) {
-    const ATTR_SHOP = "seven770.myshopify.com";
     let attrRunning = false;
     const runAttr = async () => {
       if (attrRunning) return;
-      if (!shopify.hasTokenForShop(ATTR_SHOP)) return;
       attrRunning = true;
       try {
-        await attributionEngine.runAttribution(ATTR_SHOP);
+        for (const shop of allActiveShops()) {
+          if (!shopify.hasTokenForShop(shop)) continue;
+          await attributionEngine.runAttribution(shop);
+        }
       } catch (e) {
         console.error("⚠️  [Attribution] scheduled run failed:", e.message);
       } finally {
@@ -2503,7 +2580,7 @@ app.listen(PORT, async () => {
     };
     setTimeout(runAttr, 120000); // first run 2 min after startup
     setInterval(runAttr, 5 * 60 * 1000); // then every 5 minutes
-    console.log("🔁 Attribution scan scheduled (every 5 min)");
+    console.log("🔁 Attribution scan scheduled (every 5 min, all stores)");
   }
 
   agentEngine.resumeInterruptedPlans();
