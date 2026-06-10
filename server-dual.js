@@ -13,6 +13,8 @@ const aiTools = require("./ai-tools");
 const aiBrain = require("./ai-brain");
 const dailySummary = require("./daily-summary");
 const insightsEngine = require("./insights-engine");
+const creditsEngine = require("./credits-engine");
+const waCredits = require("./wa-credits");
 const mailer = require("./mailer");
 const compliance = require("./compliance");
 const agentEngine = require("./agent-engine");
@@ -526,6 +528,54 @@ app.post("/api/auth/login", express.json(), (req, res) => {
 });
 
 // Record that the current store accepted the terms of service.
+// Current credit balance for the resolved store (any logged-in store).
+app.get("/api/credits/balance", async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const balance = await creditsEngine.getBalance(shop);
+    res.json({ ok: true, balance, price_per_credit: creditsEngine.PRICE_PER_CREDIT_ILS });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Admin/master: add credits to a store (manual top-up for now).
+//   POST { password, shop, amount }
+app.post("/api/credits/add", express.json(), async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const shop = (req.body.shop || "").toLowerCase().trim();
+    const amount = parseInt(req.body.amount);
+    if (!shop) return res.status(400).json({ ok: false, error: "חסר shop" });
+    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ ok: false, error: "amount לא תקין" });
+    const r = await creditsEngine.addCredits(shop, amount, "topup_manual", { by: "admin" });
+    res.json(r);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Admin/master: balances for ALL stores (for the master credit-management view).
+app.get("/api/credits/all", async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const stores = shopify.listStores();
+    const out = [];
+    for (const s of stores) {
+      const cfg = shopify.getStore(s.shop_domain);
+      out.push({
+        shop_domain: s.shop_domain,
+        name: (cfg && cfg.name) || (s.shop_domain === DEFAULT_SHOP ? "770" : s.shop_domain.replace(".myshopify.com", "")),
+        balance: await creditsEngine.getBalance(s.shop_domain)
+      });
+    }
+    res.json({ ok: true, stores: out, price_per_credit: creditsEngine.PRICE_PER_CREDIT_ILS });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post("/api/terms/accept", express.json(), async (req, res) => {
   try {
     const shop = resolveShop(req);
@@ -551,6 +601,68 @@ app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
     res.json({ ok: true, removed: { email: email || null, phone: phone || null }, result: r });
   } catch (err) {
     console.error("optout/remove-customer error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ====== WhatsApp credits ======
+// Balance + price for the current store (used by the "credits" UI).
+app.get("/api/wa-credits/balance", async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const balance = await waCredits.getBalance(shop);
+    res.json({ ok: true, balance, price_per_credit: waCredits.PRICE_PER_CREDIT_ILS });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Recent credit ledger (top-ups + sends) for the current store.
+app.get("/api/wa-credits/ledger", async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const rows = await waCredits.getLedger(shop, 50);
+    res.json({ ok: true, ledger: rows });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// MANUAL top-up by admin/master (today's funding path; later replaced by billing).
+// /admin/wa-credits/add?password=...&shop=...&amount=100
+app.get("/admin/wa-credits/add", async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
+    const shop = (req.query.shop || "").toLowerCase().trim();
+    const amount = parseInt(req.query.amount);
+    if (!shop || !amount) return res.status(400).json({ ok: false, error: "צריך shop ו-amount" });
+    const balance = await waCredits.addCredits(shop, amount, "manual_topup", { by: "admin" });
+    res.json({ ok: true, shop, added: amount, balance });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Store self-service "buy credits" — STUB for now. Returns the price so the UI can
+// show it. When a payment processor is connected, this is where the charge happens
+// and addCredits() is called on success. Today it does NOT add credits.
+app.post("/api/wa-credits/purchase", express.json(), async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const amount = parseInt(req.body.amount) || 0;
+    // TODO: charge the card via payment processor, then on success: waCredits.addCredits(...)
+    return res.json({
+      ok: false,
+      pending_billing: true,
+      message: "תשלום מקוון יחובר בקרוב. בינתיים פנה אלינו לטעינת קרדיטים.",
+      amount,
+      price_per_credit: waCredits.PRICE_PER_CREDIT_ILS,
+      total_ils: Math.round(amount * waCredits.PRICE_PER_CREDIT_ILS * 100) / 100
+    });
+  } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -2514,6 +2626,9 @@ app.listen(PORT, async () => {
       // Load any DB-backed advisor stores into the in-memory token cache.
       // (770 stays env-based; this just adds support for new shops.)
       await shopify.loadStores();
+      // WhatsApp credits tables (balance + ledger per shop).
+      await creditsEngine.ensureCreditsTables();
+      await waCredits.ensureTables();
       const enabledShops = featureFlags.getDataCollectionShops();
       for (const shop of enabledShops) {
         if (shopify.hasTokenForShop(shop)) {

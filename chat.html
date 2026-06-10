@@ -444,6 +444,10 @@
     </div>
     <div class="convo-list" id="convoList"></div>
     <div class="sidebar-foot" style="margin-top:auto;padding:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:6px">
+      <div id="creditsRow" style="display:flex;align-items:center;justify-content:space-between;background:#eef4ff;border-radius:8px;padding:9px 11px;font-size:13px">
+        <span>💬 קרדיטים: <strong id="creditsBalance">—</strong></span>
+        <button onclick="showBuyCredits()" style="background:#0a6fe0;border:none;color:#fff;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer">טען עוד</button>
+      </div>
       <button onclick="showRemoveCustomer()" style="background:none;border:1px solid var(--border);border-radius:8px;padding:9px;font-size:13px;color:#444;cursor:pointer;text-align:right">🚫 הסר לקוח מהדיוור</button>
       <button onclick="showTermsModal()" style="background:none;border:none;padding:6px;font-size:12px;color:#888;cursor:pointer;text-align:right">תנאי שימוש</button>
     </div>
@@ -606,6 +610,42 @@
     document.getElementById('consentGo').onclick = () => { m.remove(); onConfirm(); };
   }
 
+  // Load and show the store's WhatsApp credit balance in the sidebar.
+  async function loadCreditsBalance() {
+    try {
+      const res = await fetch('/api/credits/balance?password=' + encodeURIComponent(PASSWORD));
+      const d = await res.json();
+      if (!d.ok) return;
+      const el = document.getElementById('creditsBalance');
+      if (el) el.textContent = (d.balance || 0).toLocaleString();
+      window._creditsBalance = d.balance || 0;
+    } catch (e) { /* silent */ }
+  }
+
+  // "Top up" — for now just instructs the merchant to contact us (no billing yet).
+  function showBuyCredits() {
+    let m = document.getElementById('buyCreditsModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'buyCreditsModal';
+    m.className = 'log-modal';
+    m.style.display = 'flex';
+    m.innerHTML =
+      '<div class="log-box" style="max-width:400px">'
+      + '<div class="log-head"><span>💬 טעינת קרדיטים</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'buyCreditsModal\').remove()">✕</button></div>'
+      + '<div class="log-body" style="text-align:right;line-height:1.7">'
+      + '<p style="font-size:14px">כל קרדיט מאפשר שליחת הודעת WhatsApp אוטומטית אחת ללקוח.</p>'
+      + '<p style="font-size:14px;margin-top:8px">היתרה הנוכחית שלך: <strong>' + ((window._creditsBalance||0).toLocaleString()) + '</strong> קרדיטים.</p>'
+      + '<div style="background:#f8f9fc;border-radius:10px;padding:14px;margin-top:12px;font-size:13.5px;color:#555">'
+      + 'לרכישת קרדיטים נוספים, פנה למנהל המערכת. בקרוב תוכל לרכוש קרדיטים ישירות מכאן.'
+      + '</div>'
+      + '<button onclick="document.getElementById(\'buyCreditsModal\').remove()" style="width:100%;padding:11px;border:none;border-radius:9px;background:#0a6fe0;color:#fff;font-weight:600;cursor:pointer;margin-top:14px">הבנתי</button>'
+      + '</div></div>';
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.remove(); };
+  }
+
   // Manual opt-out: merchant enters a customer's email/phone to remove them from
   // all future outreach (e.g. after the customer replied "remove me").
   function showRemoveCustomer() {
@@ -703,7 +743,63 @@
       b.onclick = () => { SELECTED_SHOP = s.shop_domain; enterAdvisor(s.name); };
       list.appendChild(b);
     });
+    const credBtn = document.createElement('button');
+    credBtn.className = 'store-pick';
+    credBtn.style.cssText = 'background:#eef4ff;margin-top:10px;font-weight:600';
+    credBtn.textContent = '💬 ניהול קרדיטים';
+    credBtn.onclick = showManageCredits;
+    list.appendChild(credBtn);
     picker.style.display = 'block';
+  }
+
+  // Master view: see every store's credit balance and top up.
+  async function showManageCredits() {
+    let m = document.getElementById('manageCreditsModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'manageCreditsModal';
+    m.className = 'log-modal';
+    m.style.display = 'flex';
+    m.innerHTML = '<div class="log-box" style="max-width:480px"><div class="log-head"><span>💬 ניהול קרדיטים</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'manageCreditsModal\').remove()">✕</button></div>'
+      + '<div class="log-body" id="manageCreditsBody" style="text-align:right">טוען...</div></div>';
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.remove(); };
+    try {
+      const res = await fetch('/api/credits/all?password=' + encodeURIComponent(PASSWORD));
+      const d = await res.json();
+      const body = document.getElementById('manageCreditsBody');
+      if (!d.ok) { body.innerHTML = '<p style="color:#d33">' + (d.error || 'שגיאה') + '</p>'; return; }
+      let h = '<p style="font-size:12.5px;color:#888;margin-bottom:10px">מחיר לקרדיט: ₪' + d.price_per_credit + ' · קרדיט = הודעת WhatsApp אחת</p>';
+      d.stores.forEach(s => {
+        h += '<div style="display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid #eee">'
+          + '<div style="flex:1"><div style="font-weight:600">' + esc(s.name) + '</div>'
+          + '<div style="font-size:12px;color:#888">יתרה: <strong id="bal_' + esc(s.shop_domain) + '">' + (s.balance||0).toLocaleString() + '</strong></div></div>'
+          + '<input type="number" min="1" placeholder="כמות" id="amt_' + esc(s.shop_domain) + '" dir="rtl" style="width:90px;padding:8px;border:1px solid #ddd;border-radius:7px;text-align:right">'
+          + '<button onclick="addCreditsTo(\'' + esc(s.shop_domain) + '\')" style="background:#16a34a;border:none;color:#fff;border-radius:7px;padding:8px 12px;cursor:pointer">הוסף</button>'
+          + '</div>';
+      });
+      body.innerHTML = h;
+    } catch (e) {
+      document.getElementById('manageCreditsBody').innerHTML = '<p style="color:#d33">שגיאה בטעינה</p>';
+    }
+  }
+
+  async function addCreditsTo(shop) {
+    const amt = parseInt(document.getElementById('amt_' + shop).value);
+    if (!amt || amt <= 0) { alert('הזן כמות'); return; }
+    try {
+      const res = await fetch('/api/credits/add', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD, shop, amount: amt })
+      });
+      const d = await res.json();
+      if (d.ok) {
+        const el = document.getElementById('bal_' + shop);
+        if (el) el.textContent = (d.balance || 0).toLocaleString();
+        document.getElementById('amt_' + shop).value = '';
+      } else { alert(d.error || 'שגיאה'); }
+    } catch (e) { alert('שגיאה'); }
   }
 
   function backToLogin() {
@@ -735,6 +831,7 @@
     loadDailyPlan();
     loadInsights();
     loadMoneyCounter();
+    loadCreditsBalance();
     setInterval(loadMoneyCounter, 60000);
   }
 
