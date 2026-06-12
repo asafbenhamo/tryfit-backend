@@ -595,6 +595,12 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
     const tpl = await waTemplates.getTemplate(shop, templateName);
     if (!tpl) return res.status(400).json({ ok: false, error: "תבנית לא נמצאה" });
 
+    // Working hours: automatic sends only inside the allowed window.
+    if (!compliance.isWithinWorkingHours()) {
+      const st = compliance.workingHoursStatus();
+      return res.json({ ok: false, error: `מחוץ לשעות השליחה (${st.window}, עכשיו ${st.israel_hour}:00). נסה שוב בתוך החלון.` });
+    }
+
     const percentage = b.percentage ? parseInt(b.percentage) : null;
     const amount_ils = b.amount_ils ? parseFloat(b.amount_ils) : null;
     const combine = (b.combine === 'no' || b.combine === 'false') ? false : true;
@@ -603,9 +609,12 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
     // Build recipients: each gets a personal coupon, and template body params
     // filled in the order declared by tpl.body_vars (e.g. ['name','coupon','discount']).
     const recipients = [];
+    let skippedOptout = 0;
     for (const c of segment) {
       const phone = c.phone || null;
       if (!phone) continue; // auto-send is WhatsApp only
+      // Opt-out: never include a customer who asked to stop.
+      if (await compliance.isOptedOut(shop, { email: c.email, phone })) { skippedOptout++; continue; }
       const name = c.name || (c.first_name || '');
       // Personal coupon
       let coupon = null;
@@ -629,6 +638,7 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
       recipients.push({
         to: phone,
         params,
+        urlSuffix: coupon || '',
         meta: { campaign_type: b.campaign_type || 'campaign', customer_name: name, coupon }
       });
 
@@ -652,6 +662,7 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
       ok: true,
       sent: result.sent || 0,
       failed: result.failed || 0,
+      skipped_optout: skippedOptout,
       stopped_no_credits: !!result.stopped_no_credits,
       balance
     });
@@ -1341,8 +1352,9 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       finalBody += `\n\nקוד הקופון שלך: ${couponCode}`;
     }
     // Always include a link to the store so the customer can act on the offer.
-    if (!finalBody.includes("sevenseventy.co.il")) {
-      finalBody += `\n\nלרכישה: https://sevenseventy.co.il`;
+    const storeUrl = shopify.getPublicDomain(shop);
+    if (!finalBody.includes(storeUrl.replace(/^https?:\/\//, ""))) {
+      finalBody += `\n\nלרכישה: ${storeUrl}`;
     }
 
     const hasPhone = phone && String(phone).trim().length >= 8;
@@ -1441,7 +1453,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     let editableCartUrl = null;
     try {
       const cartParts = items.map(it => `${it.variant_id}:${it.quantity || 1}`).join(',');
-      editableCartUrl = `https://sevenseventy.co.il/cart/${cartParts}`;
+      editableCartUrl = `${shopify.getPublicDomain(shop)}/cart/${cartParts}`;
       if (cartCoupon) editableCartUrl += `?discount=${encodeURIComponent(cartCoupon)}`;
     } catch (e) {}
 
@@ -1550,7 +1562,7 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
         let editableCartUrl = null;
         try {
           const cartParts = items.map(it => `${it.variant_id}:${it.quantity || 1}`).join(',');
-          editableCartUrl = `https://sevenseventy.co.il/cart/${cartParts}`;
+          editableCartUrl = `${shopify.getPublicDomain(shop)}/cart/${cartParts}`;
           if (cartCoupon) editableCartUrl += `?discount=${encodeURIComponent(cartCoupon)}`;
         } catch (e) {}
         const linkForMessage = editableCartUrl || draft.invoice_url;

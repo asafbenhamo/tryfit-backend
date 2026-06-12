@@ -8,6 +8,7 @@
 //     { ok:false, error:... } and NEVER throws — TryFit core must keep working.
 
 const db = require('./database');
+const shopifyClient = require('./shopify-client');
 
 // ---------- helpers ----------
 
@@ -433,7 +434,7 @@ async function getNewestProducts(shopDomain, options = {}) {
       [shopDomain]
     );
 
-    const PUBLIC_DOMAIN = "https://sevenseventy.co.il";
+    const PUBLIC_DOMAIN = shopifyClient.getPublicDomain(shopDomain);
     const withDates = result.rows.map(row => {
       let raw = {};
       try { raw = typeof row.raw_data === 'string' ? JSON.parse(row.raw_data) : row.raw_data; } catch (e) {}
@@ -514,7 +515,7 @@ async function getStoreProducts(shopDomain, options = {}) {
 
     // Build a ready-to-use public URL for each product from its handle.
     // The store's public domain is sevenseventy.co.il.
-    const PUBLIC_DOMAIN = "https://sevenseventy.co.il";
+    const PUBLIC_DOMAIN = shopifyClient.getPublicDomain(shopDomain);
     const products = result.rows.map(p => ({
       ...p,
       product_url: p.handle ? `${PUBLIC_DOMAIN}/products/${p.handle}` : null
@@ -572,7 +573,8 @@ async function getAbandonedCheckouts(shopDomain, options = {}) {
       [shopDomain, dayNum]
     );
 
-    // Recoverable carts: have an email, highest value first.
+    // Recoverable carts: have an email, highest value first. Excludes customers
+    // who opted out of messaging (legal requirement).
     const recoverable = await db.query(
       `SELECT email, phone, total_price, item_count,
               line_items, abandoned_checkout_url, shopify_created_at
@@ -581,6 +583,16 @@ async function getAbandonedCheckouts(shopDomain, options = {}) {
          AND completed_at IS NULL
          AND email IS NOT NULL AND email <> ''
          AND shopify_created_at >= NOW() - ($2 || ' days')::interval
+         AND NOT EXISTS (
+           SELECT 1 FROM message_optouts mo
+           WHERE mo.shop_domain = abandoned_checkouts.shop_domain
+             AND (
+               (mo.email IS NOT NULL AND lower(mo.email) = lower(abandoned_checkouts.email))
+               OR
+               (mo.phone IS NOT NULL AND abandoned_checkouts.phone IS NOT NULL
+                AND regexp_replace(mo.phone,'[^0-9]','','g') = regexp_replace(abandoned_checkouts.phone,'[^0-9]','','g'))
+             )
+         )
        ORDER BY total_price DESC
        FETCH FIRST ${lim} ROWS ONLY`,
       [shopDomain, dayNum]

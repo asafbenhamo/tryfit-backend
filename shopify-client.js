@@ -112,6 +112,19 @@ function getWhatsAppConfig(shopDomain) {
   return { d360_api_key: s.d360_api_key || null, wa_language: s.wa_language || 'he' };
 }
 
+// Public storefront domain for a shop (for building customer-facing links).
+// Reads public_domain from the store registry; 770 (env-based) falls back to its
+// known domain. Always returns a full https:// URL with no trailing slash.
+function getPublicDomain(shopDomain) {
+  const d = (shopDomain || '').toLowerCase().trim();
+  if (d === 'seven770.myshopify.com') return 'https://sevenseventy.co.il';
+  const s = getStore(d);
+  let pub = (s && s.public_domain) ? String(s.public_domain).trim() : '';
+  if (!pub) return `https://${d}`; // fallback: the myshopify domain itself works
+  if (!/^https?:\/\//i.test(pub)) pub = 'https://' + pub;
+  return pub.replace(/\/+$/, '');
+}
+
 // Return the store config (from DB cache) for a domain, or null.
 function getStore(shopDomain) {
   if (!shopDomain) return null;
@@ -1346,5 +1359,6 @@ module.exports = {
   syncAbandonedCheckouts,
   createDiscountCode,
   deleteDiscountCode,
+  getPublicDomain,
   createDraftOrder
 };

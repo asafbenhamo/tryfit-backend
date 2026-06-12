@@ -40,6 +40,8 @@ function isConfigured(shop) {
 //   templateName  - the APPROVED template's name in the WABA
 //   bodyParams    - array of strings filling {{1}}, {{2}}, ... in the template body
 //   opts.languageCode - override template language (default from store, else 'he')
+//   opts.urlSuffix    - fills the dynamic URL button's {{1}} (personal cart/coupon link).
+//                       The template must have been approved with a dynamic URL button.
 //
 // Returns:
 //   { ok:true, message_id, balance }                    on success (1 credit spent)
@@ -69,6 +71,16 @@ async function sendTemplate(shop, to, templateName, bodyParams = [], opts = {}) 
     components.push({
       type: 'body',
       parameters: bodyParams.map(v => ({ type: 'text', text: String(v == null ? '' : v) }))
+    });
+  }
+  // Dynamic URL button: index 0 is the first button in the approved template.
+  // Its suffix parameter completes the fixed base URL defined at approval time.
+  if (opts.urlSuffix) {
+    components.push({
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: String(opts.urlSuffix) }]
     });
   }
   const payload = {
@@ -119,7 +131,11 @@ async function sendTemplateBatch(shop, templateName, recipients = [], opts = {})
   let sent = 0, failed = 0, stoppedNoCredits = false;
   const results = [];
   for (const r of recipients) {
-    const res = await sendTemplate(shop, r.to, templateName, r.params || [], { ...opts, meta: r.meta || {} });
+    const res = await sendTemplate(shop, r.to, templateName, r.params || [], {
+      ...opts,
+      urlSuffix: r.urlSuffix || opts.urlSuffix || null,
+      meta: r.meta || {}
+    });
     results.push({ to: r.to, ...res });
     if (res.ok) { sent++; }
     else if (res.reason === 'no_credits') { stoppedNoCredits = true; break; }

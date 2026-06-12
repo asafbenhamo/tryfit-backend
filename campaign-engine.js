@@ -23,7 +23,7 @@ const SEND_DELAY_MS = 600;         // small pace between customers
 // Cooldown: don't re-contact a customer we already messaged in the last N days.
 // During development/testing this is short (1 day) so you can test freely.
 // ⚠️ BEFORE GOING LIVE TO REAL CUSTOMERS: change this back to 14.
-const CAMPAIGN_COOLDOWN_DAYS = 1;
+const CAMPAIGN_COOLDOWN_DAYS = 4;
 
 // In-memory registry of running/finished campaigns.
 const campaigns = {};
@@ -166,8 +166,8 @@ async function runCampaign(id, shop, segment, template) {
       // and to create urgency. Only add it if not already mentioned.
       if (finalCode && !body.includes('48 שעות')) body += `\nהקוד תקף ל-48 שעות בלבד ⏰`;
       // Always include a link to the store so the customer can act on the offer.
-      const STORE_URL = 'https://sevenseventy.co.il';
-      if (!body.includes('sevenseventy.co.il')) body += `\n\nלרכישה: ${STORE_URL}`;
+      const STORE_URL = shopify.getPublicDomain(shop);
+      if (!body.includes(STORE_URL.replace(/^https?:\/\//, ''))) body += `\n\nלרכישה: ${STORE_URL}`;
 
       if (hasPhone) {
         // WhatsApp: PREPARE a ready link. Do NOT count as "sent" - the merchant
