@@ -59,6 +59,22 @@ function buildExcludeContacted(enabled, startIndex) {
   return { clause, params: [String(CONTACTED_COOLDOWN_DAYS)] };
 }
 
+// SQL fragment that excludes customers who opted out of messaging (message_optouts).
+// Matches on email OR phone. Takes no params — references the table by name, so the
+// outer query MUST use store_customers (not an alias). Always safe to append.
+const EXCLUDE_OPTED_OUT = `
+  AND NOT EXISTS (
+    SELECT 1 FROM message_optouts mo
+    WHERE mo.shop_domain = store_customers.shop_domain
+      AND (
+        (mo.email IS NOT NULL AND store_customers.email IS NOT NULL
+         AND lower(mo.email) = lower(store_customers.email))
+        OR
+        (mo.phone IS NOT NULL AND store_customers.phone IS NOT NULL
+         AND regexp_replace(mo.phone,'[^0-9]','','g') = regexp_replace(store_customers.phone,'[^0-9]','','g'))
+      )
+  )`;
+
 // ---------- 1. getTopCustomers ----------
 // Best customers by lifetime spend (or orders). Includes everyone by default.
 async function getTopCustomers(shopDomain, options = {}) {
@@ -73,7 +89,7 @@ async function getTopCustomers(shopDomain, options = {}) {
       `SELECT email, first_name, last_name, phone, city,
               total_spent, orders_count, last_order_date
        FROM store_customers
-       WHERE shop_domain = $1${ex.clause}
+       WHERE shop_domain = $1${ex.clause}${EXCLUDE_OPTED_OUT}
        ORDER BY ${sortBy} DESC
        LIMIT $${params.length}`,
       params
@@ -100,8 +116,8 @@ async function getDormantCustomers(shopDomain, options = {}) {
        WHERE shop_domain = $1
          AND orders_count > 0
          AND total_spent >= $2
-         AND (last_order_date IS NULL
-              OR last_order_date < NOW() - ($3 || ' days')::interval)${ex.clause}
+         AND ((last_order_date IS NULL
+              OR last_order_date < NOW() - ($3 || ' days')::interval)${ex.clause}${EXCLUDE_OPTED_OUT}
        ORDER BY total_spent DESC
        LIMIT $${params.length}`,
       params
@@ -127,7 +143,7 @@ async function getNeverPurchased(shopDomain, options = {}) {
       `SELECT email, first_name, last_name, phone, city, marketing_consent
        FROM store_customers
        WHERE shop_domain = $1
-         AND (orders_count = 0 OR orders_count IS NULL)${ex.clause}
+         AND (orders_count = 0 OR orders_count IS NULL)${ex.clause}${EXCLUDE_OPTED_OUT}
        ORDER BY last_synced_at DESC NULLS LAST
        LIMIT $${params.length}`,
       params
@@ -150,7 +166,7 @@ async function getRepeatCustomers(shopDomain, options = {}) {
               total_spent, orders_count, last_order_date
        FROM store_customers
        WHERE shop_domain = $1
-         AND orders_count > 1${ex.clause}
+         AND orders_count > 1${ex.clause}${EXCLUDE_OPTED_OUT}
        ORDER BY orders_count DESC, total_spent DESC
        LIMIT $${params.length}`,
       params
@@ -211,7 +227,7 @@ async function searchCustomers(shopDomain, options = {}) {
          AND (email ILIKE $2
               OR first_name ILIKE $2
               OR last_name ILIKE $2
-              OR (first_name || ' ' || last_name) ILIKE $2)
+              OR (first_name || ' ' || last_name) ILIKE $2)${EXCLUDE_OPTED_OUT}
        ORDER BY total_spent DESC
        LIMIT 25`,
       [shopDomain, like]

@@ -30,6 +30,21 @@ function notRecentlyContacted(emailCol, phoneCol) {
   )`;
 }
 
+// SQL fragment: exclude customers who opted out of messaging (message_optouts).
+// $1 must be shop_domain. emailCol/phoneCol are the columns in the outer query.
+function notOptedOut(emailCol, phoneCol) {
+  return `NOT EXISTS (
+    SELECT 1 FROM message_optouts mo
+    WHERE mo.shop_domain = $1
+      AND (
+        (mo.email IS NOT NULL AND ${emailCol} IS NOT NULL AND lower(mo.email) = lower(${emailCol}))
+        OR
+        (mo.phone IS NOT NULL AND ${phoneCol} IS NOT NULL
+         AND regexp_replace(mo.phone,'[^0-9]','','g') = regexp_replace(${phoneCol},'[^0-9]','','g'))
+      )
+  )`;
+}
+
 // ---------- helper: run a detector safely ----------
 async function runDetector(label, fn) {
   try {
@@ -56,6 +71,7 @@ async function detectDormantVIPs(shop) {
          AND last_order_date IS NOT NULL
          AND last_order_date < NOW() - INTERVAL '45 days'
          AND ${notRecentlyContacted('email', 'phone')}
+         AND ${notOptedOut('email', 'phone')}
        ORDER BY total_spent DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
@@ -136,6 +152,7 @@ async function detectHighValueAbandoned(shop) {
          AND total_price >= 400
          AND shopify_created_at >= NOW() - INTERVAL '7 days'
          AND ${notRecentlyContacted('email', 'phone')}
+         AND ${notOptedOut('email', 'phone')}
        ORDER BY total_price DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
