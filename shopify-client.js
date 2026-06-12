@@ -1148,6 +1148,21 @@ async function syncAbandonedCheckouts(shopDomain) {
  *
  * Returns { ok, code, price_rule_id, discount_code_id } or { ok:false, error }.
  */
+// Delete a discount (its price rule) — used to clean up an orphan coupon that was
+// created but never delivered (the send failed). Best-effort; never throws.
+async function deleteDiscountCode(shopDomain, priceRuleId) {
+  if (!priceRuleId || !hasTokenForShop(shopDomain)) return { ok: false };
+  try {
+    const token = getTokenForShop(shopDomain);
+    const base = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}`;
+    const headers = { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' };
+    await fetch(`${base}/price_rules/${priceRuleId}.json`, { method: 'DELETE', headers });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 async function createDiscountCode(shopDomain, opts = {}) {
   if (!hasTokenForShop(shopDomain)) {
     return { ok: false, error: 'no_token' };
@@ -1330,5 +1345,6 @@ module.exports = {
   saveAbandonedCheckout,
   syncAbandonedCheckouts,
   createDiscountCode,
+  deleteDiscountCode,
   createDraftOrder
 };

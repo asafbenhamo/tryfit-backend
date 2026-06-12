@@ -13,6 +13,7 @@ const campaignEngine = require('./campaign-engine');
 const whatsappSender = require('./whatsapp-sender');
 const waTemplates = require('./wa-templates');
 const shopify = require('./shopify-client');
+const compliance = require('./compliance');
 let mailer = null;
 try { mailer = require('./mailer'); } catch (e) { mailer = null; }
 
@@ -33,7 +34,8 @@ async function pullSegment(shop, task) {
       const r = await aiTools.getAbandonedCheckouts(shop, { limit, days: 30 });
       rows = (r.recoverable_carts || r.carts || []).map(c => ({
         name: c.name || c.first_name || '', email: c.email || '', phone: c.phone || '',
-        est_value: parseFloat(c.total_price || 0)
+        est_value: parseFloat(c.total_price || 0),
+        recovery_url: c.abandoned_checkout_url || null
       }));
     } else if (task.move_type === 'dormant_vip') {
       const r = await aiTools.getDormantCustomers(shop, { limit, daysInactive: 30, minSpent: 1000, excludeContacted: true });
@@ -136,69 +138,144 @@ async function runTask(shop, task, opts = {}) {
   return result;
 }
 
-// Automatic send: for each customer create a personal coupon, then send the
-// approved WhatsApp template if they have a phone, else send an email (free).
+// Automatic send: for each customer send the approved WhatsApp template if they
+// have a phone, else email (free). Safety: respects working hours and opt-outs,
+// creates the personal coupon only AFTER a successful send (no orphan coupons).
 async function runTaskAuto(shop, task, segment, templateName) {
-  const tpl = await waTemplates.getTemplate(shop, templateName);
-  const tmpl = templateFor(task); // for email subject/body fallback
-  const pct = task.percentage || 10;
-  let sentWa = 0, sentEmail = 0, failed = 0, noCredits = false;
+  // #3 Working hours: never auto-send outside the allowed window.
+  if (!compliance.isWithinWorkingHours()) {
+    const st = compliance.workingHoursStatus();
+    return {
+      auto: true, sent: 0, sent_whatsapp: 0, sent_email: 0, failed: 0, prepared: 0,
+      skipped_hours: segment.length, stopped_no_credits: false, whatsapp: [],
+      note: `מחוץ לשעות השליחה (${st.window}, עכשיו ${st.israel_hour}:00). הסוכן לא שלח.`
+    };
+  }
 
-  for (const c of segment) {
-    if (noCredits && c.phone) { failed++; continue; } // out of credits, skip further WA
-    // Personal coupon
-    let coupon = null;
+  const tpl = await waTemplates.getTemplate(shop, templateName);
+  const tmpl = templateFor(task); // email subject/body fallback
+  const pct = task.percentage || 10;
+  let sentWa = 0, sentEmail = 0, failed = 0, skippedOptout = 0, noCredits = false;
+
+  // Helper: create a personal coupon (called only after a successful send).
+  // #5 unique-ish code: name + pct + 5 random chars (much lower collision chance).
+  // Returns { code, priceRuleId } so we can delete the price rule on a failed send.
+  const makeCoupon = async (name) => {
     try {
-      const namePart = (c.name || 'VIP').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 8) || 'VIP';
-      const suffix = Math.floor(Math.random() * 900 + 100);
+      const namePart = (name || 'VIP').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 6) || 'VIP';
+      const rand = Math.random().toString(36).slice(2, 7).toUpperCase();
       const cc = await shopify.createDiscountCode(shop, {
         percentage: pct, days_valid: 2, combine: true,
-        code: `${namePart}${pct}${suffix}`, title: `סוכן אוטומטי: ${c.name || ''}`
+        code: `${namePart}${pct}${rand}`, title: `סוכן אוטומטי: ${name || ''}`
       });
-      if (cc && cc.ok) coupon = cc.code;
-    } catch (e) {}
+      return (cc && cc.ok) ? { code: cc.code, priceRuleId: cc.price_rule_id } : { code: null, priceRuleId: null };
+    } catch (e) { return { code: null, priceRuleId: null }; }
+  };
 
-    // Log the action (attribution) regardless of channel.
-    const logAction = async (channel) => {
-      await db.query(
-        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [shop, task.move_type || 'agent', c.email || null, c.phone || null,
-         JSON.stringify({ customer_name: c.name, auto: true, agent: true, channel, template: templateName }), coupon]
-      ).catch(()=>{});
-    };
+  const logAction = async (c, channel, coupon) => {
+    await db.query(
+      `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [shop, task.move_type || 'agent', c.email || null, c.phone || null,
+       JSON.stringify({ customer_name: c.name, auto: true, agent: true, channel, template: templateName }), coupon]
+    ).catch(()=>{});
+  };
+
+  for (const c of segment) {
+    if (noCredits && c.phone) { failed++; continue; }
+
+    // #2 Opt-out: never contact a customer who asked to stop (covers all move types,
+    // including abandoned_cart which doesn't pass through ai-tools filtering).
+    if (await compliance.isOptedOut(shop, { email: c.email, phone: c.phone })) {
+      skippedOptout++;
+      continue;
+    }
 
     if (c.phone && tpl) {
-      // WhatsApp via template (costs a credit)
+      // Create the coupon (template needs the code); delete it if the send fails.
+      const { code: coupon, priceRuleId } = await makeCoupon(c.name);
       const discountLabel = `${pct}%`;
-      const valueMap = { name: c.name || 'לקוחה', coupon: coupon || '', discount: discountLabel };
+      // #4 For abandoned carts, pass the recovery link as the dynamic URL suffix.
+      const cartSuffix = (task.move_type === 'abandoned_cart' && c.recovery_url) ? c.recovery_url : (coupon || '');
+      const valueMap = { name: c.name || 'לקוחה', coupon: coupon || '', discount: discountLabel, link: cartSuffix };
       const params = (tpl.body_vars || []).map(v => valueMap[v] != null ? valueMap[v] : '');
-      const r = await whatsappSender.sendTemplate(shop, c.phone, templateName, params, { meta: { agent: true } });
-      if (r.ok) { sentWa++; await logAction('whatsapp'); }
-      else if (r.reason === 'no_credits') { noCredits = true; failed++; }
-      else { failed++; }
+      const r = await whatsappSender.sendTemplate(shop, c.phone, templateName, params, {
+        urlSuffix: cartSuffix, meta: { agent: true }
+      });
+      if (r.ok) { sentWa++; await logAction(c, 'whatsapp', coupon); }
+      else if (r.reason === 'no_credits') {
+        noCredits = true; failed++;
+        if (priceRuleId) await shopify.deleteDiscountCode(shop, priceRuleId).catch(()=>{}); // #1 cleanup
+      } else {
+        failed++;
+        if (priceRuleId) await shopify.deleteDiscountCode(shop, priceRuleId).catch(()=>{}); // #1 cleanup
+      }
     } else if (c.email && mailer && mailer.sendEmail) {
-      // Email fallback (free)
+      // Email fallback (free). Create coupon, send; clean up if send throws.
+      const { code: coupon, priceRuleId } = await makeCoupon(c.name);
       try {
         const body = tmpl.body.replace(/\{NAME\}/g, c.name || '').replace(/\{COUPON\}/g, coupon || '');
         await mailer.sendEmail(shop, { to: c.email, subject: tmpl.subject, text: body });
-        sentEmail++; await logAction('email');
-      } catch (e) { failed++; }
+        sentEmail++; await logAction(c, 'email', coupon);
+      } catch (e) {
+        failed++;
+        if (priceRuleId) await shopify.deleteDiscountCode(shop, priceRuleId).catch(()=>{}); // #1 cleanup
+      }
     } else {
       failed++;
     }
   }
+
+  // #6 Clear, honest summary for the merchant.
+  const parts = [];
+  if (sentWa) parts.push(`${sentWa} ב-WhatsApp`);
+  if (sentEmail) parts.push(`${sentEmail} במייל`);
+  if (skippedOptout) parts.push(`${skippedOptout} דולגו (הוסרו מהדיוור)`);
+  if (failed) parts.push(`${failed} נכשלו`);
+  if (noCredits) parts.push(`נגמרו הקרדיטים באמצע`);
 
   return {
     auto: true,
     sent: sentWa + sentEmail,
     sent_whatsapp: sentWa,
     sent_email: sentEmail,
+    skipped_optout: skippedOptout,
     failed,
     prepared: 0,
     stopped_no_credits: noCredits,
-    whatsapp: [] // auto mode sends directly; no manual squares
+    whatsapp: [],
+    note: parts.length ? ('הסוכן: ' + parts.join(', ') + '.') : 'לא נשלחו הודעות.'
   };
+}
+
+// #8 Lightweight learning: look at how each move type performed historically
+// (conversion rate from advisor_actions) and nudge the discount for the next run.
+// Moves that convert well keep a lean discount; moves that convert poorly get a
+// small boost (capped) to try to lift them. Returns a map: move_type -> pct delta.
+async function learnFromHistory(shop) {
+  const tuning = {};
+  try {
+    const r = await db.query(
+      `SELECT action_type,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE outcome='converted')::int AS converted
+       FROM advisor_actions
+       WHERE shop_domain = $1
+         AND created_at >= NOW() - INTERVAL '60 days'
+         AND action_type NOT IN ('daily_report','morning_report')
+       GROUP BY action_type`,
+      [shop]
+    );
+    for (const row of r.rows) {
+      if (row.total < 10) continue; // not enough data to learn from yet
+      const rate = row.converted / row.total;
+      // Poor (<5%): +3% discount boost. Strong (>20%): -2% (protect margin). Else 0.
+      if (rate < 0.05) tuning[row.action_type] = 3;
+      else if (rate > 0.20) tuning[row.action_type] = -2;
+      else tuning[row.action_type] = 0;
+    }
+  } catch (e) { /* learning is best-effort, never blocks the run */ }
+  return tuning;
 }
 
 // Run an entire approved plan: execute selected tasks by priority, one at a time.
@@ -212,6 +289,9 @@ async function runPlan(shop, planId) {
     if (pr.rows[0]) { sendMode = pr.rows[0].send_mode || 'manual'; templateName = pr.rows[0].template_name || null; }
   } catch (e) { /* columns may not exist on old tables -> manual */ }
 
+  // #8 Learn from the last 60 days before executing this plan.
+  const tuning = await learnFromHistory(shop);
+
   const tasks = await db.query(
     `SELECT * FROM agent_tasks WHERE plan_id=$1 AND selected=TRUE AND status='pending' ORDER BY priority ASC`,
     [planId]
@@ -223,6 +303,13 @@ async function runPlan(shop, planId) {
     if (p.rows[0] && p.rows[0].status === 'stopped') {
       console.log(`🛑 [Agent] plan ${planId} stopped, halting remaining tasks`);
       break;
+    }
+    // Apply learned tuning to this move's discount (capped 5-25%).
+    const delta = tuning[task.move_type] || 0;
+    if (delta !== 0) {
+      const base = task.percentage || 10;
+      task.percentage = Math.max(5, Math.min(25, base + delta));
+      console.log(`🧠 [Agent] tuned ${task.move_type}: ${base}% -> ${task.percentage}% (history)`);
     }
     try {
       const r = await runTask(shop, task, { sendMode, templateName });
