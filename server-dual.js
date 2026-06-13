@@ -672,6 +672,76 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
   }
 });
 
+// ===== Campaign result persistence =====
+// The prepared WhatsApp squares used to live only in memory, so a refresh lost
+// them ("the advisor forgot what it created"). We persist them per campaign-key
+// (a stable hash the client derives from the campaign marker), including each
+// square's sent/unsent state, and restore on reload.
+async function ensureCampaignResultsTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS campaign_results (
+      shop_domain TEXT NOT NULL,
+      campaign_key TEXT NOT NULL,
+      whatsapp JSONB DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (shop_domain, campaign_key)
+    )`).catch(e => console.error('campaign_results table:', e.message));
+}
+ensureCampaignResultsTable();
+
+// Save the prepared squares once a campaign finished preparing.
+app.post("/api/campaign/save-result", express.json(), async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const { key, whatsapp } = req.body || {};
+    if (!key || !Array.isArray(whatsapp)) return res.status(400).json({ ok: false, error: "חסר key/whatsapp" });
+    await db.query(
+      `INSERT INTO campaign_results (shop_domain, campaign_key, whatsapp)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (shop_domain, campaign_key) DO UPDATE SET whatsapp = EXCLUDED.whatsapp`,
+      [shop, String(key).slice(0, 120), JSON.stringify(whatsapp)]
+    );
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Fetch a saved result (the card asks on render; if found, it restores the squares).
+app.get("/api/campaign/get-result", async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const key = (req.query.key || '').slice(0, 120);
+    if (!key) return res.json({ ok: true, found: false });
+    const r = await db.query(
+      `SELECT whatsapp FROM campaign_results WHERE shop_domain=$1 AND campaign_key=$2`, [shop, key]);
+    if (!r.rows[0]) return res.json({ ok: true, found: false });
+    res.json({ ok: true, found: true, whatsapp: r.rows[0].whatsapp || [] });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// Mark one square as sent (clicked) so the state survives refresh.
+app.post("/api/campaign/mark-sent", express.json(), async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const { key, phone } = req.body || {};
+    if (!key || !phone) return res.status(400).json({ ok: false, error: "חסר key/phone" });
+    await db.query(
+      `UPDATE campaign_results
+       SET whatsapp = (
+         SELECT COALESCE(jsonb_agg(
+           CASE WHEN elem->>'phone' = $3 THEN jsonb_set(elem, '{sent}', 'true'::jsonb) ELSE elem END
+         ), '[]'::jsonb)
+         FROM jsonb_array_elements(whatsapp) elem
+       )
+       WHERE shop_domain=$1 AND campaign_key=$2`,
+      [shop, String(key).slice(0, 120), String(phone)]
+    );
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
 app.post("/api/terms/accept", express.json(), async (req, res) => {
   try {
     const shop = resolveShop(req);
@@ -1191,8 +1261,13 @@ ${tasksJson}
 
 בעל החנות מבקש לשנות: "${request}"
 
+כללים חשובים:
+1. אם הבקשה כללית (למשל "תוריד ל-5 לקוחות", "תעלה את ההנחה") - החל אותה על *כל* המהלכים, לא רק על חלק.
+2. אם הבקשה מציינת מהלך ספציפי (למשל "במהלך 3" או לפי שם) - החל רק עליו.
+3. אם שינית מספר לקוחות או אחוז במהלך - חובה להחזיר גם new_what: תיאור מעודכן קצר של המהלך שמשקף את המספרים החדשים (כי התיאור הישן מציג מספרים ישנים).
+
 החזר JSON בלבד (בלי טקסט נוסף, בלי markdown) במבנה:
-{"updates":[{"id":<מזהה המהלך>,"percentage":<אחוז חדש או null>,"max_customers":<מקסימום לקוחות חדש או null>,"new_title":<כותרת חדשה או null>,"remove":<true אם להסיר את המהלך, אחרת false>}]}
+{"updates":[{"id":<מזהה המהלך>,"percentage":<אחוז חדש או null>,"max_customers":<מקסימום לקוחות חדש או null>,"new_title":<כותרת חדשה או null>,"new_what":<תיאור מעודכן של "מה אעשה" או null>,"remove":<true אם להסיר את המהלך, אחרת false>}]}
 כלול רק מהלכים שצריך לשנות. אם הבקשה לא ברורה או לא רלוונטית, החזר {"updates":[]}.`;
 
     const result = await aiBrain.askBrain(shop, "770", prompt, []);
@@ -1217,6 +1292,16 @@ ${tasksJson}
       if (u.new_title) { vals.push(u.new_title); sets.push(`title=$${vals.length}`); }
       if (sets.length > 0) {
         await db.query(`UPDATE agent_tasks SET ${sets.join(', ')} WHERE id=$1 AND plan_id=$2`, vals);
+      }
+      // Keep the explanation in sync: write the updated "what" into params.details.what
+      // so the expanded explanation no longer shows stale numbers.
+      if (u.new_what) {
+        await db.query(
+          `UPDATE agent_tasks
+           SET params = jsonb_set(COALESCE(params,'{}'::jsonb), '{details,what}', to_jsonb($3::text), true)
+           WHERE id=$1 AND plan_id=$2`,
+          [u.id, plan_id, String(u.new_what)]
+        ).catch(e => console.error('revise new_what:', e.message));
       }
     }
 

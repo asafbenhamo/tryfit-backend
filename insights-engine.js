@@ -211,24 +211,107 @@ async function detectSalesShift(shop) {
   });
 }
 
+// ---------- 1b. Personal: big new customer worth welcoming ----------
+// A customer whose FIRST order happened in the last 7 days and was large.
+// Personal touch: welcome + nudge toward a second purchase.
+async function detectNewBigCustomers(shop) {
+  return runDetector('newBigCustomers', async () => {
+    const r = await db.query(
+      `SELECT first_name, last_name, email, phone, total_spent, orders_count,
+              last_order_date
+       FROM store_customers
+       WHERE shop_domain = $1
+         AND orders_count = 1
+         AND total_spent >= 300
+         AND last_order_date >= NOW() - INTERVAL '7 days'
+         AND ${notRecentlyContacted('email', 'phone')}
+         AND ${notOptedOut('email', 'phone')}
+       ORDER BY total_spent DESC
+       FETCH FIRST 3 ROWS ONLY`,
+      [shop]
+    );
+    return r.rows.map(c => ({
+      type: 'new_big_customer',
+      priority: 2,
+      title: `לקוחה חדשה ושווה: ${((c.first_name || '') + ' ' + (c.last_name || '')).trim()}`,
+      detail: `קנתה בפעם הראשונה ב-${Math.round(c.total_spent).toLocaleString()}₪ בימים האחרונים. פנייה אישית עכשיו (תודה + הטבה לקנייה הבאה) הופכת קונה חד-פעמית ללקוחה קבועה.`,
+      action_hint: 'welcome_second_purchase',
+      data: {
+        name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
+        email: c.email, phone: c.phone,
+        total_spent: Math.round(c.total_spent)
+      }
+    }));
+  });
+}
+
+// Relaxed fallback for dormant VIPs: when the strict pool is empty (everyone
+// recently contacted / opted out), widen thresholds so the merchant still gets
+// actionable per-customer opportunities instead of an empty list.
+async function detectDormantRelaxed(shop) {
+  return runDetector('dormantRelaxed', async () => {
+    const r = await db.query(
+      `SELECT first_name, last_name, email, phone,
+              total_spent, orders_count, last_order_date,
+              EXTRACT(DAY FROM (NOW() - last_order_date))::int AS days_since
+       FROM store_customers
+       WHERE shop_domain = $1
+         AND total_spent > 500
+         AND orders_count >= 1
+         AND last_order_date IS NOT NULL
+         AND last_order_date < NOW() - INTERVAL '30 days'
+         AND ${notRecentlyContacted('email', 'phone')}
+         AND ${notOptedOut('email', 'phone')}
+       ORDER BY total_spent DESC
+       FETCH FIRST 5 ROWS ONLY`,
+      [shop]
+    );
+    return r.rows.map(c => ({
+      type: 'dormant_customer',
+      priority: 2,
+      title: `לקוחה ששווה להחזיר: ${((c.first_name || '') + ' ' + (c.last_name || '')).trim()}`,
+      detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ולא קנתה כבר ${c.days_since} ימים. פנייה אישית עם הטבה יכולה להחזיר אותה.`,
+      action_hint: 'send_winback',
+      data: {
+        name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
+        email: c.email, phone: c.phone,
+        total_spent: Math.round(c.total_spent),
+        days_since: c.days_since
+      }
+    }));
+  });
+}
+
 // ---------- Main entry: gather all insights ----------
 async function getInsights(shop) {
-  const [vips, lowStock, abandoned, shift] = await Promise.all([
+  const [vips, lowStock, abandoned, shift, newBig] = await Promise.all([
     detectDormantVIPs(shop),
     detectLowStockBestsellers(shop),
     detectHighValueAbandoned(shop),
-    detectSalesShift(shop)
+    detectSalesShift(shop),
+    detectNewBigCustomers(shop)
   ]);
 
-  // Balance: lead with money-direct opportunities (abandoned carts, dormant VIPs),
-  // which are about recovering/closing revenue NOW - not just inventory info.
-  // Cap inventory alerts so they don't flood the list.
-  const moneyDirect = [...abandoned, ...vips];          // recover/close revenue now
+  // Customer-specific (personal) opportunities first: carts, VIPs, new customers.
+  let personal = [...abandoned, ...vips, ...newBig];
+
+  // GUARANTEE at least 3 personal opportunities: if the strict pools came back
+  // thin (cooldown/opt-out emptied them), widen with the relaxed dormant pool.
+  if (personal.length < 3) {
+    const relaxed = await detectDormantRelaxed(shop);
+    const seen = new Set(personal.map(p => (p.data && (p.data.email || p.data.phone)) || ''));
+    for (const rIns of relaxed) {
+      const key = (rIns.data && (rIns.data.email || rIns.data.phone)) || '';
+      if (key && !seen.has(key)) { personal.push(rIns); seen.add(key); }
+      if (personal.length >= 3) break;
+    }
+  }
+
   const supporting = [...shift, ...lowStock.slice(0, 2)]; // context + at most 2 stock alerts
 
-  const all = [...moneyDirect, ...supporting]
+  const all = [...personal, ...supporting]
     .sort((a, b) => a.priority - b.priority)
-    .slice(0, 6);
+    .slice(0, 7);
 
   return {
     ok: true,

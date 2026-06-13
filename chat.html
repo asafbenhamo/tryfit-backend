@@ -139,7 +139,7 @@
     background: var(--ai-bubble); color: var(--ai-text);
     border-radius: 20px 20px 5px 20px;
   }
-  .row.ai .bubble table { width:100%; border-collapse:collapse; margin:8px 0; font-size:13px; }
+  .row.ai .bubble table { width:100%; border-collapse:collapse; margin:8px 0; font-size:13px; display:block; overflow-x:auto; max-width:100%; -webkit-overflow-scrolling:touch; white-space:nowrap; }
   .row.ai .bubble th, .row.ai .bubble td { border:1px solid var(--border-strong); padding:6px 9px; text-align:right; }
   .row.ai .bubble th { background: rgba(11,138,255,0.10); font-weight:700; }
   .row.ai .bubble strong { color: #0a6fe0; font-weight: 700; }
@@ -1009,6 +1009,7 @@
   }
   function renderAgentPlan(wrap, data, checkedSet) {
     window._agentPlanId = data.plan_id;
+    window._agentPlanTasks = data.tasks || [];
     let html = '<div class="plan-head">📋 התוכנית שלי להיום</div>';
     html += '<div class="plan-intro">ניתחתי את החנות ובניתי תוכנית עבודה. סמן מה לבצע ואני אריץ הכל לבד. צפי הכנסה כולל: <strong>₪' + (data.projected_revenue||0).toLocaleString() + '</strong></div>';
     html += '<div class="plan-tasks">';
@@ -1086,14 +1087,20 @@
   async function executeAgentPlan(wrap) {
     const checks = [...wrap.querySelectorAll('.task-check:checked')].map(c => parseInt(c.value));
     if (checks.length === 0) { alert('סמן לפחות מהלך אחד'); return; }
+    // Count CUSTOMERS (not tasks): sum est_customers of the selected tasks.
+    let custTotal = 0;
+    (window._agentPlanTasks || []).forEach(t => {
+      if (checks.includes(t.id)) custTotal += parseInt(t.est_customers) || 0;
+    });
+    if (custTotal === 0) custTotal = checks.length; // fallback
     const autoAvail = window._waConfigured && window._waTemplates && window._waTemplates.length > 0;
     if (autoAvail) {
       // Offer manual vs automatic for the agent's sends.
-      askAgentSendMode(checks.length, (mode, templateName) => {
-        confirmSendGate(checks.length, 'whatsapp', () => runAgentPlanExec(wrap, checks, mode, templateName));
+      askAgentSendMode(custTotal, (mode, templateName) => {
+        confirmSendGate(custTotal, 'whatsapp', () => runAgentPlanExec(wrap, checks, mode, templateName));
       });
     } else {
-      confirmSendGate(checks.length, 'whatsapp', () => runAgentPlanExec(wrap, checks, 'manual', null));
+      confirmSendGate(custTotal, 'whatsapp', () => runAgentPlanExec(wrap, checks, 'manual', null));
     }
   }
 
@@ -1530,9 +1537,18 @@
     }).filter(c => c.email || c.phone);
     return { fields, customers, cleanText: text.replace(m[0], '').trim() };
   }
+  // Stable key for a campaign card: hash of its content. Survives reloads because
+  // it's derived from the saved chat message itself.
+  function campaignKey(camp) {
+    const s = JSON.stringify(camp.fields) + '|' + (camp.customers||[]).map(c=>c.phone||c.email).join(',');
+    let h = 0;
+    for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; }
+    return 'camp_' + Math.abs(h);
+  }
   function renderCampaignCard(camp, container) {
     const f = camp.fields;
     const custs = camp.customers;
+    const campKey = campaignKey(camp);
     const totalValue = custs.reduce((s,c) => s + (c.est_value||0), 0);
     const card = document.createElement('div');
     card.className = 'action-card campaign-card';
@@ -1561,6 +1577,19 @@
     const resultDiv = card.querySelector('.action-result');
     cancelBtn.onclick = () => card.remove();
     const custCount = (f.customers || '').split(';;').filter(Boolean).length || custs.length || 0;
+
+    // If this campaign already ran (squares saved), restore them instead of
+    // offering to activate again — so a refresh never loses the prepared sends.
+    fetch('/api/campaign/get-result?key=' + encodeURIComponent(campKey) + '&password=' + encodeURIComponent(PASSWORD))
+      .then(r => r.json()).then(d => {
+        if (d && d.found && Array.isArray(d.whatsapp) && d.whatsapp.length > 0) {
+          card.querySelector('.action-btns').style.display = 'none';
+          const modeRow = card.querySelector('.send-mode'); if (modeRow) modeRow.style.display = 'none';
+          resultDiv.style.display = 'block';
+          resultDiv.className = 'action-result success';
+          renderCampaignResult({ status: 'done', whatsapp: d.whatsapp, _restored: true }, resultDiv, campKey);
+        }
+      }).catch(() => {});
 
     function getSendMode() {
       const sel = card.querySelector('input[name="sendmode_' + camp.id + '"]:checked');
@@ -1591,7 +1620,7 @@
         resultDiv.style.display = 'block';
         if (data.ok) {
           resultDiv.className = 'action-result success';
-          pollCampaign(data.campaign_id, data.total, resultDiv);
+          pollCampaign(data.campaign_id, data.total, resultDiv, campKey);
         } else {
           resultDiv.className = 'action-result error';
           resultDiv.innerHTML = '❌ ' + (data.error || 'שגיאה');
@@ -1698,7 +1727,7 @@
     if (t.includes('personal') || t.includes('מותאמת')) return 'personalized_cart';
     return 'win_back';
   }
-  async function pollCampaign(id, total, el) {
+  async function pollCampaign(id, total, el, campKey) {
     let done = false;
     el.innerHTML = '<div class="camp-status">⚙️ מכין קופונים והודעות...</div><button class="action-stop" id="stopBtn_' + id + '">🛑 עצור קמפיין</button>';
     const stopBtn = el.querySelector('#stopBtn_' + id);
@@ -1721,7 +1750,7 @@
         if (c.status === 'done' || c.status === 'stopped') {
           done = true;
           const stopB = el.querySelector('.action-stop'); if (stopB) stopB.remove();
-          renderCampaignResult(c, el);
+          renderCampaignResult(c, el, campKey);
           loadMoneyCounter();
         } else if (statusEl) {
           statusEl.innerHTML = '⚙️ עובד... ' + c.done + '/' + c.total
@@ -1734,7 +1763,8 @@
   }
 
   // Render the finished campaign: email summary + a clickable WhatsApp list.
-  function renderCampaignResult(c, el) {
+  // campKey (optional): stable key for persisting this result across reloads.
+  function renderCampaignResult(c, el, campKey) {
     const wa = c.whatsapp || [];
     const verb = c.status === 'stopped' ? 'נעצר' : 'מוכן';
     let html = '<div class="camp-status">✅ הקמפיין ' + verb + '!';
@@ -1742,17 +1772,20 @@
     if (c.skipped > 0) html += ' (' + c.skipped + ' דולגו)';
     html += '</div>';
 
+    const preSent = wa.filter(w => w.sent).length;
     if (wa.length > 0) {
-      html += '<div class="wa-progress">📱 ' + wa.length + ' הודעות וואטסאפ מוכנות. לחץ "שלח" ליד כל לקוחה - זה יפתח וואטסאפ עם ההודעה מוכנה. <strong id="waSentCount">0</strong>/' + wa.length + ' נשלחו</div>';
+      html += '<div class="wa-progress">📱 ' + wa.length + ' הודעות וואטסאפ מוכנות. לחץ "שלח" ליד כל לקוחה - זה יפתח וואטסאפ עם ההודעה מוכנה. <strong id="waSentCount">' + preSent + '</strong>/' + wa.length + ' נשלחו</div>';
       html += '<div class="wa-list">';
       wa.forEach((w, i) => {
         const label = w.name || w.phone || 'לקוחה';
         const coup = w.coupon ? ('קוד: ' + w.coupon) : '';
+        const sentCls = w.sent ? ' sent' : '';
+        const sentTxt = w.sent ? '✓ נשלח' : 'שלח ←';
         html += '<div class="wa-item">'
           + '<div><div class="wa-name">' + esc(label) + '</div>'
           + (coup ? '<div class="wa-coupon">' + esc(coup) + '</div>' : '')
           + '</div>'
-          + '<a class="wa-send-btn" href="' + w.link + '" target="_blank" rel="noopener" data-i="' + i + '">שלח ←</a>'
+          + '<a class="wa-send-btn' + sentCls + '" href="' + w.link + '" target="_blank" rel="noopener" data-i="' + i + '" data-phone="' + esc(w.phone || '') + '">' + sentTxt + '</a>'
           + '</div>';
       });
       html += '</div>';
@@ -1763,7 +1796,15 @@
     }
     el.innerHTML = html;
 
-    let sentCount = 0;
+    // Persist the prepared squares so a refresh doesn't lose them.
+    if (campKey && wa.length > 0 && !c._restored) {
+      fetch('/api/campaign/save-result', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD, key: campKey, whatsapp: wa })
+      }).catch(() => {});
+    }
+
+    let sentCount = preSent;
     el.querySelectorAll('.wa-send-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         if (btn.classList.contains('sent')) return;
@@ -1772,6 +1813,13 @@
         sentCount++;
         const counter = el.querySelector('#waSentCount');
         if (counter) counter.textContent = sentCount;
+        // Persist the sent state.
+        if (campKey && btn.dataset.phone) {
+          fetch('/api/campaign/mark-sent', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: PASSWORD, key: campKey, phone: btn.dataset.phone })
+          }).catch(() => {});
+        }
       });
     });
   }
