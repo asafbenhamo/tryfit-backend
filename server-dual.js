@@ -822,16 +822,17 @@ app.get("/admin/debug-insights", async (req, res) => {
          AND last_order_date IS NOT NULL AND last_order_date < NOW() - INTERVAL '21 days'`, [shop]);
     out.lastresort_pool_no_optout_filter = r.rows[0].n;
   } catch (e) { out.lastresort_pool_no_optout_filter = { error: e.message }; }
-  // 4. Same WITH the opt-out filter (the actual query)
+  // 4. Same WITH the opt-out filter (properly qualified columns).
   try {
     const r = await db.query(
-      `SELECT COUNT(*)::int AS n FROM store_customers
-       WHERE shop_domain=$1 AND total_spent > 200 AND orders_count >= 1
-         AND last_order_date IS NOT NULL AND last_order_date < NOW() - INTERVAL '21 days'
+      `SELECT COUNT(*)::int AS n FROM store_customers sc
+       WHERE sc.shop_domain=$1 AND sc.total_spent > 200 AND sc.orders_count >= 1
+         AND sc.last_order_date IS NOT NULL AND sc.last_order_date < NOW() - INTERVAL '21 days'
          AND NOT EXISTS (SELECT 1 FROM message_optouts mo WHERE mo.shop_domain=$1
-           AND ((mo.email IS NOT NULL AND email IS NOT NULL AND lower(mo.email)=lower(email))
-             OR (mo.phone IS NOT NULL AND phone IS NOT NULL
-                 AND regexp_replace(mo.phone,'[^0-9]','','g')=regexp_replace(phone,'[^0-9]','','g'))))`, [shop]);
+           AND ((mo.email IS NOT NULL AND mo.email <> '' AND sc.email IS NOT NULL AND sc.email <> '' AND lower(mo.email)=lower(sc.email))
+             OR (mo.phone IS NOT NULL AND regexp_replace(mo.phone,'[^0-9]','','g') <> ''
+                 AND sc.phone IS NOT NULL AND regexp_replace(sc.phone,'[^0-9]','','g') <> ''
+                 AND regexp_replace(mo.phone,'[^0-9]','','g')=regexp_replace(sc.phone,'[^0-9]','','g'))))`, [shop]);
     out.lastresort_pool_with_optout_filter = r.rows[0].n;
   } catch (e) { out.lastresort_pool_with_optout_filter = { error: e.message }; }
   // 5. Sample of top inactive customers (names) to confirm data exists
@@ -860,6 +861,28 @@ app.get("/admin/debug-insights", async (req, res) => {
       out.cleanup_deleted = r.rowCount;
     } catch (e) { out.cleanup = { error: e.message }; }
   }
+  // 8. How many customers does EACH opt-out row match? (find the culprit)
+  try {
+    const rows = await db.query(`SELECT email, phone FROM message_optouts WHERE shop_domain=$1`, [shop]);
+    out.per_optout_impact = [];
+    for (const o of rows.rows) {
+      const digits = (o.phone || '').replace(/[^0-9]/g, '');
+      const m = await db.query(
+        `SELECT COUNT(*)::int AS n FROM store_customers
+         WHERE shop_domain=$1
+           AND ( ($2 <> '' AND regexp_replace(COALESCE(phone,''),'[^0-9]','','g') = $2)
+              OR ($3 <> '' AND lower(COALESCE(email,'')) = lower($3)) )`,
+        [shop, digits, o.email || '']);
+      out.per_optout_impact.push({ email: o.email, phone: o.phone, digits, matches_customers: m.rows[0].n });
+    }
+  } catch (e) { out.per_optout_impact = { error: e.message }; }
+  // 9. How many customers have NULL/empty phone? (these break naive matching)
+  try {
+    const r = await db.query(
+      `SELECT COUNT(*)::int AS n FROM store_customers
+       WHERE shop_domain=$1 AND (phone IS NULL OR regexp_replace(phone,'[^0-9]','','g')='')`, [shop]);
+    out.customers_without_phone = r.rows[0].n;
+  } catch (e) { out.customers_without_phone = { error: e.message }; }
   res.json(out);
 });
 

@@ -73,7 +73,7 @@ async function detectDormantVIPs(shop) {
          AND last_order_date IS NOT NULL
          AND last_order_date < NOW() - INTERVAL '45 days'
          AND ${notRecentlyContacted('email', 'phone')}
-         AND ${notOptedOut('email', 'phone')}
+         AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY total_spent DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
@@ -154,7 +154,7 @@ async function detectHighValueAbandoned(shop) {
          AND total_price >= 400
          AND shopify_created_at >= NOW() - INTERVAL '7 days'
          AND ${notRecentlyContacted('email', 'phone')}
-         AND ${notOptedOut('email', 'phone')}
+         AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY total_price DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
@@ -227,7 +227,7 @@ async function detectNewBigCustomers(shop) {
          AND total_spent >= 300
          AND last_order_date >= NOW() - INTERVAL '7 days'
          AND ${notRecentlyContacted('email', 'phone')}
-         AND ${notOptedOut('email', 'phone')}
+         AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY total_spent DESC
        FETCH FIRST 3 ROWS ONLY`,
       [shop]
@@ -263,7 +263,7 @@ async function detectDormantRelaxed(shop) {
          AND last_order_date IS NOT NULL
          AND last_order_date < NOW() - INTERVAL '30 days'
          AND ${notRecentlyContacted('email', 'phone')}
-         AND ${notOptedOut('email', 'phone')}
+         AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY total_spent DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
@@ -354,7 +354,7 @@ async function detectPersonalLastResort(shop) {
          AND orders_count >= 1
          AND last_order_date IS NOT NULL
          AND last_order_date < NOW() - INTERVAL '21 days'
-         AND ${notOptedOut('email', 'phone')}
+         AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY total_spent DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
