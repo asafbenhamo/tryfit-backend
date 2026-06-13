@@ -313,9 +313,12 @@ async function getInsights(shop) {
 
   const supporting = [...shift, ...lowStock.slice(0, 2)]; // context + at most 2 stock alerts
 
-  const all = [...personal, ...supporting]
-    .sort((a, b) => a.priority - b.priority)
-    .slice(0, 7);
+  // Display order: supporting insights (stock/sales shift) FIRST, then the
+  // personal per-customer opportunities BELOW them (merchant preference).
+  const supportingSorted = supporting.sort((a, b) => a.priority - b.priority);
+  const personalSorted = personal.filter(isPersonal);
+
+  const all = [...supportingSorted, ...personalSorted].slice(0, 8);
 
   return {
     ok: true,
@@ -340,16 +343,15 @@ function isPersonal(ins) {
   return ins && ['dormant_vip', 'new_big_customer', 'dormant_customer', 'high_value_abandoned'].includes(ins.type);
 }
 
-// Last resort: best customers by spend, IGNORING the contact cooldown (but never
-// opted-out). Resilient to NULL last_order_date (falls back to shopify_updated_at /
-// shopify_created_at) so high-value customers always surface. Ensures the list
-// always has named customers worth a personal message.
+// Last resort: high-value customers, IGNORING the contact cooldown (but never
+// opted-out). Resilient to NULL last_order_date. Pulls a WIDE pool and randomly
+// samples from it, so each visit surfaces DIFFERENT customers worth contacting
+// (not the same top 3 every time).
 async function detectPersonalLastResort(shop) {
   return runDetector('personalLastResort', async () => {
     const r = await db.query(
       `SELECT first_name, last_name, email, phone,
               total_spent, orders_count,
-              COALESCE(last_order_date, shopify_updated_at, shopify_created_at) AS effective_date,
               EXTRACT(DAY FROM (NOW() - COALESCE(last_order_date, shopify_updated_at, shopify_created_at)))::int AS days_since
        FROM store_customers
        WHERE shop_domain = $1
@@ -357,10 +359,16 @@ async function detectPersonalLastResort(shop) {
          AND orders_count >= 1
          AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY total_spent DESC
-       FETCH FIRST 5 ROWS ONLY`,
+       FETCH FIRST 400 ROWS ONLY`,
       [shop]
     );
-    return r.rows.map(c => {
+    // Randomly sample up to 5 from the top-400 pool so the suggestions rotate widely.
+    const pool = [...r.rows];
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+    return pool.slice(0, 5).map(c => {
       const days = c.days_since;
       const sinceTxt = (days != null && days > 0) ? `לא קנתה כבר ${days} ימים. ` : '';
       return {
