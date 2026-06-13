@@ -1093,7 +1093,10 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
         }});
     }
 
-    const oneTime = (vips.customers || []).filter(c => (c.orders_count || 0) === 1);
+    // One-time buyers get their OWN query (not derived from the VIP list, which
+    // has a ₪1,000 minimum that wrongly emptied this move most days).
+    const oneTimers = await aiTools.getDormantCustomers(shop, { limit: 20, daysInactive: 20, minSpent: 0 });
+    const oneTime = (oneTimers.customers || []).filter(c => (c.orders_count || 0) === 1);
     if (oneTime.length > 0) {
       const val = oneTime.reduce((s, c) => s + parseFloat(c.total_spent || 0), 0);
       moves.push({ priority: 3, move_type: 'one_time', segment: 'one_time',
@@ -1119,6 +1122,25 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
           goal: 'למנף מוצר שכבר מוכיח את עצמו, ולמכור אותו ליותר אנשים לפני שאוזל.',
           why: 'מוצר שמוכר חזק הוא הוכחה חיה לביקוש - קל יותר למכור עוד ממנו מאשר לדחוף מוצר חדש לא מוכח. לקוחות חוזרים כבר סומכים על הטעם שלך, אז המלצה על להיט תתקבל בחום. זה גם יוצר תחושת דחיפות (FOMO) אם המלאי מוגבל.'
         }});
+    }
+
+    // GUARANTEE at least 3 moves when the store has customers: if strict pools
+    // came back thin, add a relaxed win-back move (lower spend bar, 21+ days).
+    if (moves.length < 3) {
+      const relaxed = await aiTools.getDormantCustomers(shop, { limit: 20, daysInactive: 21, minSpent: 300 });
+      const pool = (relaxed.customers || []).filter(c =>
+        !moves.some(m => m.move_type === 'dormant_vip') || parseFloat(c.total_spent || 0) < 1000);
+      if (pool.length > 0) {
+        const val = pool.reduce((s, c) => s + parseFloat(c.total_spent || 0) * 0.2, 0);
+        moves.push({ priority: moves.length + 1, move_type: 'dormant_vip', segment: 'dormant_relaxed',
+          title: `החזרת ${pool.length} לקוחות ששוות לחזר אחריהן`, percentage: 12,
+          est_customers: pool.length, projected_revenue: Math.round(val),
+          details: {
+            what: `אפנה ל-${pool.length} לקוחות (שהוציאו מעל ₪300) שלא קנו מעל 3 שבועות, עם הודעה אישית וקוד 12%.`,
+            goal: 'להחזיר לקוחות ששוות כסף לפני שהן נשכחות.',
+            why: 'לקוחה שכבר קנתה והוציאה מאות שקלים שווה הרבה יותר מלקוחה חדשה. פנייה אישית בזמן הנכון מחזירה חלק משמעותי מהן בעלות אפסית.'
+          }});
+      }
     }
 
     if (moves.length === 0) {
