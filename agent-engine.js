@@ -214,12 +214,20 @@ async function runTaskAuto(shop, task, segment, templateName) {
       // Email fallback (free). Create coupon, send; clean up if send throws.
       const { code: coupon, priceRuleId } = await makeCoupon(c.name);
       try {
+        const storeName = (shopify.getStore(shop)?.name) || (shop === 'seven770.myshopify.com' ? '770' : shop.replace('.myshopify.com',''));
+        const storeUrl = shopify.getPublicDomain(shop);
         const body = tmpl.body.replace(/\{NAME\}/g, c.name || '').replace(/\{COUPON\}/g, coupon || '');
-        await mailer.sendEmail(shop, { to: c.email, subject: tmpl.subject, text: body });
-        sentEmail++; await logAction(c, 'email', coupon);
+        const html = mailer.buildHtmlEmail(body, {
+          brand: storeName, to: c.email,
+          cta_url: storeUrl, cta_label: 'לאתר החנות',
+          footer: `נשלח באמצעות היועץ החכם של ${storeName}`
+        });
+        const sent = await mailer.sendEmail({ to: c.email, subject: tmpl.subject, html, text: body });
+        if (sent && sent.ok) { sentEmail++; await logAction(c, 'email', coupon); }
+        else { failed++; if (priceRuleId) await shopify.deleteDiscountCode(shop, priceRuleId).catch(()=>{}); }
       } catch (e) {
         failed++;
-        if (priceRuleId) await shopify.deleteDiscountCode(shop, priceRuleId).catch(()=>{}); // #1 cleanup
+        if (priceRuleId) await shopify.deleteDiscountCode(shop, priceRuleId).catch(()=>{}); // cleanup
       }
     } else {
       failed++;

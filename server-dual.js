@@ -256,6 +256,13 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "tryfit2026";
 const MASTER_PASSWORD = process.env.MASTER_PASSWORD || null;
 const DEFAULT_SHOP = "seven770.myshopify.com";
 
+// Display name of a shop for emails/branding (falls back to the domain prefix).
+function storeBrand(shop) {
+  if (shop === DEFAULT_SHOP) return "770";
+  const s = shopify.getStore(shop);
+  return (s && s.name) || (shop || "").replace(".myshopify.com", "");
+}
+
 // Pull the password from wherever it arrived (query, body, or header).
 function extractPassword(req) {
   return (req.query && req.query.password)
@@ -965,7 +972,7 @@ app.post("/api/send-email", express.json(), async (req, res) => {
       return res.status(200).json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail });
     }
 
-    const html = mailer.buildHtmlEmail(body, { cta_url, cta_label, brand: "770", to });
+    const html = mailer.buildHtmlEmail(body, { cta_url, cta_label, brand: storeBrand(shop), to });
     const result = await mailer.sendEmail({ to, subject, html, text: body });
     if (!result.ok) {
       return res.status(400).json(result);
@@ -1489,7 +1496,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
         result.steps.message = { channel: "email", ok: false, blocked: true, reason: gate.reason, detail: gate.detail };
         return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
       }
-      const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: "770", to: email });
+      const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: storeBrand(shop), to: email });
       const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הודעה מ-770", html, text: finalBody });
       if (!sent.ok) {
         result.steps.message = { channel: "email", ok: false, error: sent.error };
@@ -1592,7 +1599,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
         return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
       }
       const html = mailer.buildHtmlEmail(message_body || "הכנו לך עגלה אישית!", {
-        cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: "770", to: email
+        cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email
       });
       const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
       if (!sent.ok) return res.status(400).json({ ok: false, error: "שליחת המייל נכשלה: " + sent.error });
@@ -1693,7 +1700,7 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
           if (!gate.allowed) { skipped++; }
           else {
             const html = mailer.buildHtmlEmail(cart.body || "הכנו לך עגלה אישית!", {
-              cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: "770", to: email
+              cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email
             });
             const sent = await mailer.sendEmail({ to: email, subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
             if (sent.ok) emailsSent++; else failed++;
