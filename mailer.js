@@ -1,14 +1,11 @@
 // mailer.js - Email sending via Resend for the AI Chief of Staff.
 // Sends real emails (e.g. cart-recovery, win-back) after merchant approval.
 // Fails safe: if RESEND_API_KEY is missing, returns an error instead of crashing.
-
 const RESEND_API_KEY = process.env.RESEND_API_KEY || null;
-
 // Default sender. Until a custom domain is verified in Resend, use their
 // shared sandbox sender. Once sevenseventy.co.il is verified, switch FROM_EMAIL.
 const FROM_EMAIL = process.env.MAIL_FROM || "770 <onboarding@resend.dev>";
 const REPLY_TO = process.env.MAIL_REPLY_TO || "sevenseventyshopify@gmail.com";
-
 /**
  * Send a single email.
  * Returns { ok, id } or { ok:false, error }.
@@ -20,7 +17,6 @@ async function sendEmail({ to, subject, html, text }) {
   if (!to || !subject || (!html && !text)) {
     return { ok: false, error: "missing to/subject/body" };
   }
-
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -37,7 +33,6 @@ async function sendEmail({ to, subject, html, text }) {
         text: text || undefined
       })
     });
-
     const data = await res.json();
     if (res.status >= 200 && res.status < 300) {
       console.log(`📧 [Mailer] Sent to ${to}: "${subject}" (id: ${data.id})`);
@@ -51,14 +46,25 @@ async function sendEmail({ to, subject, html, text }) {
     return { ok: false, error: err.message };
   }
 }
-
 /**
  * Wrap plain text into a simple, clean RTL Hebrew HTML email.
+ * URLs inside the text are turned into clickable links automatically.
  */
 function buildHtmlEmail(bodyText, opts = {}) {
-  const safe = String(bodyText || "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/\n/g, "<br>");
+  // 1. Escape HTML first (security: never inject raw HTML from text).
+  let safe = String(bodyText || "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  // 2. Auto-link URLs so they're clickable in the email. Runs AFTER escaping,
+  //    so the URLs themselves are safe. Matches http(s):// up to whitespace.
+  //    Trailing punctuation (. , ) ! ?) is kept out of the link.
+  safe = safe.replace(/(https?:\/\/[^\s<]+[^\s<.,)!?])/g, (url) => {
+    return `<a href="${url}" style="color:#0b8aff;text-decoration:underline;word-break:break-all;">${url}</a>`;
+  });
+
+  // 3. Newlines to <br> (after linking, so URLs split across lines still work).
+  safe = safe.replace(/\n/g, "<br>");
+
   const cta = opts.cta_url && opts.cta_label
     ? `<div style="margin:24px 0;text-align:center;">
          <a href="${opts.cta_url}" style="background:#0b8aff;color:#fff;text-decoration:none;
@@ -89,9 +95,7 @@ function buildHtmlEmail(bodyText, opts = {}) {
 </body>
 </html>`;
 }
-
 function isConfigured() {
   return !!RESEND_API_KEY;
 }
-
 module.exports = { sendEmail, buildHtmlEmail, isConfigured };
