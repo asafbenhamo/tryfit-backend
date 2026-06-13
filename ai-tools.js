@@ -117,7 +117,7 @@ async function getDormantCustomers(shopDomain, options = {}) {
        WHERE shop_domain = $1
          AND orders_count > 0
          AND total_spent >= $2
-         AND ((last_order_date IS NULL
+         AND (last_order_date IS NULL
               OR last_order_date < NOW() - ($3 || ' days')::interval)${ex.clause}${EXCLUDE_OPTED_OUT}
        ORDER BY total_spent DESC
        LIMIT $${params.length}`,
