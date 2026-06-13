@@ -295,16 +295,18 @@ async function getInsights(shop) {
   // Customer-specific (personal) opportunities first: carts, VIPs, new customers.
   let personal = [...abandoned, ...vips, ...newBig];
 
-  // GUARANTEE at least 3 personal opportunities: if the strict pools came back
-  // thin (cooldown/opt-out emptied them), widen with the relaxed dormant pool.
-  if (personal.length < 3) {
+  // GUARANTEE at least 3 personal opportunities. If strict pools came back thin
+  // (cooldown/opt-out emptied them), widen in two stages:
+  //   (1) relaxed dormant pool (lower spend bar, still respects cooldown+optout)
+  //   (2) last-resort pool that IGNORES cooldown (still respects opt-out!) so the
+  //       merchant always sees named customers worth contacting.
+  if (personal.filter(isPersonal).length < 3) {
     const relaxed = await detectDormantRelaxed(shop);
-    const seen = new Set(personal.map(p => (p.data && (p.data.email || p.data.phone)) || ''));
-    for (const rIns of relaxed) {
-      const key = (rIns.data && (rIns.data.email || rIns.data.phone)) || '';
-      if (key && !seen.has(key)) { personal.push(rIns); seen.add(key); }
-      if (personal.length >= 3) break;
-    }
+    personal = mergePersonal(personal, relaxed, 3);
+  }
+  if (personal.filter(isPersonal).length < 3) {
+    const lastResort = await detectPersonalLastResort(shop);
+    personal = mergePersonal(personal, lastResort, 3);
   }
 
   const supporting = [...shift, ...lowStock.slice(0, 2)]; // context + at most 2 stock alerts
@@ -319,6 +321,56 @@ async function getInsights(shop) {
     count: all.length,
     insights: all
   };
+}
+
+// Merge new personal opportunities in, de-duplicating by email/phone, up to `target`.
+function mergePersonal(current, additions, target) {
+  const seen = new Set(current.map(p => (p.data && (p.data.email || p.data.phone)) || ''));
+  for (const ins of additions) {
+    if (current.filter(isPersonal).length >= target) break;
+    const key = (ins.data && (ins.data.email || ins.data.phone)) || '';
+    if (key && !seen.has(key)) { current.push(ins); seen.add(key); }
+  }
+  return current;
+}
+
+function isPersonal(ins) {
+  return ins && ['dormant_vip', 'new_big_customer', 'dormant_customer', 'high_value_abandoned'].includes(ins.type);
+}
+
+// Last resort: best customers by spend, inactive 21+ days, IGNORING the contact
+// cooldown (but never opted-out). Ensures the list always has named customers.
+async function detectPersonalLastResort(shop) {
+  return runDetector('personalLastResort', async () => {
+    const r = await db.query(
+      `SELECT first_name, last_name, email, phone,
+              total_spent, orders_count, last_order_date,
+              EXTRACT(DAY FROM (NOW() - last_order_date))::int AS days_since
+       FROM store_customers
+       WHERE shop_domain = $1
+         AND total_spent > 200
+         AND orders_count >= 1
+         AND last_order_date IS NOT NULL
+         AND last_order_date < NOW() - INTERVAL '21 days'
+         AND ${notOptedOut('email', 'phone')}
+       ORDER BY total_spent DESC
+       FETCH FIRST 5 ROWS ONLY`,
+      [shop]
+    );
+    return r.rows.map(c => ({
+      type: 'dormant_customer',
+      priority: 2,
+      title: `לקוחה ששווה לפנות אליה: ${((c.first_name || '') + ' ' + (c.last_name || '')).trim()}`,
+      detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ולא קנתה כבר ${c.days_since} ימים. פנייה אישית עם הטבה יכולה להחזיר אותה לקנייה.`,
+      action_hint: 'send_winback',
+      data: {
+        name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
+        email: c.email, phone: c.phone,
+        total_spent: Math.round(c.total_spent),
+        days_since: c.days_since
+      }
+    }));
+  });
 }
 
 module.exports = {
