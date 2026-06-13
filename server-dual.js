@@ -693,6 +693,16 @@ async function ensureCampaignResultsTable() {
       created_at TIMESTAMPTZ DEFAULT NOW(),
       PRIMARY KEY (shop_domain, campaign_key)
     )`).catch(e => console.error('campaign_results table:', e.message));
+  // Opt-out list (customers who asked to stop). Referenced by insights + ai-tools
+  // opt-out filters; must exist or those queries throw and return empty.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS message_optouts (
+      shop_domain TEXT NOT NULL,
+      email TEXT,
+      phone TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`).catch(e => console.error('message_optouts table:', e.message));
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_optouts_shop ON message_optouts(shop_domain)`).catch(()=>{});
 }
 ensureCampaignResultsTable();
 
@@ -1443,7 +1453,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
         const suffix = Math.floor(Math.random() * 900 + 100);
         finalCode = `${namePart}${amt}${suffix}`;
       }
-      const c = await shopify.createDiscountCode(shop, {
+      let c = await shopify.createDiscountCode(shop, {
         percentage: isFixed ? null : (coupon_percentage || 10),
         amount_ils: isFixed ? parseFloat(coupon_ils) : null,
         combine: coupon_combine === false ? false : true,
@@ -1451,6 +1461,20 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
         days_valid: coupon_days || 2,
         title: `יועץ: ${action_type || 'campaign'} - ${customer_name || email || ''}`
       });
+      // If the code already exists (created recently, still valid), Shopify returns
+      // "must be unique". Instead of failing, retry once with a random suffix so the
+      // merchant can always send — a fresh unique code is created.
+      if (!c.ok && /must be unique|already exists|taken/i.test(c.error || "")) {
+        const retryCode = `${finalCode}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+        c = await shopify.createDiscountCode(shop, {
+          percentage: isFixed ? null : (coupon_percentage || 10),
+          amount_ils: isFixed ? parseFloat(coupon_ils) : null,
+          combine: coupon_combine === false ? false : true,
+          code: retryCode,
+          days_valid: coupon_days || 2,
+          title: `יועץ: ${action_type || 'campaign'} - ${customer_name || email || ''}`
+        });
+      }
       if (!c.ok) {
         result.steps.coupon = { ok: false, error: c.error, needs_scope: c.needs_scope };
         return res.status(400).json({ ok: false, error: "יצירת הקופון נכשלה: " + c.error, steps: result.steps });
