@@ -795,6 +795,57 @@ app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
 
 // Admin/master: set a store's 360dialog API key (+ optional template language).
 // /admin/set-wa-key?password=...&shop=xxx.myshopify.com&key=...&language=he
+// TEMP DEBUG: diagnose why personal opportunities are empty. Runs each query
+// independently and reports row counts or the exact error. Remove after fixing.
+app.get("/admin/debug-insights", async (req, res) => {
+  if ((req.query.password || "") !== MASTER_PASSWORD && (req.query.password || "") !== process.env.ADMIN_PASSWORD) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const shop = req.query.shop || DEFAULT_SHOP;
+  const out = {};
+  // 1. Does message_optouts exist?
+  try {
+    const t = await db.query(`SELECT COUNT(*)::int AS n FROM message_optouts WHERE shop_domain=$1`, [shop]);
+    out.optout_table = { exists: true, rows: t.rows[0].n };
+  } catch (e) { out.optout_table = { exists: false, error: e.message }; }
+  // 2. Raw store_customers columns
+  try {
+    const c = await db.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_name='store_customers' ORDER BY column_name`);
+    out.customer_columns = c.rows.map(r => r.column_name);
+  } catch (e) { out.customer_columns = { error: e.message }; }
+  // 3. How many customers spent > 200 and inactive 21+ days (the last-resort pool)
+  try {
+    const r = await db.query(
+      `SELECT COUNT(*)::int AS n FROM store_customers
+       WHERE shop_domain=$1 AND total_spent > 200 AND orders_count >= 1
+         AND last_order_date IS NOT NULL AND last_order_date < NOW() - INTERVAL '21 days'`, [shop]);
+    out.lastresort_pool_no_optout_filter = r.rows[0].n;
+  } catch (e) { out.lastresort_pool_no_optout_filter = { error: e.message }; }
+  // 4. Same WITH the opt-out filter (the actual query)
+  try {
+    const r = await db.query(
+      `SELECT COUNT(*)::int AS n FROM store_customers
+       WHERE shop_domain=$1 AND total_spent > 200 AND orders_count >= 1
+         AND last_order_date IS NOT NULL AND last_order_date < NOW() - INTERVAL '21 days'
+         AND NOT EXISTS (SELECT 1 FROM message_optouts mo WHERE mo.shop_domain=$1
+           AND ((mo.email IS NOT NULL AND email IS NOT NULL AND lower(mo.email)=lower(email))
+             OR (mo.phone IS NOT NULL AND phone IS NOT NULL
+                 AND regexp_replace(mo.phone,'[^0-9]','','g')=regexp_replace(phone,'[^0-9]','','g'))))`, [shop]);
+    out.lastresort_pool_with_optout_filter = r.rows[0].n;
+  } catch (e) { out.lastresort_pool_with_optout_filter = { error: e.message }; }
+  // 5. Sample of top inactive customers (names) to confirm data exists
+  try {
+    const r = await db.query(
+      `SELECT first_name, last_name, total_spent, orders_count,
+              last_order_date, EXTRACT(DAY FROM (NOW()-last_order_date))::int AS days_since
+       FROM store_customers WHERE shop_domain=$1 AND total_spent > 200
+       ORDER BY total_spent DESC FETCH FIRST 3 ROWS ONLY`, [shop]);
+    out.sample_top_customers = r.rows;
+  } catch (e) { out.sample_top_customers = { error: e.message }; }
+  res.json(out);
+});
+
 app.get("/admin/set-wa-key", async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
