@@ -340,38 +340,43 @@ function isPersonal(ins) {
   return ins && ['dormant_vip', 'new_big_customer', 'dormant_customer', 'high_value_abandoned'].includes(ins.type);
 }
 
-// Last resort: best customers by spend, inactive 21+ days, IGNORING the contact
-// cooldown (but never opted-out). Ensures the list always has named customers.
+// Last resort: best customers by spend, IGNORING the contact cooldown (but never
+// opted-out). Resilient to NULL last_order_date (falls back to shopify_updated_at /
+// shopify_created_at) so high-value customers always surface. Ensures the list
+// always has named customers worth a personal message.
 async function detectPersonalLastResort(shop) {
   return runDetector('personalLastResort', async () => {
     const r = await db.query(
       `SELECT first_name, last_name, email, phone,
-              total_spent, orders_count, last_order_date,
-              EXTRACT(DAY FROM (NOW() - last_order_date))::int AS days_since
+              total_spent, orders_count,
+              COALESCE(last_order_date, shopify_updated_at, shopify_created_at) AS effective_date,
+              EXTRACT(DAY FROM (NOW() - COALESCE(last_order_date, shopify_updated_at, shopify_created_at)))::int AS days_since
        FROM store_customers
        WHERE shop_domain = $1
          AND total_spent > 200
          AND orders_count >= 1
-         AND last_order_date IS NOT NULL
-         AND last_order_date < NOW() - INTERVAL '21 days'
          AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY total_spent DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
     );
-    return r.rows.map(c => ({
-      type: 'dormant_customer',
-      priority: 2,
-      title: `לקוחה ששווה לפנות אליה: ${((c.first_name || '') + ' ' + (c.last_name || '')).trim()}`,
-      detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ולא קנתה כבר ${c.days_since} ימים. פנייה אישית עם הטבה יכולה להחזיר אותה לקנייה.`,
-      action_hint: 'send_winback',
-      data: {
-        name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
-        email: c.email, phone: c.phone,
-        total_spent: Math.round(c.total_spent),
-        days_since: c.days_since
-      }
-    }));
+    return r.rows.map(c => {
+      const days = c.days_since;
+      const sinceTxt = (days != null && days > 0) ? `לא קנתה כבר ${days} ימים. ` : '';
+      return {
+        type: 'dormant_customer',
+        priority: 2,
+        title: `לקוחה ששווה לפנות אליה: ${((c.first_name || '') + ' ' + (c.last_name || '')).trim()}`,
+        detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ב-${c.orders_count} הזמנות. ${sinceTxt}פנייה אישית עם הטבה יכולה להחזיר אותה לקנייה.`,
+        action_hint: 'send_winback',
+        data: {
+          name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
+          email: c.email, phone: c.phone,
+          total_spent: Math.round(c.total_spent),
+          days_since: days
+        }
+      };
+    });
   });
 }
 
