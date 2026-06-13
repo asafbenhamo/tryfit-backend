@@ -46,8 +46,8 @@ async function isOptedOut(shop, { email, phone } = {}) {
     const r = await db.query(
       `SELECT 1 FROM message_optouts
        WHERE shop_domain = $1
-         AND (($2::text IS NOT NULL AND email = $2)
-           OR ($3::text IS NOT NULL AND phone = $3))
+         AND (($2::text IS NOT NULL AND $2 <> '' AND email = $2)
+           OR ($3::text IS NOT NULL AND $3 <> '' AND phone = $3))
        FETCH FIRST 1 ROWS ONLY`,
       [shop, email || null, phone || null]
     );

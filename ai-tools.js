@@ -68,10 +68,11 @@ const EXCLUDE_OPTED_OUT = `
     SELECT 1 FROM message_optouts mo
     WHERE mo.shop_domain = store_customers.shop_domain
       AND (
-        (mo.email IS NOT NULL AND store_customers.email IS NOT NULL
+        (mo.email IS NOT NULL AND mo.email <> '' AND store_customers.email IS NOT NULL AND store_customers.email <> ''
          AND lower(mo.email) = lower(store_customers.email))
         OR
-        (mo.phone IS NOT NULL AND store_customers.phone IS NOT NULL
+        (mo.phone IS NOT NULL AND regexp_replace(mo.phone,'[^0-9]','','g') <> ''
+         AND store_customers.phone IS NOT NULL AND regexp_replace(store_customers.phone,'[^0-9]','','g') <> ''
          AND regexp_replace(mo.phone,'[^0-9]','','g') = regexp_replace(store_customers.phone,'[^0-9]','','g'))
       )
   )`;
@@ -587,9 +588,10 @@ async function getAbandonedCheckouts(shopDomain, options = {}) {
            SELECT 1 FROM message_optouts mo
            WHERE mo.shop_domain = abandoned_checkouts.shop_domain
              AND (
-               (mo.email IS NOT NULL AND lower(mo.email) = lower(abandoned_checkouts.email))
+               (mo.email IS NOT NULL AND mo.email <> '' AND lower(mo.email) = lower(abandoned_checkouts.email))
                OR
-               (mo.phone IS NOT NULL AND abandoned_checkouts.phone IS NOT NULL
+               (mo.phone IS NOT NULL AND regexp_replace(mo.phone,'[^0-9]','','g') <> ''
+                AND abandoned_checkouts.phone IS NOT NULL
                 AND regexp_replace(mo.phone,'[^0-9]','','g') = regexp_replace(abandoned_checkouts.phone,'[^0-9]','','g'))
              )
          )

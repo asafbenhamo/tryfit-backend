@@ -843,6 +843,23 @@ app.get("/admin/debug-insights", async (req, res) => {
        ORDER BY total_spent DESC FETCH FIRST 3 ROWS ONLY`, [shop]);
     out.sample_top_customers = r.rows;
   } catch (e) { out.sample_top_customers = { error: e.message }; }
+  // 6. Show the actual opt-out rows (to see if they have empty strings)
+  try {
+    const r = await db.query(
+      `SELECT email, phone, created_at FROM message_optouts WHERE shop_domain=$1`, [shop]);
+    out.optout_rows = r.rows;
+  } catch (e) { out.optout_rows = { error: e.message }; }
+  // 7. Optional cleanup: ?cleanup=1 removes garbage opt-out rows (no usable email or phone).
+  if (req.query.cleanup === '1') {
+    try {
+      const r = await db.query(
+        `DELETE FROM message_optouts
+         WHERE shop_domain=$1
+           AND (email IS NULL OR email = '')
+           AND (phone IS NULL OR regexp_replace(phone,'[^0-9]','','g') = '')`, [shop]);
+      out.cleanup_deleted = r.rowCount;
+    } catch (e) { out.cleanup = { error: e.message }; }
+  }
   res.json(out);
 });
 

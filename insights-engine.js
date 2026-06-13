@@ -37,9 +37,11 @@ function notOptedOut(emailCol, phoneCol) {
     SELECT 1 FROM message_optouts mo
     WHERE mo.shop_domain = $1
       AND (
-        (mo.email IS NOT NULL AND ${emailCol} IS NOT NULL AND lower(mo.email) = lower(${emailCol}))
+        (mo.email IS NOT NULL AND mo.email <> '' AND ${emailCol} IS NOT NULL AND ${emailCol} <> ''
+         AND lower(mo.email) = lower(${emailCol}))
         OR
-        (mo.phone IS NOT NULL AND ${phoneCol} IS NOT NULL
+        (mo.phone IS NOT NULL AND regexp_replace(mo.phone,'[^0-9]','','g') <> ''
+         AND ${phoneCol} IS NOT NULL AND regexp_replace(${phoneCol},'[^0-9]','','g') <> ''
          AND regexp_replace(mo.phone,'[^0-9]','','g') = regexp_replace(${phoneCol},'[^0-9]','','g'))
       )
   )`;
