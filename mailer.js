@@ -2,10 +2,12 @@
 // Sends real emails (e.g. cart-recovery, win-back) after merchant approval.
 // Fails safe: if RESEND_API_KEY is missing, returns an error instead of crashing.
 const RESEND_API_KEY = process.env.RESEND_API_KEY || null;
-// Default sender. Until a custom domain is verified in Resend, use their
-// shared sandbox sender. Once sevenseventy.co.il is verified, switch FROM_EMAIL.
-const FROM_EMAIL = process.env.MAIL_FROM || "770 <onboarding@resend.dev>";
-const REPLY_TO = process.env.MAIL_REPLY_TO || "sevenseventyshopify@gmail.com";
+// Default sender. Set MAIL_FROM in Railway, e.g. "SEVENSEVENTY 770 <noreply@sevenseventy.co.il>".
+const FROM_EMAIL = process.env.MAIL_FROM || "SEVENSEVENTY 770 <onboarding@resend.dev>";
+const REPLY_TO = process.env.MAIL_REPLY_TO || "info@sevenseventy.co.il";
+// Optional brand logo URL (must be a public https image). Set MAIL_LOGO_URL in Railway.
+const LOGO_URL = process.env.MAIL_LOGO_URL || "";
+
 /**
  * Send a single email.
  * Returns { ok, id } or { ok:false, error }.
@@ -35,67 +37,71 @@ async function sendEmail({ to, subject, html, text }) {
     });
     const data = await res.json();
     if (res.status >= 200 && res.status < 300) {
-      console.log(`📧 [Mailer] Sent to ${to}: "${subject}" (id: ${data.id})`);
+      console.log(`[Mailer] Sent to ${to}: "${subject}" (id: ${data.id})`);
       return { ok: true, id: data.id };
     } else {
-      console.error(`❌ [Mailer] Send failed (${res.status}):`, JSON.stringify(data).substring(0, 200));
+      console.error(`[Mailer] Send failed (${res.status}):`, JSON.stringify(data).substring(0, 200));
       return { ok: false, error: data.message || `status ${res.status}` };
     }
   } catch (err) {
-    console.error(`❌ [Mailer] Exception:`, err.message);
+    console.error(`[Mailer] Exception:`, err.message);
     return { ok: false, error: err.message };
   }
 }
+
 /**
- * Wrap plain text into a simple, clean RTL Hebrew HTML email.
- * URLs inside the text are turned into clickable links automatically.
+ * Wrap plain text into a clean, professional RTL Hebrew HTML email.
+ * URLs in the text become clickable links automatically.
  */
 function buildHtmlEmail(bodyText, opts = {}) {
-  // 1. Escape HTML first (security: never inject raw HTML from text).
+  const brand = opts.brand || "770";
+  const logoUrl = opts.logo_url || LOGO_URL;
+
   let safe = String(bodyText || "")
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-  // 2. Auto-link URLs so they're clickable in the email. Runs AFTER escaping,
-  //    so the URLs themselves are safe. Matches http(s):// up to whitespace.
-  //    Trailing punctuation (. , ) ! ?) is kept out of the link.
-  safe = safe.replace(/(https?:\/\/[^\s<]+[^\s<.,)!?])/g, (url) => {
-    return `<a href="${url}" style="color:#0b8aff;text-decoration:underline;word-break:break-all;">${url}</a>`;
+  safe = safe.replace(/(https?:\/\/[^\s<]+[^\s<.,)!?])/g, function (url) {
+    return '<a href="' + url + '" style="color:#111;text-decoration:underline;word-break:break-all;">' + url + '</a>';
   });
-
-  // 3. Newlines to <br> (after linking, so URLs split across lines still work).
   safe = safe.replace(/\n/g, "<br>");
 
-  const cta = opts.cta_url && opts.cta_label
-    ? `<div style="margin:24px 0;text-align:center;">
-         <a href="${opts.cta_url}" style="background:#0b8aff;color:#fff;text-decoration:none;
-            padding:13px 30px;border-radius:10px;font-size:16px;font-weight:600;display:inline-block;">
-            ${opts.cta_label}</a>
-       </div>`
+  const header = logoUrl
+    ? '<img src="' + logoUrl + '" alt="' + brand + '" style="max-width:170px;height:auto;display:block;margin:0 auto;">'
+    : '<div style="font-size:30px;font-weight:900;letter-spacing:1px;color:#111;text-align:center;">' + brand + '</div>';
+
+  const cta = (opts.cta_url && opts.cta_label)
+    ? '<table role="presentation" cellpadding="0" cellspacing="0" style="margin:28px auto 8px;">' +
+        '<tr><td style="border-radius:10px;background:#111;">' +
+          '<a href="' + opts.cta_url + '" style="display:inline-block;padding:14px 38px;color:#fff;' +
+          'text-decoration:none;font-size:16px;font-weight:700;letter-spacing:.5px;">' + opts.cta_label + '</a>' +
+        '</td></tr></table>'
     : "";
-  // Legal: every marketing email must include an unsubscribe link.
+
   const unsubBase = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
   const unsub = opts.to
-    ? `<a href="${unsubBase}/unsubscribe?email=${encodeURIComponent(opts.to)}" style="color:#999;">להסרה מרשימת התפוצה</a>`
+    ? '<a href="' + unsubBase + '/unsubscribe?email=' + encodeURIComponent(opts.to) + '" style="color:#aaa;text-decoration:underline;">להסרה מרשימת התפוצה</a>'
     : "";
-  return `<!DOCTYPE html>
-<html dir="rtl" lang="he">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#f5f6f8;font-family:Arial,Helvetica,sans-serif;">
-  <div style="max-width:520px;margin:0 auto;padding:30px 20px;">
-    <div style="background:#fff;border-radius:16px;padding:32px 28px;direction:rtl;text-align:right;
-                box-shadow:0 2px 12px rgba(0,0,0,0.06);">
-      <div style="font-size:22px;font-weight:800;color:#111;margin-bottom:18px;">${opts.brand || "770"}</div>
-      <div style="font-size:16px;line-height:1.7;color:#333;">${safe}</div>
-      ${cta}
-    </div>
-    <div style="text-align:center;color:#999;font-size:12px;margin-top:16px;">
-      ${opts.footer || "נשלח באמצעות היועץ החכם של 770"}<br>${unsub}
-    </div>
-  </div>
-</body>
-</html>`;
+
+  return '<!DOCTYPE html>\n' +
+'<html dir="rtl" lang="he">\n' +
+'<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>\n' +
+'<body style="margin:0;padding:0;background:#f2f2f3;font-family:\'Segoe UI\',Arial,Helvetica,sans-serif;">\n' +
+'  <div style="max-width:560px;margin:0 auto;padding:28px 16px;">\n' +
+'    <div style="padding:8px 0 22px;">' + header + '</div>\n' +
+'    <div style="background:#ffffff;border-radius:18px;padding:40px 34px;direction:rtl;text-align:right;box-shadow:0 4px 24px rgba(0,0,0,0.07);">\n' +
+'      <div style="font-size:16.5px;line-height:1.85;color:#2a2a2a;">' + safe + '</div>\n' +
+'      ' + cta + '\n' +
+'    </div>\n' +
+'    <div style="text-align:center;color:#9a9a9a;font-size:12px;line-height:1.7;margin-top:22px;">\n' +
+'      ' + (opts.footer || ('נשלח מ-' + brand)) + '<br>\n' +
+'      ' + unsub + '\n' +
+'    </div>\n' +
+'  </div>\n' +
+'</body>\n' +
+'</html>';
 }
+
 function isConfigured() {
   return !!RESEND_API_KEY;
 }
+
 module.exports = { sendEmail, buildHtmlEmail, isConfigured };
