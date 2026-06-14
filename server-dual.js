@@ -2813,6 +2813,167 @@ app.get("/admin/add-store", async (req, res) => {
   }
 });
 
+// ============================================================
+// OAUTH INSTALL FLOW (one-click store connection)
+// The merchant opens /auth?shop=xxx.myshopify.com, approves on Shopify,
+// and Shopify redirects back to /auth/callback with a code we exchange for a
+// permanent access token. The store is then saved and backfilled automatically.
+//
+// Uses its OWN app credentials (separate from TryFit's SHOPIFY_API_SECRET):
+//   ADVISOR_SHOPIFY_KEY     = the Smart Advisor app's Client ID
+//   ADVISOR_SHOPIFY_SECRET  = the Smart Advisor app's Client secret
+// ============================================================
+const ADVISOR_SHOPIFY_KEY = process.env.ADVISOR_SHOPIFY_KEY || "";
+const ADVISOR_SHOPIFY_SECRET = process.env.ADVISOR_SHOPIFY_SECRET || "";
+const OAUTH_SCOPES = "read_customers,write_customers,read_orders,read_products,read_inventory,read_checkouts,read_fulfillments,read_locations,read_price_rules,read_discounts,read_marketing_events,write_discounts,write_draft_orders";
+const APP_BASE_URL = "https://tryfit-backend-production.up.railway.app";
+// Short-lived state store for CSRF protection (state -> timestamp).
+const oauthStates = new Map();
+function cleanOldStates() {
+  const now = Date.now();
+  for (const [k, v] of oauthStates) {
+    const ts = (v && v.ts) ? v.ts : v;
+    if (now - ts > 10 * 60 * 1000) oauthStates.delete(k);
+  }
+}
+function isValidShopDomain(shop) {
+  return /^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop || "");
+}
+
+// Step 1: start install — redirect merchant to Shopify's consent screen.
+app.get("/auth", (req, res) => {
+  const shop = (req.query.shop || "").toLowerCase().trim();
+  if (!isValidShopDomain(shop)) {
+    return res.status(400).send("חסר או שגוי פרמטר shop. דוגמה: /auth?shop=your-store.myshopify.com");
+  }
+  if (!ADVISOR_SHOPIFY_KEY || !ADVISOR_SHOPIFY_SECRET) {
+    return res.status(500).send("האפליקציה לא מוגדרת (חסרים ADVISOR_SHOPIFY_KEY/SECRET).");
+  }
+  cleanOldStates();
+  const state = crypto.randomBytes(16).toString("hex");
+  // Optionally let the operator preset the advisor login password via the install
+  // link (?password=XXX). Stashed with the state and applied in the callback.
+  // If omitted, a random one is generated.
+  oauthStates.set(state, { ts: Date.now(), pw: (req.query.password || "").trim() || null });
+  const redirectUri = `${APP_BASE_URL}/auth/callback`;
+  const installUrl =
+    `https://${shop}/admin/oauth/authorize` +
+    `?client_id=${encodeURIComponent(ADVISOR_SHOPIFY_KEY)}` +
+    `&scope=${encodeURIComponent(OAUTH_SCOPES)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&state=${state}`;
+  res.redirect(installUrl);
+});
+
+// Verify the HMAC Shopify appends to the callback query (security).
+function verifyOAuthHmac(query) {
+  const { hmac, ...rest } = query;
+  if (!hmac) return false;
+  const message = Object.keys(rest)
+    .sort()
+    .map(k => `${k}=${Array.isArray(rest[k]) ? rest[k].join(",") : rest[k]}`)
+    .join("&");
+  const digest = crypto.createHmac("sha256", ADVISOR_SHOPIFY_SECRET).update(message).digest("hex");
+  try {
+    return crypto.timingSafeEqual(Buffer.from(digest, "hex"), Buffer.from(hmac, "hex"));
+  } catch (e) { return false; }
+}
+
+// Step 2: callback — exchange code for a token, save the store, start backfill.
+app.get("/auth/callback", async (req, res) => {
+  try {
+    const { shop, code, state } = req.query;
+    if (!isValidShopDomain((shop || "").toLowerCase())) {
+      return res.status(400).send("shop לא תקין.");
+    }
+    if (!state || !oauthStates.has(state)) {
+      return res.status(403).send("state לא תקין (ייתכן שפג תוקף). נסה להתקין שוב.");
+    }
+    const stateData = oauthStates.get(state);
+    oauthStates.delete(state);
+    const presetPassword = (stateData && stateData.pw) ? stateData.pw : null;
+    if (!verifyOAuthHmac(req.query)) {
+      return res.status(403).send("אימות HMAC נכשל.");
+    }
+    const shopDomain = shop.toLowerCase().trim();
+
+    // Exchange the temporary code for a permanent access token.
+    const tokenRes = await fetch(`https://${shopDomain}/admin/oauth/access_token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: ADVISOR_SHOPIFY_KEY,
+        client_secret: ADVISOR_SHOPIFY_SECRET,
+        code
+      })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) {
+      console.error("[OAuth] token exchange failed:", JSON.stringify(tokenData).slice(0, 200));
+      return res.status(400).send("קבלת ה-token נכשלה. נסה שוב.");
+    }
+
+    // Use the operator-chosen password if provided in the install link, else random.
+    const advisorPassword = presetPassword || crypto.randomBytes(5).toString("hex");
+    const displayName = shopDomain.replace(".myshopify.com", "");
+
+    await shopify.upsertStore({
+      shop_domain: shopDomain,
+      access_token: tokenData.access_token,
+      advisor_password: advisorPassword,
+      display_name: displayName,
+      public_domain: null
+    });
+
+    // Register webhooks (checkouts + orders) for this shop.
+    try {
+      const topics = [
+        { topic: "checkouts/create", address: `${APP_BASE_URL}/webhooks/checkouts/create` },
+        { topic: "checkouts/update", address: `${APP_BASE_URL}/webhooks/checkouts/update` },
+        { topic: "orders/create", address: `${APP_BASE_URL}/webhooks/orders/create` }
+      ];
+      for (const t of topics) {
+        await fetch(`https://${shopDomain}/admin/api/2026-01/webhooks.json`, {
+          method: "POST",
+          headers: { "X-Shopify-Access-Token": tokenData.access_token, "Content-Type": "application/json" },
+          body: JSON.stringify({ webhook: { topic: t.topic, address: t.address, format: "json" } })
+        }).catch(() => {});
+      }
+    } catch (e) { console.error("[OAuth] webhook registration:", e.message); }
+
+    // Kick off backfill in the background (OAuth-connected = enabled by definition).
+    backfillStatus[shopDomain] = { current_phase: "starting", started_at: new Date().toISOString() };
+    setImmediate(async () => {
+      try {
+        const result = await shopify.backfillEntireShop(shopDomain, (progress) => {
+          backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], current_phase: progress.phase, ...(progress.stats || {}) };
+        });
+        backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], ...result };
+      } catch (err) {
+        backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], success: false, fatal_error: err.message };
+      }
+    });
+
+    // Success page for the merchant.
+    res.send(`<!DOCTYPE html><html dir="rtl" lang="he"><head><meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>החיבור הצליח</title></head>
+      <body style="font-family:Arial,sans-serif;background:#f5f6f8;margin:0;padding:40px 20px;text-align:center;">
+        <div style="max-width:460px;margin:0 auto;background:#fff;border-radius:16px;padding:40px 28px;box-shadow:0 4px 20px rgba(0,0,0,.08);">
+          <div style="font-size:48px;">✅</div>
+          <h1 style="font-size:22px;color:#111;">החנות חוברה בהצלחה!</h1>
+          <p style="color:#444;line-height:1.7;">היועץ החכם מתחיל עכשיו לטעון את הנתונים שלך (לקוחות והזמנות). זה ייקח כמה דקות.</p>
+          <p style="color:#444;line-height:1.7;">סיסמת הכניסה שלך ליועץ:</p>
+          <div style="font-size:20px;font-weight:800;letter-spacing:1px;background:#f0f4ff;color:#0a6fe0;padding:12px;border-radius:10px;">${advisorPassword}</div>
+          <p style="color:#888;font-size:13px;margin-top:18px;">שמור את הסיסמה הזו. אפשר לשנות אותה איתנו בכל עת.</p>
+        </div>
+      </body></html>`);
+  } catch (err) {
+    console.error("[OAuth] callback error:", err);
+    res.status(500).send("שגיאה בחיבור. נסה שוב או פנה אלינו.");
+  }
+});
+
 app.get("/admin/list-stores", (req, res) => {
   if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
