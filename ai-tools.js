@@ -112,15 +112,27 @@ async function getDormantCustomers(shopDomain, options = {}) {
     params.push(...ex.params);
     params.push(limit);
     const result = await db.query(
-      `SELECT email, first_name, last_name, phone, city,
-              total_spent, orders_count, last_order_date
-       FROM store_customers
-       WHERE shop_domain = $1
-         AND orders_count > 0
-         AND total_spent >= $2
-         AND (last_order_date IS NULL
-              OR last_order_date < NOW() - ($3 || ' days')::interval)${ex.clause}${EXCLUDE_OPTED_OUT}
-       ORDER BY total_spent DESC
+      `SELECT c.email, c.first_name, c.last_name, c.phone, c.city,
+              c.total_spent, c.orders_count, c.last_order_date,
+              cat.product_type AS top_category
+       FROM store_customers c
+       LEFT JOIN LATERAL (
+         SELECT i.product_type
+         FROM store_order_items i
+         JOIN store_orders o ON o.shopify_order_id = i.shopify_order_id AND o.shop_domain = i.shop_domain
+         WHERE i.shop_domain = c.shop_domain
+           AND o.shopify_customer_id = c.shopify_customer_id
+           AND i.product_type IS NOT NULL AND i.product_type <> ''
+         GROUP BY i.product_type
+         ORDER BY SUM(i.quantity) DESC
+         LIMIT 1
+       ) cat ON true
+       WHERE c.shop_domain = $1
+         AND c.orders_count > 0
+         AND c.total_spent >= $2
+         AND (c.last_order_date IS NULL
+              OR c.last_order_date < NOW() - ($3 || ' days')::interval)${ex.clause.replace(/\bstore_customers\./g, 'c.')}${EXCLUDE_OPTED_OUT.replace(/store_customers\./g, 'c.')}
+       ORDER BY c.total_spent DESC
        LIMIT $${params.length}`,
       params
     );
