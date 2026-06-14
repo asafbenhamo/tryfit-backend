@@ -318,9 +318,9 @@ async function detectWhatWorks(shop) {
       type: 'what_works',
       priority: 3,
       title: `📈 מה הכי עובד אצלך: ${label}`,
-      detail: `מהלך מסוג "${label}" ממיר אצלך ${rate}% (${w.converted} מתוך ${w.total}) והכניס ${Math.round(w.revenue).toLocaleString()}₪ ב-60 הימים האחרונים. כדאי להשקיע בו יותר - אני אעדיף אותו בהמלצות.`,
-      action_hint: '',
-      data: { action_type: w.action_type, rate, converted: w.converted, total: w.total }
+      detail: `מהלך מסוג "${label}" ממיר אצלך ${rate}% (${w.converted} מתוך ${w.total}) והכניס ${Math.round(w.revenue).toLocaleString()}₪ ב-60 הימים האחרונים. זה המהלך הכי רווחי שלך - שווה לעשות ממנו עוד.`,
+      action_hint: 'do_more_of_best',
+      data: { action_type: w.action_type, action_label: label, rate, converted: w.converted, total: w.total }
     }];
   });
 }

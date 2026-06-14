@@ -1317,7 +1317,8 @@
     investigate_growth: () => `מה הניע את העלייה במכירות השבוע? אילו מוצרים ולקוחות? ואיך אני ממנף את זה לעוד מכירות?`,
     investigate_drop: () => `מה גרם לירידה במכירות השבוע? ומה התוכנית להחזיר את המומנטום?`,
     cross_sell_campaign: arg => `בנה קמפיין מכירה צולבת: ${arg}. מצא את הלקוחות שקנו את המוצר הראשון אבל לא את השני, ובנה להם הצעה ממוקדת עם קופון והודעה אישית שמסבירה למה השני משלים את הראשון.`,
-    follow_up_campaign: () => `יש לקוחות שפנינו אליהן ולא הגיבו. בנה קמפיין מעקב עם גישה אחרת מהפעם הקודמת - הודעה שונה, אולי הטבה מעט גדולה יותר או תזכורת עדינה. תראה לי את הרשימה לפני שליחה.`
+    follow_up_campaign: () => `יש לקוחות שפנינו אליהן ולא הגיבו. בנה קמפיין מעקב עם גישה אחרת מהפעם הקודמת - הודעה שונה, אולי הטבה מעט גדולה יותר או תזכורת עדינה. תראה לי את הרשימה לפני שליחה.`,
+    do_more_of_best: arg => `המהלך "${arg}" עובד הכי טוב אצלי. בנה לי עוד קמפיין מהסוג הזה - מצא את הלקוחות המתאימים, בנה הצעה עם קופון והודעה אישית, ותראה לי לפני שליחה.`
   };
   async function loadInsights() {
     const welcome = $('welcome');
@@ -1343,6 +1344,9 @@
       let arg = (ins.data && (ins.data.name || ins.data.title)) || '';
       if (hint === 'cross_sell_campaign' && ins.data) {
         arg = 'מי שקנה "' + (ins.data.product_a || '') + '" → להציע "' + (ins.data.product_b || '') + '"';
+      }
+      if (hint === 'do_more_of_best' && ins.data) {
+        arg = ins.data.action_label || '';
       }
       html += '<div class="insight-card p' + (ins.priority || 4) + '" style="animation-delay:' + (i * 0.07) + 's">';
       html += '<div class="insight-title">' + esc(ins.title) + '</div>';
