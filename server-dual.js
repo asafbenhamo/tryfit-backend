@@ -883,6 +883,21 @@ app.get("/admin/debug-insights", async (req, res) => {
        WHERE shop_domain=$1 AND (phone IS NULL OR regexp_replace(phone,'[^0-9]','','g')='')`, [shop]);
     out.customers_without_phone = r.rows[0].n;
   } catch (e) { out.customers_without_phone = { error: e.message }; }
+  // 10. Data health: totals + how many have orders vs last_order_date
+  try {
+    const r = await db.query(`
+      SELECT
+        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1) AS total_customers,
+        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1 AND last_order_date IS NOT NULL) AS with_last_order_date,
+        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1 AND orders_count > 0) AS with_orders_count,
+        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1 AND phone IS NOT NULL AND regexp_replace(phone,'[^0-9]','','g')<>'') AS with_phone,
+        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1 AND email IS NOT NULL AND email<>'') AS with_email,
+        (SELECT COUNT(*)::int FROM store_orders WHERE shop_domain=$1) AS total_orders,
+        (SELECT COUNT(*)::int FROM store_orders WHERE shop_domain=$1 AND shopify_customer_id IS NOT NULL) AS orders_with_customer_id,
+        (SELECT COUNT(*)::int FROM store_orders WHERE shop_domain=$1 AND ordered_at IS NOT NULL) AS orders_with_date
+    `, [shop]);
+    out.data_health = r.rows[0];
+  } catch (e) { out.data_health = { error: e.message }; }
   res.json(out);
 });
 
@@ -1492,6 +1507,8 @@ app.get("/api/advisor-stats", async (req, res) => {
     const r = await db.query(
       `SELECT
          COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome = 'converted'), 0)::numeric(12,2) AS total_revenue,
+         COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome = 'converted'
+           AND closed_at >= date_trunc('month', NOW())), 0)::numeric(12,2) AS month_revenue,
          COUNT(*) FILTER (WHERE outcome = 'converted')::int AS conversions,
          COUNT(*)::int AS total_actions,
          COUNT(*) FILTER (WHERE outcome = 'pending')::int AS pending
@@ -1503,6 +1520,7 @@ app.get("/api/advisor-stats", async (req, res) => {
     res.json({
       ok: true,
       total_revenue: Math.round(parseFloat(row.total_revenue || 0)),
+      month_revenue: Math.round(parseFloat(row.month_revenue || 0)),
       conversions: row.conversions || 0,
       total_actions: row.total_actions || 0,
       pending: row.pending || 0
