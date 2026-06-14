@@ -284,14 +284,69 @@ async function detectDormantRelaxed(shop) {
   });
 }
 
+// ---------- Cross-sell opportunity ----------
+// Finds the strongest product pair (X frequently bought with Y), then counts how
+// many customers bought X but NOT Y. Those are prime, data-backed cross-sell
+// targets: "47 customers bought X — offer them Y, which X-buyers usually add."
+async function detectCrossSell(shop) {
+  return runDetector('crossSell', async () => {
+    // 1. Strongest co-purchase pair in the last 60 days.
+    const pair = await db.query(
+      `WITH pairs AS (
+         SELECT a.title AS product_a, b.title AS product_b, COUNT(*)::int AS together
+         FROM store_order_items a
+         JOIN store_order_items b
+           ON a.shopify_order_id = b.shopify_order_id AND a.shop_domain = b.shop_domain
+          AND a.title < b.title
+         WHERE a.shop_domain = $1
+           AND a.title IS NOT NULL AND b.title IS NOT NULL
+         GROUP BY a.title, b.title
+       )
+       SELECT product_a, product_b, together
+       FROM pairs WHERE together >= 3
+       ORDER BY together DESC FETCH FIRST 1 ROWS ONLY`,
+      [shop]
+    );
+    if (!pair.rows[0]) return [];
+    const { product_a, product_b, together } = pair.rows[0];
+
+    // 2. How many customers bought A but NOT B (the cross-sell pool).
+    const pool = await db.query(
+      `SELECT COUNT(DISTINCT o.shopify_customer_id)::int AS n
+       FROM store_order_items i
+       JOIN store_orders o ON o.shopify_order_id = i.shopify_order_id AND o.shop_domain = i.shop_domain
+       WHERE i.shop_domain = $1 AND i.title = $2
+         AND o.shopify_customer_id IS NOT NULL
+         AND o.shopify_customer_id NOT IN (
+           SELECT o2.shopify_customer_id FROM store_order_items i2
+           JOIN store_orders o2 ON o2.shopify_order_id = i2.shopify_order_id AND o2.shop_domain = i2.shop_domain
+           WHERE i2.shop_domain = $1 AND i2.title = $3 AND o2.shopify_customer_id IS NOT NULL
+         )`,
+      [shop, product_a, product_b]
+    );
+    const n = pool.rows[0] ? pool.rows[0].n : 0;
+    if (n < 3) return [];
+
+    return [{
+      type: 'cross_sell',
+      priority: 3,
+      title: `הזדמנות צולבת: מי שקנה "${product_a}" שווה להציע לו "${product_b}"`,
+      detail: `${together} לקוחות קנו את שניהם יחד. יש ${n} לקוחות שקנו את "${product_a}" אבל עדיין לא את "${product_b}" - הצעה ממוקדת אליהם צפויה להמיר היטב.`,
+      action_hint: 'cross_sell_campaign',
+      data: { product_a, product_b, together, pool_size: n }
+    }];
+  });
+}
+
 // ---------- Main entry: gather all insights ----------
 async function getInsights(shop) {
-  const [vips, lowStock, abandoned, shift, newBig] = await Promise.all([
+  const [vips, lowStock, abandoned, shift, newBig, crossSell] = await Promise.all([
     detectDormantVIPs(shop),
     detectLowStockBestsellers(shop),
     detectHighValueAbandoned(shop),
     detectSalesShift(shop),
-    detectNewBigCustomers(shop)
+    detectNewBigCustomers(shop),
+    detectCrossSell(shop)
   ]);
 
   // Customer-specific (personal) opportunities first: carts, VIPs, new customers.
@@ -311,7 +366,7 @@ async function getInsights(shop) {
     personal = mergePersonal(personal, lastResort, 3);
   }
 
-  const supporting = [...shift, ...lowStock.slice(0, 2)]; // context + at most 2 stock alerts
+  const supporting = [...shift, ...crossSell, ...lowStock.slice(0, 2)]; // context + cross-sell + at most 2 stock alerts
 
   // Display order: supporting insights (stock/sales shift) FIRST, then the
   // personal per-customer opportunities BELOW them (merchant preference).
