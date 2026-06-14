@@ -901,6 +901,30 @@ app.get("/admin/debug-insights", async (req, res) => {
   res.json(out);
 });
 
+// Change a store's advisor login password.
+// /admin/set-password?password=ADMIN&shop=xxx.myshopify.com&new_password=XXX
+app.get("/admin/set-password", async (req, res) => {
+  if (!isAdmin(req)) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = (req.query.shop || "").toLowerCase().trim();
+  const newPassword = (req.query.new_password || "").trim();
+  if (!shop || !newPassword) {
+    return res.status(400).json({ ok: false, error: "חובה shop ו-new_password" });
+  }
+  if (shop === DEFAULT_SHOP) {
+    return res.status(400).json({ ok: false, error: "770 משתמש בסיסמת האדמין - אי אפשר לשנות כאן." });
+  }
+  try {
+    const r = await shopify.setAdvisorPassword(shop, newPassword);
+    if (!r.ok) return res.status(404).json({ ok: false, error: "החנות לא נמצאה ב-DB" });
+    res.json({ ok: true, shop, note: "הסיסמה עודכנה. בעל החנות יכול להתחבר עם הסיסמה החדשה." });
+  } catch (err) {
+    console.error("set-password error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/admin/set-wa-key", async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "סיסמה שגויה" });

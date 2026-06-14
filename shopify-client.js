@@ -105,6 +105,19 @@ async function setWhatsAppConfig(shopDomain, { d360_api_key, wa_language }) {
   return { ok: true };
 }
 
+// Update a store's advisor login password.
+async function setAdvisorPassword(shopDomain, newPassword) {
+  const domain = (shopDomain || '').toLowerCase().trim();
+  if (!newPassword) return { ok: false, error: 'missing password' };
+  await ensureStoreTable();
+  const r = await db.query(
+    `UPDATE advisor_stores SET advisor_password = $2 WHERE shop_domain = $1`,
+    [domain, newPassword]
+  );
+  await loadStores();
+  return { ok: r.rowCount > 0, updated: r.rowCount };
+}
+
 // Get a store's WhatsApp config (api key + language), or null.
 function getWhatsAppConfig(shopDomain) {
   const s = getStore(shopDomain);
@@ -1337,6 +1350,7 @@ module.exports = {
   hasAcceptedTerms,
   acceptTerms,
   setWhatsAppConfig,
+  setAdvisorPassword,
   getWhatsAppConfig,
   ensureStoreTable,
   findCustomerByEmail,

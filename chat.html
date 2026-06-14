@@ -793,11 +793,17 @@
       if (!d.ok) { body.innerHTML = '<p style="color:#d33">' + (d.error || 'שגיאה') + '</p>'; return; }
       let h = '<p style="font-size:12.5px;color:#888;margin-bottom:10px">מחיר לקרדיט: ₪' + d.price_per_credit + ' · קרדיט = הודעת WhatsApp אחת</p>';
       d.stores.forEach(s => {
-        h += '<div style="display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid #eee">'
+        h += '<div style="padding:10px 0;border-bottom:1px solid #eee">'
+          + '<div style="display:flex;align-items:center;gap:8px">'
           + '<div style="flex:1"><div style="font-weight:600">' + esc(s.name) + '</div>'
           + '<div style="font-size:12px;color:#888">יתרה: <strong id="bal_' + esc(s.shop_domain) + '">' + (s.balance||0).toLocaleString() + '</strong></div></div>'
           + '<input type="number" min="1" placeholder="כמות" id="amt_' + esc(s.shop_domain) + '" dir="rtl" style="width:90px;padding:8px;border:1px solid #ddd;border-radius:7px;text-align:right">'
           + '<button onclick="addCreditsTo(\'' + esc(s.shop_domain) + '\')" style="background:#16a34a;border:none;color:#fff;border-radius:7px;padding:8px 12px;cursor:pointer">הוסף</button>'
+          + '</div>'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-top:8px">'
+          + '<input type="text" placeholder="סיסמה חדשה לחנות" id="pw_' + esc(s.shop_domain) + '" dir="rtl" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:7px;text-align:right;font-size:13px">'
+          + '<button onclick="setStorePassword(\'' + esc(s.shop_domain) + '\')" style="background:#0a6fe0;border:none;color:#fff;border-radius:7px;padding:8px 12px;cursor:pointer;white-space:nowrap">שנה סיסמה</button>'
+          + '</div>'
           + '</div>';
       });
       body.innerHTML = h;
@@ -819,6 +825,22 @@
         const el = document.getElementById('bal_' + shop);
         if (el) el.textContent = (d.balance || 0).toLocaleString();
         document.getElementById('amt_' + shop).value = '';
+      } else { alert(d.error || 'שגיאה'); }
+    } catch (e) { alert('שגיאה'); }
+  }
+
+  async function setStorePassword(shop) {
+    const el = document.getElementById('pw_' + shop);
+    const newPw = (el && el.value || '').trim();
+    if (!newPw) { alert('הזן סיסמה חדשה'); return; }
+    if (newPw.length < 4) { alert('סיסמה קצרה מדי (לפחות 4 תווים)'); return; }
+    try {
+      const res = await fetch('/admin/set-password?password=' + encodeURIComponent(PASSWORD)
+        + '&shop=' + encodeURIComponent(shop) + '&new_password=' + encodeURIComponent(newPw));
+      const d = await res.json();
+      if (d.ok) {
+        el.value = '';
+        alert('הסיסמה עודכנה בהצלחה לחנות ' + shop);
       } else { alert(d.error || 'שגיאה'); }
     } catch (e) { alert('שגיאה'); }
   }
