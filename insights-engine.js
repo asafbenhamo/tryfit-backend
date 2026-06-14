@@ -284,6 +284,47 @@ async function detectDormantRelaxed(shop) {
   });
 }
 
+// ---------- Learning: what's working best ----------
+// Surfaces the best-performing action type (by conversion rate) over the last
+// 60 days, so the merchant sees what works and the system reinforces it.
+async function detectWhatWorks(shop) {
+  return runDetector('whatWorks', async () => {
+    const r = await db.query(
+      `SELECT action_type,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE outcome='converted')::int AS converted,
+              COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome='converted'),0)::numeric(12,2) AS revenue
+       FROM advisor_actions
+       WHERE shop_domain = $1
+         AND created_at >= NOW() - INTERVAL '60 days'
+         AND action_type NOT IN ('daily_report','morning_report')
+       GROUP BY action_type
+       HAVING COUNT(*) >= 5
+       ORDER BY (COUNT(*) FILTER (WHERE outcome='converted')::float / COUNT(*)) DESC
+       FETCH FIRST 1 ROWS ONLY`,
+      [shop]
+    );
+    if (!r.rows[0]) return [];
+    const w = r.rows[0];
+    const rate = Math.round((w.converted / w.total) * 100);
+    if (rate < 1) return []; // nothing meaningful learned yet
+    const LABELS = {
+      abandoned_cart: 'שחזור עגלות נטושות', dormant_vip: 'החזרת לקוחות VIP',
+      one_time: 'דחיפה לקנייה שנייה', personalized_cart: 'עגלה מותאמת אישית',
+      winback: 'win-back', campaign: 'קמפיין', agent: 'פעולות הסוכן'
+    };
+    const label = LABELS[w.action_type] || w.action_type;
+    return [{
+      type: 'what_works',
+      priority: 3,
+      title: `📈 מה הכי עובד אצלך: ${label}`,
+      detail: `מהלך מסוג "${label}" ממיר אצלך ${rate}% (${w.converted} מתוך ${w.total}) והכניס ${Math.round(w.revenue).toLocaleString()}₪ ב-60 הימים האחרונים. כדאי להשקיע בו יותר - אני אעדיף אותו בהמלצות.`,
+      action_hint: '',
+      data: { action_type: w.action_type, rate, converted: w.converted, total: w.total }
+    }];
+  });
+}
+
 // ---------- Follow-up: customers who didn't respond ----------
 // Looks at outreach that expired (sent >3 days ago, never converted) in the last
 // ~10 days, and suggests a follow-up. Approach: present the count + a suggestion,
@@ -372,14 +413,15 @@ async function detectCrossSell(shop) {
 
 // ---------- Main entry: gather all insights ----------
 async function getInsights(shop) {
-  const [vips, lowStock, abandoned, shift, newBig, crossSell, followUp] = await Promise.all([
+  const [vips, lowStock, abandoned, shift, newBig, crossSell, followUp, whatWorks] = await Promise.all([
     detectDormantVIPs(shop),
     detectLowStockBestsellers(shop),
     detectHighValueAbandoned(shop),
     detectSalesShift(shop),
     detectNewBigCustomers(shop),
     detectCrossSell(shop),
-    detectFollowUp(shop)
+    detectFollowUp(shop),
+    detectWhatWorks(shop)
   ]);
 
   // Customer-specific (personal) opportunities first: carts, VIPs, new customers.
@@ -399,14 +441,17 @@ async function getInsights(shop) {
     personal = mergePersonal(personal, lastResort, 3);
   }
 
-  const supporting = [...shift, ...followUp, ...crossSell, ...lowStock.slice(0, 2)]; // context + follow-up + cross-sell + at most 2 stock alerts
+  // Supporting order: stock alerts + sales shift FIRST (broad store health),
+  // then the learning insight, cross-sell, and follow-up - all ABOVE personal.
+  const supporting = [...lowStock.slice(0, 2), ...shift, ...whatWorks, ...crossSell, ...followUp];
 
   // Display order: supporting insights (stock/sales shift) FIRST, then the
   // personal per-customer opportunities BELOW them (merchant preference).
-  const supportingSorted = supporting.sort((a, b) => a.priority - b.priority);
+  // Keep the manual supporting order (stock → sales → cross-sell → follow-up);
+  // do NOT re-sort by priority, which would scramble it.
   const personalSorted = personal.filter(isPersonal);
 
-  const all = [...supportingSorted, ...personalSorted].slice(0, 8);
+  const all = [...supporting, ...personalSorted].slice(0, 8);
 
   return {
     ok: true,

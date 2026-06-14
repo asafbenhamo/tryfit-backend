@@ -1315,7 +1315,9 @@
     reorder: title => `המוצר "${title}" מוכר חזק ועומד להיגמר. בנה קמפיין שמקדם אותו ללקוחות שסביר שיאהבו אותו (לפי היסטוריית קניות), עם קופון והודעה - לפני שאוזל.`,
     recover_cart: () => `תכין שחזור עגלה מושקע ללקוחה הזו - הודעה אישית חמה + קופון אישי + קישור ישיר לעגלה שלה כדי שתשלים בקלות.`,
     investigate_growth: () => `מה הניע את העלייה במכירות השבוע? אילו מוצרים ולקוחות? ואיך אני ממנף את זה לעוד מכירות?`,
-    investigate_drop: () => `מה גרם לירידה במכירות השבוע? ומה התוכנית להחזיר את המומנטום?`
+    investigate_drop: () => `מה גרם לירידה במכירות השבוע? ומה התוכנית להחזיר את המומנטום?`,
+    cross_sell_campaign: arg => `בנה קמפיין מכירה צולבת: ${arg}. מצא את הלקוחות שקנו את המוצר הראשון אבל לא את השני, ובנה להם הצעה ממוקדת עם קופון והודעה אישית שמסבירה למה השני משלים את הראשון.`,
+    follow_up_campaign: () => `יש לקוחות שפנינו אליהן ולא הגיבו. בנה קמפיין מעקב עם גישה אחרת מהפעם הקודמת - הודעה שונה, אולי הטבה מעט גדולה יותר או תזכורת עדינה. תראה לי את הרשימה לפני שליחה.`
   };
   async function loadInsights() {
     const welcome = $('welcome');
@@ -1338,7 +1340,10 @@
     let html = '<div class="insights-head">✨ הזדמנויות שמצאתי בשבילך היום</div>';
     insights.forEach((ins, i) => {
       const hint = ins.action_hint || '';
-      const arg = (ins.data && (ins.data.name || ins.data.title)) || '';
+      let arg = (ins.data && (ins.data.name || ins.data.title)) || '';
+      if (hint === 'cross_sell_campaign' && ins.data) {
+        arg = 'מי שקנה "' + (ins.data.product_a || '') + '" → להציע "' + (ins.data.product_b || '') + '"';
+      }
       html += '<div class="insight-card p' + (ins.priority || 4) + '" style="animation-delay:' + (i * 0.07) + 's">';
       html += '<div class="insight-title">' + esc(ins.title) + '</div>';
       html += '<div class="insight-detail">' + esc(ins.detail) + '</div>';
