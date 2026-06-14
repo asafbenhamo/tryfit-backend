@@ -961,7 +961,9 @@
       if (mode === 'done') {
         actions = actions.filter(a => a.outcome === 'converted');
       } else {
-        actions = actions.filter(a => a.outcome === 'pending' || a.outcome === 'expired');
+        // Pending list shows ONLY items still awaiting a result — not converted,
+        // not expired (those just clutter the actionable list).
+        actions = actions.filter(a => a.outcome === 'pending');
       }
       if (actions.length === 0) {
         const emptyMsg = mode === 'done'

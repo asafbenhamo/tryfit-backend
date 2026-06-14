@@ -284,6 +284,38 @@ async function detectDormantRelaxed(shop) {
   });
 }
 
+// ---------- Follow-up: customers who didn't respond ----------
+// Looks at outreach that expired (sent >3 days ago, never converted) in the last
+// ~10 days, and suggests a follow-up. Approach: present the count + a suggestion,
+// the merchant decides whether to act.
+async function detectFollowUp(shop) {
+  return runDetector('followUp', async () => {
+    const r = await db.query(
+      `SELECT COUNT(*)::int AS n
+       FROM advisor_actions
+       WHERE shop_domain = $1
+         AND outcome = 'expired'
+         AND closed_at IS NULL
+         AND created_at >= NOW() - INTERVAL '10 days'
+         AND created_at < NOW() - INTERVAL '3 days'
+         AND action_type NOT IN ('daily_report','morning_report')
+         AND (target_email IS NOT NULL OR target_phone IS NOT NULL)`,
+      [shop]
+    );
+    const n = r.rows[0] ? r.rows[0].n : 0;
+    if (n < 3) return []; // not worth surfacing for tiny numbers
+
+    return [{
+      type: 'follow_up',
+      priority: 3,
+      title: `${n} לקוחות לא הגיבו לפנייה האחרונה`,
+      detail: `פנינו אליהן לפני יותר מ-3 ימים והן עוד לא קנו. שווה לנסות שוב - הצעה: גישה אחרת מהפעם הקודמת (הודעה אחרת, אולי הטבה מעט גדולה יותר, או תזכורת עדינה). אתה מחליט אם ואיך לפנות.`,
+      action_hint: 'follow_up_campaign',
+      data: { pool_size: n }
+    }];
+  });
+}
+
 // ---------- Cross-sell opportunity ----------
 // Finds the strongest product pair (X frequently bought with Y), then counts how
 // many customers bought X but NOT Y. Those are prime, data-backed cross-sell
@@ -340,13 +372,14 @@ async function detectCrossSell(shop) {
 
 // ---------- Main entry: gather all insights ----------
 async function getInsights(shop) {
-  const [vips, lowStock, abandoned, shift, newBig, crossSell] = await Promise.all([
+  const [vips, lowStock, abandoned, shift, newBig, crossSell, followUp] = await Promise.all([
     detectDormantVIPs(shop),
     detectLowStockBestsellers(shop),
     detectHighValueAbandoned(shop),
     detectSalesShift(shop),
     detectNewBigCustomers(shop),
-    detectCrossSell(shop)
+    detectCrossSell(shop),
+    detectFollowUp(shop)
   ]);
 
   // Customer-specific (personal) opportunities first: carts, VIPs, new customers.
@@ -366,7 +399,7 @@ async function getInsights(shop) {
     personal = mergePersonal(personal, lastResort, 3);
   }
 
-  const supporting = [...shift, ...crossSell, ...lowStock.slice(0, 2)]; // context + cross-sell + at most 2 stock alerts
+  const supporting = [...shift, ...followUp, ...crossSell, ...lowStock.slice(0, 2)]; // context + follow-up + cross-sell + at most 2 stock alerts
 
   // Display order: supporting insights (stock/sales shift) FIRST, then the
   // personal per-customer opportunities BELOW them (merchant preference).
