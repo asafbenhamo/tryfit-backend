@@ -154,7 +154,7 @@ async function detectHighValueAbandoned(shop) {
          AND total_price >= 400
          AND shopify_created_at >= NOW() - INTERVAL '7 days'
          AND ${notRecentlyContacted('email', 'phone')}
-         AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
+         AND ${notOptedOut('abandoned_checkouts.email', 'abandoned_checkouts.phone')}
        ORDER BY total_price DESC
        FETCH FIRST 5 ROWS ONLY`,
       [shop]
