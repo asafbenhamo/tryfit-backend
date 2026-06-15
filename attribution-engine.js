@@ -167,6 +167,19 @@ async function runAttribution(shopDomain = SHOP) {
         closed++;
         totalAmount += r.amount || 0;
         if (breakdown[r.via] != null) breakdown[r.via]++;
+        // Notify the merchant in real time that the agent converted a sale.
+        try {
+          const push = require('./push-engine');
+          if (push.isConfigured()) {
+            const amt = Math.round(r.amount || 0).toLocaleString();
+            await push.sendToShop(shopDomain, {
+              title: '🎉 מכירה חדשה בזכות היועץ!',
+              body: `לקוחה השלימה רכישה של ${amt}₪. היועץ סגר עוד עסקה.`,
+              tag: 'conversion',
+              url: '/'
+            });
+          }
+        } catch (e) { /* never let a push failure break attribution */ }
       }
     }
     console.log(`🔁 [Attribution] scanned ${scanned} orders, closed ${closed}, +${Math.round(totalAmount)}₪`,

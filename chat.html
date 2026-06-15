@@ -914,6 +914,44 @@
     loadCreditsBalance();
     loadWaConfig();
     setInterval(loadMoneyCounter, 60000);
+    setupPushNotifications();
+  }
+
+  // ---- Web Push: register SW, ask permission, subscribe ----
+  function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    const arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr;
+  }
+  async function setupPushNotifications() {
+    try {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      // Get the server's VAPID public key.
+      const keyRes = await fetch('/api/push/public-key');
+      const keyData = await keyRes.json();
+      if (!keyData.ok || !keyData.configured || !keyData.key) return;
+      // Ask permission (only prompts once; silent if already decided).
+      let perm = Notification.permission;
+      if (perm === 'default') perm = await Notification.requestPermission();
+      if (perm !== 'granted') return;
+      // Subscribe (or reuse existing subscription).
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(keyData.key)
+        });
+      }
+      await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD, subscription: sub })
+      });
+    } catch (e) { /* push is best-effort; never block the app */ }
   }
 
   function addSwitchStoreButton() {

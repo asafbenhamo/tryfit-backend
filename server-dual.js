@@ -20,6 +20,7 @@ const mailer = require("./mailer");
 const compliance = require("./compliance");
 const agentEngine = require("./agent-engine");
 const attributionEngine = require("./attribution-engine");
+const pushEngine = require("./push-engine");
 
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
@@ -1967,6 +1968,27 @@ app.get("/store-icon", (req, res) => {
 
 app.get("/apple-touch-icon.png", (req, res) => {
   res.sendFile(__dirname + "/apple-touch-icon.png");
+});
+
+// Service worker (must be served from root scope to control the whole app).
+app.get("/sw.js", (req, res) => {
+  res.set("Content-Type", "application/javascript");
+  res.set("Service-Worker-Allowed", "/");
+  res.sendFile(__dirname + "/sw.js");
+});
+
+// Push: expose the VAPID public key so the client can subscribe.
+app.get("/api/push/public-key", (req, res) => {
+  res.json({ ok: true, key: pushEngine.publicKey(), configured: pushEngine.isConfigured() });
+});
+
+// Push: save a browser subscription for the logged-in store.
+app.post("/api/push/subscribe", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+  const sub = req.body && req.body.subscription;
+  const r = await pushEngine.saveSubscription(shop, sub);
+  res.status(r.ok ? 200 : 400).json(r);
 });
 
 app.post("/api/chat/save", express.json(), async (req, res) => {
