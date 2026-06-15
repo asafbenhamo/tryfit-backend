@@ -1077,7 +1077,7 @@ app.post("/api/send-email", express.json(), async (req, res) => {
       return res.status(200).json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail });
     }
 
-    const html = mailer.buildHtmlEmail(body, { cta_url, cta_label, brand: storeBrand(shop), to });
+    const html = mailer.buildHtmlEmail(body, { cta_url, cta_label, brand: storeBrand(shop), to, shop });
     const result = await mailer.sendEmail({ to, subject, html, text: body });
     if (!result.ok) {
       return res.status(400).json(result);
@@ -1618,7 +1618,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
         result.steps.message = { channel: "email", ok: false, blocked: true, reason: gate.reason, detail: gate.detail };
         return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
       }
-      const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: storeBrand(shop), to: email });
+      const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: storeBrand(shop), to: email, shop });
       const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הודעה מ-770", html, text: finalBody });
       if (!sent.ok) {
         result.steps.message = { channel: "email", ok: false, error: sent.error };
@@ -1721,7 +1721,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
         return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
       }
       const html = mailer.buildHtmlEmail(message_body || "הכנו לך עגלה אישית!", {
-        cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email
+        cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email, shop
       });
       const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
       if (!sent.ok) return res.status(400).json({ ok: false, error: "שליחת המייל נכשלה: " + sent.error });
@@ -1822,7 +1822,7 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
           if (!gate.allowed) { skipped++; }
           else {
             const html = mailer.buildHtmlEmail(cart.body || "הכנו לך עגלה אישית!", {
-              cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email
+              cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email, shop
             });
             const sent = await mailer.sendEmail({ to: email, subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
             if (sent.ok) emailsSent++; else failed++;

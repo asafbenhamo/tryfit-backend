@@ -77,8 +77,9 @@ function buildHtmlEmail(bodyText, opts = {}) {
     : "";
 
   const unsubBase = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
+  const unsubShop = opts.shop ? '&shop=' + encodeURIComponent(opts.shop) : '';
   const unsub = opts.to
-    ? '<a href="' + unsubBase + '/unsubscribe?email=' + encodeURIComponent(opts.to) + '" style="color:#aaa;text-decoration:underline;">להסרה מרשימת התפוצה</a>'
+    ? '<a href="' + unsubBase + '/unsubscribe?email=' + encodeURIComponent(opts.to) + unsubShop + '" style="color:#aaa;text-decoration:underline;">להסרה מרשימת התפוצה</a>'
     : "";
 
   return '<!DOCTYPE html>\n' +
