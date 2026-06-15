@@ -1185,6 +1185,34 @@ app.post("/api/insights/dismiss", express.json(), async (req, res) => {
   }
 });
 
+// View what the advisor remembers (durable preferences) for the logged-in store.
+app.get("/api/memory", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const memory = require("./memory-engine");
+    const prefs = await memory.getPreferences(shop);
+    res.json({ ok: true, preferences: prefs });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Delete a remembered preference by id.
+app.post("/api/memory/delete", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const memory = require("./memory-engine");
+    const id = req.body && req.body.id;
+    if (!id) return res.status(400).json({ ok: false, error: "missing id" });
+    await memory.deletePreference(shop, id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/api/working-hours", (req, res) => {
   if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   res.json(compliance.workingHoursStatus());

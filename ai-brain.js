@@ -150,7 +150,12 @@ function buildSystemPrompt(shopName) {
 - אל תשתמש באימוג'י של עיגולים צבעוניים או אימוג'י דקורטיביים מיותרים.
 - מותר: טקסט זורם, **הדגשה** למילים חשובות, ורשימות עם מקף (-).
 - לרשימות לקוחות או מוצרים, השתמש בטבלת markdown (עם | ).
-- שמור על תשובות נקיות, קצרות וממוקדות. פסקאות קצרות, לא קיר טקסט.`;
+- שמור על תשובות נקיות, קצרות וממוקדות. פסקאות קצרות, לא קיר טקסט.
+
+זיכרון לטווח ארוך:
+- אם בעל החנות נותן לך העדפה או הנחיה קבועה (למשל "אל תפנה ללקוחות מתחת ל-100 שקל", "אני מעדיף וואטסאפ", "תמיד הנחה 10%") - השתמש בכלי rememberPreference כדי לשמור אותה. היא תחול על כל השיחות הבאות.
+- אם בתחילת ההודעה שלי מופיעות "העדפות והנחיות קבועות" - כבד אותן תמיד.
+- אם מופיעה רשימת "לקוחות שכבר פנינו אליהם" - אל תציע אותם שוב אלא אם בעל החנות מבקש במפורש. הצע לקוחות אחרים.`;
 }
 
 // ---------- Tool definitions for Claude ----------
@@ -340,6 +345,17 @@ const TOOL_DEFINITIONS = [
       type: "object",
       properties: { limit: { type: "integer", description: "כמה מוצרים (ברירת מחדל 15)" } }
     }
+  },
+  {
+    name: "rememberPreference",
+    description: "שמור העדפה או הנחיה קבועה שבעל החנות נותן, כדי שתחול על כל השיחות העתידיות. השתמש בזה כשבעל החנות אומר משהו שצריך לזכור לטווח ארוך - למשל 'אל תפנה ללקוחות מתחת ל-100 שקל', 'אני מעדיף וואטסאפ על מייל', 'תמיד תציע הנחה של 10%', 'אל תפנה ללקוחות מאשדוד'. אל תשתמש בזה לבקשות חד-פעמיות, רק להעדפות קבועות.",
+    input_schema: {
+      type: "object",
+      properties: {
+        preference: { type: "string", description: "ההעדפה או ההנחיה לשמור, בניסוח ברור וקצר בעברית" }
+      },
+      required: ["preference"]
+    }
   }
 ];
 
@@ -381,6 +397,16 @@ function stripHeavyFields(obj) {
 
 // Run a single tool the model asked for.
 async function runTool(shopDomain, toolName, toolInput) {
+  // Persistent-memory tool: save a durable preference for this store.
+  if (toolName === "rememberPreference") {
+    try {
+      const memory = require('./memory-engine');
+      const pref = (toolInput && toolInput.preference || '').trim();
+      if (!pref) return { ok: false, error: 'empty preference' };
+      await memory.addPreference(shopDomain, pref);
+      return { ok: true, saved: pref, note: "ההעדפה נשמרה ותחול על כל השיחות הבאות." };
+    } catch (e) { return { ok: false, error: e.message }; }
+  }
   const impl = TOOL_IMPL[toolName];
   if (!impl) {
     return { ok: false, error: `unknown tool: ${toolName}` };
@@ -396,7 +422,15 @@ async function runTool(shopDomain, toolName, toolInput) {
 // ---------- Main entry point ----------
 async function askBrain(shopDomain, shopName, userMessage, priorMessages = []) {
   const client = getClient();
-  const systemText = buildSystemPrompt(shopName || shopDomain);
+  let systemText = buildSystemPrompt(shopName || shopDomain);
+
+  // Inject persistent memory (durable preferences + recently-handled customers)
+  // so the advisor remembers across conversations, not just within one.
+  try {
+    const memory = require('./memory-engine');
+    const memBlock = await memory.buildMemoryBlock(shopDomain);
+    if (memBlock) systemText += memBlock;
+  } catch (e) { /* memory is best-effort */ }
 
   const system = [
     { type: "text", text: systemText, cache_control: { type: "ephemeral" } }
