@@ -28,7 +28,7 @@ app.set("trust proxy", 1);
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"]
+  allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning", "x-advisor-password"]
 }));
 app.use((req, res, next) => {
   if (req.path === "/webhooks/checkouts/create" || req.path === "/webhooks/checkouts/update" || req.path === "/webhooks/orders/create") {
@@ -492,12 +492,51 @@ app.get("/admin/backfill/status", (req, res) => {
 //  - 401                                        if unrecognized
 // The frontend uses this to either show the store picker (master) or go straight in.
 // ======================
+// Simple in-memory rate limiter for login attempts (anti brute-force).
+// Per IP: max 10 failed attempts per 15 minutes, then a temporary block.
+const loginAttempts = new Map(); // ip -> { count, firstAt, blockedUntil }
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_BLOCK_MS = 15 * 60 * 1000;
+function loginRateCheck(ip) {
+  const now = Date.now();
+  const rec = loginAttempts.get(ip);
+  if (!rec) return { allowed: true };
+  if (rec.blockedUntil && now < rec.blockedUntil) {
+    return { allowed: false, retryMin: Math.ceil((rec.blockedUntil - now) / 60000) };
+  }
+  if (now - rec.firstAt > LOGIN_WINDOW_MS) { loginAttempts.delete(ip); return { allowed: true }; }
+  return { allowed: true };
+}
+function loginRecordFail(ip) {
+  const now = Date.now();
+  const rec = loginAttempts.get(ip) || { count: 0, firstAt: now, blockedUntil: 0 };
+  if (now - rec.firstAt > LOGIN_WINDOW_MS) { rec.count = 0; rec.firstAt = now; }
+  rec.count++;
+  if (rec.count >= LOGIN_MAX_ATTEMPTS) rec.blockedUntil = now + LOGIN_BLOCK_MS;
+  loginAttempts.set(ip, rec);
+}
+function loginRecordSuccess(ip) { loginAttempts.delete(ip); }
+// Periodic cleanup of old entries.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, rec] of loginAttempts) {
+    if ((!rec.blockedUntil || now > rec.blockedUntil) && now - rec.firstAt > LOGIN_WINDOW_MS) loginAttempts.delete(ip);
+  }
+}, 10 * 60 * 1000);
+
 app.post("/api/auth/login", express.json(), (req, res) => {
+  const ip = (req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();
+  const gate = loginRateCheck(ip);
+  if (!gate.allowed) {
+    return res.status(429).json({ ok: false, error: `יותר מדי ניסיונות. נסה שוב בעוד ${gate.retryMin} דקות.` });
+  }
   try {
     const pw = (req.body && req.body.password) || "";
     if (!pw) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
 
     if (MASTER_PASSWORD && pw === MASTER_PASSWORD) {
+      loginRecordSuccess(ip);
       let stores = [];
       try {
         stores = shopify.listStores().map(s => {
@@ -515,12 +554,14 @@ app.post("/api/auth/login", express.json(), (req, res) => {
 
     // 770's existing password
     if (pw === ADMIN_PASSWORD) {
+      loginRecordSuccess(ip);
       return res.json({ ok: true, mode: "store", shop: DEFAULT_SHOP, name: "770", terms_accepted: true });
     }
 
     // Per-store password
     const shop = resolveShop(req);
     if (shop) {
+      loginRecordSuccess(ip);
       const cfg = shopify.getStore(shop);
       return res.json({
         ok: true, mode: "store", shop,
@@ -529,6 +570,7 @@ app.post("/api/auth/login", express.json(), (req, res) => {
       });
     }
 
+    loginRecordFail(ip);
     return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
   } catch (err) {
     console.error("auth/login error:", err);
@@ -799,109 +841,6 @@ app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
 // /admin/set-wa-key?password=...&shop=xxx.myshopify.com&key=...&language=he
 // TEMP DEBUG: diagnose why personal opportunities are empty. Runs each query
 // independently and reports row counts or the exact error. Remove after fixing.
-app.get("/admin/debug-insights", async (req, res) => {
-  if ((req.query.password || "") !== MASTER_PASSWORD && (req.query.password || "") !== process.env.ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
-  const shop = req.query.shop || DEFAULT_SHOP;
-  const out = {};
-  // 1. Does message_optouts exist?
-  try {
-    const t = await db.query(`SELECT COUNT(*)::int AS n FROM message_optouts WHERE shop_domain=$1`, [shop]);
-    out.optout_table = { exists: true, rows: t.rows[0].n };
-  } catch (e) { out.optout_table = { exists: false, error: e.message }; }
-  // 2. Raw store_customers columns
-  try {
-    const c = await db.query(
-      `SELECT column_name FROM information_schema.columns WHERE table_name='store_customers' ORDER BY column_name`);
-    out.customer_columns = c.rows.map(r => r.column_name);
-  } catch (e) { out.customer_columns = { error: e.message }; }
-  // 3. How many customers spent > 200 and inactive 21+ days (the last-resort pool)
-  try {
-    const r = await db.query(
-      `SELECT COUNT(*)::int AS n FROM store_customers
-       WHERE shop_domain=$1 AND total_spent > 200 AND orders_count >= 1
-         AND last_order_date IS NOT NULL AND last_order_date < NOW() - INTERVAL '21 days'`, [shop]);
-    out.lastresort_pool_no_optout_filter = r.rows[0].n;
-  } catch (e) { out.lastresort_pool_no_optout_filter = { error: e.message }; }
-  // 4. Same WITH the opt-out filter (properly qualified columns).
-  try {
-    const r = await db.query(
-      `SELECT COUNT(*)::int AS n FROM store_customers sc
-       WHERE sc.shop_domain=$1 AND sc.total_spent > 200 AND sc.orders_count >= 1
-         AND sc.last_order_date IS NOT NULL AND sc.last_order_date < NOW() - INTERVAL '21 days'
-         AND NOT EXISTS (SELECT 1 FROM message_optouts mo WHERE mo.shop_domain=$1
-           AND ((mo.email IS NOT NULL AND mo.email <> '' AND sc.email IS NOT NULL AND sc.email <> '' AND lower(mo.email)=lower(sc.email))
-             OR (mo.phone IS NOT NULL AND regexp_replace(mo.phone,'[^0-9]','','g') <> ''
-                 AND sc.phone IS NOT NULL AND regexp_replace(sc.phone,'[^0-9]','','g') <> ''
-                 AND regexp_replace(mo.phone,'[^0-9]','','g')=regexp_replace(sc.phone,'[^0-9]','','g'))))`, [shop]);
-    out.lastresort_pool_with_optout_filter = r.rows[0].n;
-  } catch (e) { out.lastresort_pool_with_optout_filter = { error: e.message }; }
-  // 5. Sample of top inactive customers (names) to confirm data exists
-  try {
-    const r = await db.query(
-      `SELECT first_name, last_name, total_spent, orders_count,
-              last_order_date, EXTRACT(DAY FROM (NOW()-last_order_date))::int AS days_since
-       FROM store_customers WHERE shop_domain=$1 AND total_spent > 200
-       ORDER BY total_spent DESC FETCH FIRST 3 ROWS ONLY`, [shop]);
-    out.sample_top_customers = r.rows;
-  } catch (e) { out.sample_top_customers = { error: e.message }; }
-  // 6. Show the actual opt-out rows (to see if they have empty strings)
-  try {
-    const r = await db.query(
-      `SELECT email, phone, created_at FROM message_optouts WHERE shop_domain=$1`, [shop]);
-    out.optout_rows = r.rows;
-  } catch (e) { out.optout_rows = { error: e.message }; }
-  // 7. Optional cleanup: ?cleanup=1 removes garbage opt-out rows (no usable email or phone).
-  if (req.query.cleanup === '1') {
-    try {
-      const r = await db.query(
-        `DELETE FROM message_optouts
-         WHERE shop_domain=$1
-           AND (email IS NULL OR email = '')
-           AND (phone IS NULL OR regexp_replace(phone,'[^0-9]','','g') = '')`, [shop]);
-      out.cleanup_deleted = r.rowCount;
-    } catch (e) { out.cleanup = { error: e.message }; }
-  }
-  // 8. How many customers does EACH opt-out row match? (find the culprit)
-  try {
-    const rows = await db.query(`SELECT email, phone FROM message_optouts WHERE shop_domain=$1`, [shop]);
-    out.per_optout_impact = [];
-    for (const o of rows.rows) {
-      const digits = (o.phone || '').replace(/[^0-9]/g, '');
-      const m = await db.query(
-        `SELECT COUNT(*)::int AS n FROM store_customers
-         WHERE shop_domain=$1
-           AND ( ($2 <> '' AND regexp_replace(COALESCE(phone,''),'[^0-9]','','g') = $2)
-              OR ($3 <> '' AND lower(COALESCE(email,'')) = lower($3)) )`,
-        [shop, digits, o.email || '']);
-      out.per_optout_impact.push({ email: o.email, phone: o.phone, digits, matches_customers: m.rows[0].n });
-    }
-  } catch (e) { out.per_optout_impact = { error: e.message }; }
-  // 9. How many customers have NULL/empty phone? (these break naive matching)
-  try {
-    const r = await db.query(
-      `SELECT COUNT(*)::int AS n FROM store_customers
-       WHERE shop_domain=$1 AND (phone IS NULL OR regexp_replace(phone,'[^0-9]','','g')='')`, [shop]);
-    out.customers_without_phone = r.rows[0].n;
-  } catch (e) { out.customers_without_phone = { error: e.message }; }
-  // 10. Data health: totals + how many have orders vs last_order_date
-  try {
-    const r = await db.query(`
-      SELECT
-        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1) AS total_customers,
-        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1 AND last_order_date IS NOT NULL) AS with_last_order_date,
-        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1 AND orders_count > 0) AS with_orders_count,
-        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1 AND phone IS NOT NULL AND regexp_replace(phone,'[^0-9]','','g')<>'') AS with_phone,
-        (SELECT COUNT(*)::int FROM store_customers WHERE shop_domain=$1 AND email IS NOT NULL AND email<>'') AS with_email,
-        (SELECT COUNT(*)::int FROM store_orders WHERE shop_domain=$1) AS total_orders,
-        (SELECT COUNT(*)::int FROM store_orders WHERE shop_domain=$1 AND shopify_customer_id IS NOT NULL) AS orders_with_customer_id,
-        (SELECT COUNT(*)::int FROM store_orders WHERE shop_domain=$1 AND ordered_at IS NOT NULL) AS orders_with_date
-    `, [shop]);
-    out.data_health = r.rows[0];
-  } catch (e) { out.data_health = { error: e.message }; }
-  res.json(out);
-});
 
 // Change a store's advisor login password.
 // /admin/set-password?password=ADMIN&shop=xxx.myshopify.com&new_password=XXX
