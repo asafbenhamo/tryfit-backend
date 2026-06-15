@@ -9,10 +9,63 @@
 // All detectors are wrapped so one failure never breaks the others.
 
 const db = require('./database');
+const crypto = require('crypto');
 
 // How many days to rest a customer after we've contacted them (created a coupon /
 // reached out), so the insights don't keep surfacing the same people every day.
 const CONTACTED_COOLDOWN_DAYS = 4;
+
+// How long a "swiped away" opportunity stays hidden before it can resurface.
+const DISMISS_DAYS = 2;
+
+// A stable ID for an opportunity, so the same customer/insight can be dismissed
+// and recognized across visits. Based on type + the customer key (email/phone) or
+// the title for non-personal insights.
+function opportunityId(ins) {
+  const key = (ins.data && (ins.data.email || ins.data.phone))
+    || (ins.data && ins.data.product)
+    || ins.title || '';
+  return crypto.createHash('sha1').update((ins.type || '') + '|' + key).digest('hex').slice(0, 16);
+}
+
+async function ensureDismissTable() {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS dismissed_opportunities (
+      id SERIAL PRIMARY KEY,
+      shop_domain TEXT NOT NULL,
+      opportunity_id TEXT NOT NULL,
+      dismissed_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (shop_domain, opportunity_id)
+    )`).catch(e => console.error('[insights] ensureDismissTable:', e.message));
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_dismiss_shop ON dismissed_opportunities(shop_domain)`).catch(()=>{});
+}
+ensureDismissTable();
+
+// Record that the merchant swiped away an opportunity (hidden for DISMISS_DAYS).
+async function dismissOpportunity(shop, opportunityId) {
+  await ensureDismissTable();
+  await db.query(
+    `INSERT INTO dismissed_opportunities (shop_domain, opportunity_id, dismissed_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (shop_domain, opportunity_id) DO UPDATE SET dismissed_at = NOW()`,
+    [shop.toLowerCase().trim(), opportunityId]
+  ).catch(e => console.error('[insights] dismissOpportunity:', e.message));
+  return { ok: true };
+}
+
+// Set of opportunity IDs currently hidden for this shop (within the dismiss window).
+async function getDismissedSet(shop) {
+  await ensureDismissTable();
+  try {
+    const r = await db.query(
+      `SELECT opportunity_id FROM dismissed_opportunities
+       WHERE shop_domain = $1 AND dismissed_at >= NOW() - INTERVAL '${DISMISS_DAYS} days'`,
+      [shop.toLowerCase().trim()]
+    );
+    return new Set(r.rows.map(x => x.opportunity_id));
+  } catch (e) { return new Set(); }
+}
+
 
 // SQL fragment: exclude customers we've already contacted in the cooldown window.
 // Matches on email OR phone against advisor_actions (ignoring report rows).
@@ -451,7 +504,13 @@ async function getInsights(shop) {
   // do NOT re-sort by priority, which would scramble it.
   const personalSorted = personal.filter(isPersonal);
 
-  const all = [...supporting, ...personalSorted].slice(0, 8);
+  // Attach a stable ID to every opportunity, then drop any the merchant recently
+  // swiped away (hidden for DISMISS_DAYS), so swiping surfaces fresh ones.
+  const dismissed = await getDismissedSet(shop);
+  const withIds = [...supporting, ...personalSorted].map(ins => ({ ...ins, id: opportunityId(ins) }));
+  const visible = withIds.filter(ins => !dismissed.has(ins.id));
+
+  const all = visible.slice(0, 8);
 
   return {
     ok: true,
@@ -523,6 +582,7 @@ async function detectPersonalLastResort(shop) {
 
 module.exports = {
   getInsights,
+  dismissOpportunity,
   detectDormantVIPs,
   detectLowStockBestsellers,
   detectHighValueAbandoned,

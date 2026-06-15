@@ -264,6 +264,29 @@ function storeBrand(shop) {
   return (s && s.name) || (shop || "").replace(".myshopify.com", "");
 }
 
+// The store owner's email (gets a sample copy of campaign emails). For 770 we use
+// MAIL_REPLY_TO env; for other stores, the owner_email set from the master panel.
+function ownerEmailFor(shop) {
+  if (shop === DEFAULT_SHOP) return process.env.MAIL_REPLY_TO || process.env.MAIL_FROM || null;
+  const s = shopify.getStore(shop);
+  return (s && s.owner_email) || null;
+}
+
+// Send ONE sample copy of a campaign email to the store owner, so they see exactly
+// what their customers receive. Best-effort; never blocks the campaign.
+async function sendOwnerSample(shop, { subject, html, text }) {
+  try {
+    const owner = ownerEmailFor(shop);
+    if (!owner) return;
+    await mailer.sendEmail({
+      to: owner,
+      subject: "[דוגמה ללקוח] " + (subject || "קמפיין"),
+      html: '<div style="background:#fff8e1;padding:10px;text-align:center;font-family:Arial;color:#8a6d00;border-radius:8px;margin-bottom:10px">📋 זו דוגמה למייל שהלקוחות שלך מקבלים בקמפיין הזה</div>' + (html || ""),
+      text: "[דוגמה ללקוח]\n\n" + (text || "")
+    });
+  } catch (e) { console.error("[owner-sample]", e.message); }
+}
+
 // Pull the password from wherever it arrived (query, body, or header).
 function extractPassword(req) {
   return (req.query && req.query.password)
@@ -619,7 +642,8 @@ app.get("/api/wa-credits/all", async (req, res) => {
         shop_domain: s.shop_domain,
         name: (cfg && cfg.name) || (s.shop_domain === DEFAULT_SHOP ? "770" : s.shop_domain.replace(".myshopify.com", "")),
         balance: await creditsEngine.getBalance(s.shop_domain),
-        logo_url: (cfg && cfg.logo_url) || ""
+        logo_url: (cfg && cfg.logo_url) || "",
+        owner_email: (cfg && cfg.owner_email) || ""
       });
     }
     res.json({ ok: true, stores: out, price_per_credit: creditsEngine.PRICE_PER_CREDIT_ILS });
@@ -846,6 +870,30 @@ app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
 // /admin/set-password?password=ADMIN&shop=xxx.myshopify.com&new_password=XXX
 // Set a store's logo URL (used as the PWA home-screen icon).
 // /admin/set-logo?password=MASTER&shop=xxx.myshopify.com&logo_url=https://...
+// Set the store owner's email (receives sample copies of campaign emails).
+// /admin/set-owner-email?password=MASTER&shop=xxx.myshopify.com&email=owner@store.com
+app.get("/admin/set-owner-email", async (req, res) => {
+  if (!isAdmin(req)) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = (req.query.shop || "").toLowerCase().trim();
+  const email = (req.query.email || "").trim();
+  if (!shop || !email) {
+    return res.status(400).json({ ok: false, error: "חובה shop ו-email" });
+  }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return res.status(400).json({ ok: false, error: "כתובת מייל לא תקינה" });
+  }
+  try {
+    const r = await shopify.setOwnerEmail(shop, email);
+    if (!r.ok) return res.status(404).json({ ok: false, error: "החנות לא נמצאה ב-DB" });
+    res.json({ ok: true, shop, owner_email: email, note: "מייל בעל החנות נשמר. הוא יקבל עותק דוגמה מכל קמפיין מייל." });
+  } catch (err) {
+    console.error("set-owner-email error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/admin/set-logo", async (req, res) => {
   if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
@@ -1119,6 +1167,22 @@ app.get("/unsubscribe", async (req, res) => {
   res.send(`<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
     <style>body{font-family:Arial,sans-serif;text-align:center;padding:60px 20px;color:#333}</style></head>
     <body><h2>הוסרת מרשימת התפוצה</h2><p>לא תקבל/י יותר הודעות שיווקיות. תודה.</p></body></html>`);
+});
+
+// Swipe away an opportunity: hide it for a couple of days and let a fresh one
+// take its place on the next load.
+app.post("/api/insights/dismiss", express.json(), async (req, res) => {
+  try {
+    const shop = resolveShop(req);
+    if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+    const id = (req.body && req.body.id || "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "missing id" });
+    await insightsEngine.dismissOpportunity(shop, id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("dismiss error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 app.get("/api/working-hours", (req, res) => {
@@ -1758,6 +1822,7 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
 
     const whatsapp = [];
     let emailsSent = 0, failed = 0, skipped = 0;
+    let ownerSampleSent = false;
 
     for (const cart of carts) {
       try {
@@ -1826,6 +1891,11 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
             });
             const sent = await mailer.sendEmail({ to: email, subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
             if (sent.ok) emailsSent++; else failed++;
+            // Send the owner ONE sample copy of what customers receive.
+            if (sent.ok && !ownerSampleSent) {
+              ownerSampleSent = true;
+              await sendOwnerSample(shop, { subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
+            }
           }
         } else { failed++; }
 

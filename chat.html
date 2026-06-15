@@ -808,6 +808,10 @@
           + '<input type="text" placeholder="קישור ללוגו (https://...png)" id="logo_' + esc(s.shop_domain) + '" dir="ltr" value="' + esc(s.logo_url || '') + '" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:7px;text-align:left;font-size:12px">'
           + '<button onclick="setStoreLogo(\'' + esc(s.shop_domain) + '\')" style="background:#7c3aed;border:none;color:#fff;border-radius:7px;padding:8px 12px;cursor:pointer;white-space:nowrap">שמור לוגו</button>'
           + '</div>'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-top:8px">'
+          + '<input type="email" placeholder="מייל בעל החנות (לדוגמאות קמפיין)" id="owner_' + esc(s.shop_domain) + '" dir="ltr" value="' + esc(s.owner_email || '') + '" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:7px;text-align:left;font-size:12px">'
+          + '<button onclick="setOwnerEmail(\'' + esc(s.shop_domain) + '\')" style="background:#ea580c;border:none;color:#fff;border-radius:7px;padding:8px 12px;cursor:pointer;white-space:nowrap">שמור מייל</button>'
+          + '</div>'
           + '</div>';
       });
       body.innerHTML = h;
@@ -830,6 +834,20 @@
         if (el) el.textContent = (d.balance || 0).toLocaleString();
         document.getElementById('amt_' + shop).value = '';
       } else { alert(d.error || 'שגיאה'); }
+    } catch (e) { alert('שגיאה'); }
+  }
+
+  async function setOwnerEmail(shop) {
+    const el = document.getElementById('owner_' + shop);
+    const email = (el && el.value || '').trim();
+    if (!email) { alert('הזן מייל'); return; }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { alert('כתובת מייל לא תקינה'); return; }
+    try {
+      const res = await fetch('/admin/set-owner-email?password=' + encodeURIComponent(PASSWORD)
+        + '&shop=' + encodeURIComponent(shop) + '&email=' + encodeURIComponent(email));
+      const d = await res.json();
+      if (d.ok) { alert('מייל בעל החנות נשמר. הוא יקבל עותק דוגמה מכל קמפיין מייל.'); }
+      else { alert(d.error || 'שגיאה'); }
     } catch (e) { alert('שגיאה'); }
   }
 
@@ -1423,6 +1441,9 @@
     try {
       const res = await fetch('/api/insights?password=' + encodeURIComponent(PASSWORD));
       const data = await res.json();
+      // Clear any existing insights wrap (so swipe-reload replaces cleanly).
+      const old = document.querySelector('.insights-wrap');
+      if (old) old.remove();
       if (!data.ok || !data.insights || data.insights.length === 0) return;
       if (!$('welcome')) return;
       renderInsights(data.insights);
@@ -1430,12 +1451,14 @@
       console.error('loadInsights error', err);
     }
   }
+  let _insightsCache = [];
   function renderInsights(insights) {
     const w = $('welcome');
     if (!w) return;
+    _insightsCache = insights.slice();
     const wrap = document.createElement('div');
     wrap.className = 'insights-wrap';
-    let html = '<div class="insights-head">✨ הזדמנויות שמצאתי בשבילך היום</div>';
+    let html = '<div class="insights-head">✨ הזדמנויות שמצאתי בשבילך היום <span style="font-weight:400;font-size:11px;color:var(--text-dim)">(החלק ימינה כדי לדלג)</span></div>';
     insights.forEach((ins, i) => {
       const hint = ins.action_hint || '';
       let arg = (ins.data && (ins.data.name || ins.data.title)) || '';
@@ -1445,7 +1468,7 @@
       if (hint === 'do_more_of_best' && ins.data) {
         arg = ins.data.action_label || '';
       }
-      html += '<div class="insight-card p' + (ins.priority || 4) + '" style="animation-delay:' + (i * 0.07) + 's">';
+      html += '<div class="insight-card p' + (ins.priority || 4) + '" data-id="' + esc(ins.id || '') + '" style="animation-delay:' + (i * 0.07) + 's">';
       html += '<div class="insight-title">' + esc(ins.title) + '</div>';
       html += '<div class="insight-detail">' + esc(ins.detail) + '</div>';
       if (ACTION_PROMPTS[hint]) {
@@ -1455,7 +1478,7 @@
     });
     wrap.innerHTML = html;
     const slot = document.getElementById('homeInsightsSlot');
-    if (slot) slot.appendChild(wrap);
+    if (slot) { slot.innerHTML = ''; slot.appendChild(wrap); }
     else w.parentNode.insertBefore(wrap, w);
     wrap.querySelectorAll('.insight-btn').forEach(btn => {
       btn.onclick = () => {
@@ -1468,6 +1491,50 @@
         }
       };
     });
+    wrap.querySelectorAll('.insight-card').forEach(card => attachSwipe(card));
+  }
+
+  // Swipe-right (or drag) to dismiss an opportunity; the server hides it for a
+  // couple of days and we reload to surface a fresh one in its place.
+  function attachSwipe(card) {
+    let startX = 0, curX = 0, dragging = false;
+    const threshold = 90;
+    function start(x) { startX = x; dragging = true; card.style.transition = 'none'; }
+    function move(x) {
+      if (!dragging) return;
+      curX = x - startX;
+      if (curX < 0) curX = 0; // only allow rightward swipe (RTL: visually toward start)
+      card.style.transform = 'translateX(' + curX + 'px)';
+      card.style.opacity = String(Math.max(0.3, 1 - curX / 300));
+    }
+    async function end() {
+      if (!dragging) return;
+      dragging = false;
+      card.style.transition = 'transform .25s, opacity .25s';
+      if (curX > threshold) {
+        card.style.transform = 'translateX(120%)';
+        card.style.opacity = '0';
+        const id = card.getAttribute('data-id');
+        try {
+          await fetch('/api/insights/dismiss', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: PASSWORD, id })
+          });
+        } catch (e) {}
+        setTimeout(() => { loadInsights(); }, 260);
+      } else {
+        card.style.transform = '';
+        card.style.opacity = '';
+      }
+      curX = 0;
+    }
+    card.addEventListener('touchstart', e => start(e.touches[0].clientX), { passive: true });
+    card.addEventListener('touchmove', e => move(e.touches[0].clientX), { passive: true });
+    card.addEventListener('touchend', end);
+    card.addEventListener('mousedown', e => { start(e.clientX); e.preventDefault(); });
+    window.addEventListener('mousemove', e => { if (dragging) move(e.clientX); });
+    window.addEventListener('mouseup', () => { if (dragging) end(); });
   }
   function esc(s) {
     return String(s == null ? '' : s)
