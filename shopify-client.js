@@ -40,6 +40,7 @@ async function ensureStoreTable() {
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ`).catch(()=>{});
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS d360_api_key TEXT`).catch(()=>{});
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS wa_language TEXT DEFAULT 'he'`).catch(()=>{});
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS logo_url TEXT`).catch(()=>{});
   } catch (err) {
     console.error('⚠️  [stores] ensureStoreTable failed:', err.message);
   }
@@ -49,7 +50,7 @@ async function ensureStoreTable() {
 async function loadStores() {
   try {
     await ensureStoreTable();
-    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at, d360_api_key, wa_language FROM advisor_stores WHERE active = TRUE`);
+    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at, d360_api_key, wa_language, logo_url FROM advisor_stores WHERE active = TRUE`);
     storeCache.clear();
     for (const row of r.rows) {
       storeCache.set(row.shop_domain.toLowerCase().trim(), {
@@ -60,7 +61,8 @@ async function loadStores() {
         active: row.active,
         terms_accepted_at: row.terms_accepted_at,
         d360_api_key: row.d360_api_key,
-        wa_language: row.wa_language || 'he'
+        wa_language: row.wa_language || 'he',
+        logo_url: row.logo_url || null
       });
     }
     console.log(`🏪 [stores] loaded ${storeCache.size} store(s) from DB`);
@@ -103,6 +105,18 @@ async function setWhatsAppConfig(shopDomain, { d360_api_key, wa_language }) {
   );
   await loadStores();
   return { ok: true };
+}
+
+// Update a store's logo URL (used for the PWA home-screen icon).
+async function setStoreLogo(shopDomain, logoUrl) {
+  const domain = (shopDomain || '').toLowerCase().trim();
+  await ensureStoreTable();
+  const r = await db.query(
+    `UPDATE advisor_stores SET logo_url = $2 WHERE shop_domain = $1`,
+    [domain, logoUrl || null]
+  );
+  await loadStores();
+  return { ok: r.rowCount > 0, updated: r.rowCount };
 }
 
 // Update a store's advisor login password.
@@ -1351,6 +1365,7 @@ module.exports = {
   acceptTerms,
   setWhatsAppConfig,
   setAdvisorPassword,
+  setStoreLogo,
   getWhatsAppConfig,
   ensureStoreTable,
   findCustomerByEmail,

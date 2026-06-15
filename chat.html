@@ -3,12 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>היועץ החכם · 770</title>
+<title>היועץ החכם</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#0b8aff">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="היועץ 770">
+<meta name="apple-mobile-web-app-title" content="היועץ החכם">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="icon" type="image/png" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -740,7 +740,7 @@
         if (data.terms_accepted === false) {
           showTermsGate(data.name || '');
         } else {
-          enterAdvisor(data.name || '');
+          enterAdvisor(data.name || '', data.shop || '');
         }
       }
     } catch (err) {
@@ -804,6 +804,10 @@
           + '<input type="text" placeholder="סיסמה חדשה לחנות" id="pw_' + esc(s.shop_domain) + '" dir="rtl" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:7px;text-align:right;font-size:13px">'
           + '<button onclick="setStorePassword(\'' + esc(s.shop_domain) + '\')" style="background:#0a6fe0;border:none;color:#fff;border-radius:7px;padding:8px 12px;cursor:pointer;white-space:nowrap">שנה סיסמה</button>'
           + '</div>'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-top:8px">'
+          + '<input type="text" placeholder="קישור ללוגו (https://...png)" id="logo_' + esc(s.shop_domain) + '" dir="ltr" value="' + esc(s.logo_url || '') + '" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:7px;text-align:left;font-size:12px">'
+          + '<button onclick="setStoreLogo(\'' + esc(s.shop_domain) + '\')" style="background:#7c3aed;border:none;color:#fff;border-radius:7px;padding:8px 12px;cursor:pointer;white-space:nowrap">שמור לוגו</button>'
+          + '</div>'
           + '</div>';
       });
       body.innerHTML = h;
@@ -825,6 +829,21 @@
         const el = document.getElementById('bal_' + shop);
         if (el) el.textContent = (d.balance || 0).toLocaleString();
         document.getElementById('amt_' + shop).value = '';
+      } else { alert(d.error || 'שגיאה'); }
+    } catch (e) { alert('שגיאה'); }
+  }
+
+  async function setStoreLogo(shop) {
+    const el = document.getElementById('logo_' + shop);
+    const url = (el && el.value || '').trim();
+    if (!url) { alert('הזן קישור ללוגו'); return; }
+    if (!/^https:\/\//i.test(url)) { alert('הקישור חייב להתחיל ב-https://'); return; }
+    try {
+      const res = await fetch('/admin/set-logo?password=' + encodeURIComponent(PASSWORD)
+        + '&shop=' + encodeURIComponent(shop) + '&logo_url=' + encodeURIComponent(url));
+      const d = await res.json();
+      if (d.ok) {
+        alert('הלוגו עודכן לחנות ' + shop + '. הוא יופיע כאייקון האפליקציה במסך הבית (ייתכן שצריך להסיר ולהוסיף מחדש את האפליקציה כדי לראות את האייקון החדש).');
       } else { alert(d.error || 'שגיאה'); }
     } catch (e) { alert('שגיאה'); }
   }
@@ -853,7 +872,7 @@
     IS_MASTER = false; PASSWORD = ''; SELECTED_SHOP = '';
   }
 
-  function enterAdvisor(storeName) {
+  function enterAdvisor(storeName, shopDomain) {
     if (storeName) {
       $('gateTitle').textContent = 'היועץ החכם של ' + storeName;
       const hdrTitle = document.getElementById('hdrTitle');
@@ -861,6 +880,24 @@
       const hdrStore = document.getElementById('hdrStore');
       if (hdrStore) hdrStore.textContent = 'מחובר לחנות ' + storeName;
       document.title = 'יועץ אישי - ' + storeName;
+      // Update the PWA home-screen app name + icon to this store. Prefer ?shop=
+      // (so the manifest can serve the store's own logo as the icon); fall back to name.
+      try {
+        const mani = document.querySelector('link[rel="manifest"]');
+        if (mani) {
+          mani.setAttribute('href', shopDomain
+            ? '/manifest.json?shop=' + encodeURIComponent(shopDomain)
+            : '/manifest.json?name=' + encodeURIComponent(storeName));
+        }
+        const appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+        if (appleTitle) appleTitle.setAttribute('content', 'היועץ של ' + storeName);
+        // iOS uses the apple-touch-icon link (not the manifest) for the home-screen
+        // icon. Point it at the store's logo if we have the shop on record.
+        if (shopDomain) {
+          let appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
+          if (appleIcon) appleIcon.setAttribute('href', '/store-icon?shop=' + encodeURIComponent(shopDomain));
+        }
+      } catch (e) {}
     }
     $('gate').style.display = 'none';
     $('sidebar').style.display = 'flex';

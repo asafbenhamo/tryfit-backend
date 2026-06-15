@@ -575,7 +575,8 @@ app.get("/api/wa-credits/all", async (req, res) => {
       out.push({
         shop_domain: s.shop_domain,
         name: (cfg && cfg.name) || (s.shop_domain === DEFAULT_SHOP ? "770" : s.shop_domain.replace(".myshopify.com", "")),
-        balance: await creditsEngine.getBalance(s.shop_domain)
+        balance: await creditsEngine.getBalance(s.shop_domain),
+        logo_url: (cfg && cfg.logo_url) || ""
       });
     }
     res.json({ ok: true, stores: out, price_per_credit: creditsEngine.PRICE_PER_CREDIT_ILS });
@@ -903,6 +904,30 @@ app.get("/admin/debug-insights", async (req, res) => {
 
 // Change a store's advisor login password.
 // /admin/set-password?password=ADMIN&shop=xxx.myshopify.com&new_password=XXX
+// Set a store's logo URL (used as the PWA home-screen icon).
+// /admin/set-logo?password=MASTER&shop=xxx.myshopify.com&logo_url=https://...
+app.get("/admin/set-logo", async (req, res) => {
+  if (!isAdmin(req)) {
+    return res.status(401).json({ error: "סיסמה שגויה" });
+  }
+  const shop = (req.query.shop || "").toLowerCase().trim();
+  const logoUrl = (req.query.logo_url || "").trim();
+  if (!shop || !logoUrl) {
+    return res.status(400).json({ ok: false, error: "חובה shop ו-logo_url" });
+  }
+  if (!/^https:\/\//i.test(logoUrl)) {
+    return res.status(400).json({ ok: false, error: "ה-logo_url חייב להתחיל ב-https://" });
+  }
+  try {
+    const r = await shopify.setStoreLogo(shop, logoUrl);
+    if (!r.ok) return res.status(404).json({ ok: false, error: "החנות לא נמצאה ב-DB" });
+    res.json({ ok: true, shop, logo_url: logoUrl, note: "הלוגו עודכן. ישמש כאייקון האפליקציה במסך הבית." });
+  } catch (err) {
+    console.error("set-logo error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.get("/admin/set-password", async (req, res) => {
   if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
@@ -1890,6 +1915,56 @@ app.get("/icon-192.png", (req, res) => {
 app.get("/icon-512.png", (req, res) => {
   res.sendFile(__dirname + "/icon-512.png");
 });
+// Dynamic PWA manifest — customizes the home-screen app name per store.
+// chat.html requests /manifest.json?shop=xxx (or ?name=xxx); we return a manifest
+// with that store's name so the installed icon shows the right brand.
+app.get("/manifest.json", (req, res) => {
+  let name = "היועץ החכם";
+  let logoUrl = null;
+  const shop = (req.query.shop || "").toLowerCase().trim();
+  const nameParam = (req.query.name || "").trim();
+  if (shop) {
+    try {
+      const cfg = shopify.getStore(shop);
+      const storeName = (cfg && cfg.name) || (shop === DEFAULT_SHOP ? "770" : shop.replace(".myshopify.com", ""));
+      name = "היועץ של " + storeName;
+      if (cfg && cfg.logo_url) logoUrl = cfg.logo_url;
+    } catch (e) { /* fall back to default */ }
+  } else if (nameParam) {
+    name = "היועץ של " + nameParam;
+  }
+  // Use the store's own logo as the home-screen icon if set; else the default icons.
+  const icons = logoUrl
+    ? [
+        { src: logoUrl, sizes: "192x192", type: "image/png", purpose: "any" },
+        { src: logoUrl, sizes: "512x512", type: "image/png", purpose: "any" }
+      ]
+    : [
+        { src: "/icon-192.png", sizes: "192x192", type: "image/png" },
+        { src: "/icon-512.png", sizes: "512x512", type: "image/png" },
+        { src: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }
+      ];
+  res.json({
+    name: name,
+    short_name: name.length > 12 ? name.slice(0, 12) : name,
+    start_url: "/",
+    display: "standalone",
+    background_color: "#ffffff",
+    theme_color: "#0b8aff",
+    icons: icons
+  });
+});
+
+// iOS home-screen icon per store: redirect to the store's logo, or the default.
+app.get("/store-icon", (req, res) => {
+  const shop = (req.query.shop || "").toLowerCase().trim();
+  try {
+    const cfg = shop ? shopify.getStore(shop) : null;
+    if (cfg && cfg.logo_url) return res.redirect(cfg.logo_url);
+  } catch (e) { /* fall through to default */ }
+  res.sendFile(__dirname + "/apple-touch-icon.png");
+});
+
 app.get("/apple-touch-icon.png", (req, res) => {
   res.sendFile(__dirname + "/apple-touch-icon.png");
 });
