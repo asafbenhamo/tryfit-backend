@@ -488,18 +488,20 @@ async function getInsights(shop) {
   // Customer-specific (personal) opportunities first: carts, VIPs, new customers.
   let personal = [...abandoned, ...vips, ...newBig];
 
-  // GUARANTEE at least 3 personal opportunities. If strict pools came back thin
-  // (cooldown/opt-out emptied them), widen in two stages:
+  // GUARANTEE a healthy batch of personal opportunities. If strict pools came back
+  // thin (cooldown/opt-out emptied them), widen in two stages:
   //   (1) relaxed dormant pool (lower spend bar, still respects cooldown+optout)
   //   (2) last-resort pool that IGNORES cooldown (still respects opt-out!) so the
   //       merchant always sees named customers worth contacting.
-  if (personal.filter(isPersonal).length < 3) {
+  // We aim higher than the display count so there's a real pool to swipe through.
+  const PERSONAL_TARGET = 40;
+  if (personal.filter(isPersonal).length < PERSONAL_TARGET) {
     const relaxed = await detectDormantRelaxed(shop);
-    personal = mergePersonal(personal, relaxed, 3);
+    personal = mergePersonal(personal, relaxed, PERSONAL_TARGET);
   }
-  if (personal.filter(isPersonal).length < 3) {
+  if (personal.filter(isPersonal).length < PERSONAL_TARGET) {
     const lastResort = await detectPersonalLastResort(shop);
-    personal = mergePersonal(personal, lastResort, 3);
+    personal = mergePersonal(personal, lastResort, PERSONAL_TARGET);
   }
 
   // Supporting order: stock alerts + sales shift FIRST (broad store health),
@@ -573,13 +575,15 @@ async function detectPersonalLastResort(shop) {
        FETCH FIRST 400 ROWS ONLY`,
       [shop]
     );
-    // Randomly sample up to 5 from the top-400 pool so the suggestions rotate widely.
+    // Randomly sample from the top-400 pool so suggestions rotate widely. We surface
+    // a large batch (real customers worth contacting) to feed the swipe pool, so the
+    // merchant can keep swiping through genuinely different people.
     const pool = [...r.rows];
     for (let i = pool.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [pool[i], pool[j]] = [pool[j], pool[i]];
     }
-    return pool.slice(0, 5).map(c => {
+    return pool.slice(0, 60).map(c => {
       const days = c.days_since;
       const sinceTxt = (days != null && days > 0) ? `לא קנתה כבר ${days} ימים. ` : '';
       return {
