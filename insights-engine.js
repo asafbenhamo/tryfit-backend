@@ -18,6 +18,57 @@ const CONTACTED_COOLDOWN_DAYS = 4;
 // How long a "swiped away" opportunity stays hidden before it can resurface.
 const DISMISS_DAYS = 2;
 
+// ---------- Dynamic per-store thresholds ----------
+// Instead of hard-coded "VIP = spent > 1500", we compute thresholds RELATIVE to
+// each store's own customers (e.g. the 80th percentile of spend). A boutique and
+// a high-ticket store get different, fitting definitions of "VIP". Cached 6h.
+const _statsCache = new Map(); // shop -> { at, stats }
+async function storeStats(shop) {
+  const key = shop.toLowerCase().trim();
+  const cached = _statsCache.get(key);
+  if (cached && (Date.now() - cached.at) < 6 * 60 * 60 * 1000) return cached.stats;
+  let stats = {
+    vipSpend: 1500, midSpend: 400,      // sensible fallbacks
+    avgGapDays: 45, hasData: false
+  };
+  try {
+    // Spend percentiles among customers who actually bought.
+    const r = await db.query(
+      `SELECT
+         percentile_cont(0.80) WITHIN GROUP (ORDER BY total_spent) AS p80,
+         percentile_cont(0.50) WITHIN GROUP (ORDER BY total_spent) AS p50,
+         COUNT(*) AS n
+       FROM store_customers
+       WHERE shop_domain = $1 AND total_spent > 0 AND orders_count >= 1`,
+      [shop]
+    );
+    const row = r.rows[0];
+    if (row && Number(row.n) >= 20) {
+      stats.vipSpend = Math.max(300, Math.round(Number(row.p80)));
+      stats.midSpend = Math.max(100, Math.round(Number(row.p50)));
+      stats.hasData = true;
+    }
+    // Typical days between orders across the store (median gap for repeat buyers).
+    const g = await db.query(
+      `WITH gaps AS (
+         SELECT shopify_customer_id,
+                EXTRACT(DAY FROM (ordered_at - LAG(ordered_at) OVER (
+                  PARTITION BY shopify_customer_id ORDER BY ordered_at)))::int AS gap
+         FROM store_orders
+         WHERE shop_domain = $1 AND shopify_customer_id IS NOT NULL AND ordered_at IS NOT NULL
+       )
+       SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY gap) AS median_gap
+       FROM gaps WHERE gap IS NOT NULL AND gap > 0`,
+      [shop]
+    );
+    if (g.rows[0] && g.rows[0].median_gap) {
+      stats.avgGapDays = Math.max(14, Math.round(Number(g.rows[0].median_gap)));
+    }
+  } catch (e) { /* keep fallbacks */ }
+  _statsCache.set(key, { at: Date.now(), stats });
+  return stats;
+}
+
 // A stable ID for an opportunity, so the same customer/insight can be dismissed
 // and recognized across visits. Based on type + the customer key (email/phone) or
 // the title for non-personal insights.
@@ -118,18 +169,78 @@ async function runDetector(label, fn) {
   }
 }
 
+// ---------- SMART: Purchase-cycle timing ----------
+// For each repeat customer we compute THEIR OWN average gap between orders, then
+// surface the ones who are "due" right now (their personal gap has elapsed since
+// their last order, within a sensible window). This is the sharpest signal: we
+// reach a customer exactly when their own habit says they're ready to buy again.
+async function detectDueToReorder(shop) {
+  return runDetector('dueToReorder', async () => {
+    const r = await db.query(
+      `WITH per_customer AS (
+         SELECT shopify_customer_id,
+                COUNT(*) AS orders_n,
+                MAX(ordered_at) AS last_order,
+                (EXTRACT(EPOCH FROM (MAX(ordered_at) - MIN(ordered_at))) / 86400.0)
+                  / NULLIF(COUNT(*) - 1, 0) AS avg_gap_days
+         FROM store_orders
+         WHERE shop_domain = $1 AND shopify_customer_id IS NOT NULL AND ordered_at IS NOT NULL
+         GROUP BY shopify_customer_id
+         HAVING COUNT(*) >= 2
+       ),
+       due AS (
+         SELECT pc.*,
+                EXTRACT(DAY FROM (NOW() - pc.last_order))::int AS days_since,
+                ROUND(pc.avg_gap_days)::int AS gap
+         FROM per_customer pc
+         WHERE pc.avg_gap_days BETWEEN 7 AND 240
+           AND (NOW() - pc.last_order) >= (pc.avg_gap_days || ' days')::interval
+           AND (NOW() - pc.last_order) <= (pc.avg_gap_days * 1.8 || ' days')::interval
+       )
+       SELECT c.first_name, c.last_name, c.email, c.phone,
+              c.total_spent, c.orders_count,
+              d.days_since, d.gap
+       FROM due d
+       JOIN store_customers c
+         ON c.shop_domain = $1 AND c.shopify_customer_id = d.shopify_customer_id
+       WHERE ${notRecentlyContacted('c.email', 'c.phone')}
+         AND ${notOptedOut('c.email', 'c.phone')}
+       ORDER BY (d.days_since - d.gap) ASC, c.total_spent DESC
+       FETCH FIRST 8 ROWS ONLY`,
+      [shop]
+    );
+    return r.rows.map(c => {
+      const name = ((c.first_name || '') + ' ' + (c.last_name || '')).trim();
+      return {
+        type: 'due_to_reorder',
+        priority: 1,
+        title: `הרגע המושלם לפנות ל${name || 'לקוחה'}`,
+        detail: `היא קונה בערך כל ${c.gap} ימים, ועברו כבר ${c.days_since} ימים מההזמנה האחרונה - בדיוק החלון שבו היא נוטה לחזור. פנייה אישית עכשיו, עם המלצה מתאימה והטבה קטנה, צפויה להמיר במיוחד.`,
+        action_hint: 'send_winback',
+        data: {
+          name, email: c.email, phone: c.phone,
+          total_spent: Math.round(c.total_spent || 0),
+          orders_count: c.orders_count,
+          avg_gap: c.gap, days_since: c.days_since
+        }
+      };
+    });
+  });
+}
+
 // ---------- 1. VIP customers who went quiet ----------
 // A VIP (high lifetime spend) whose last order is far past their usual rhythm.
 // We approximate "usual rhythm": if they have many orders but haven't bought in 45+ days.
 async function detectDormantVIPs(shop) {
   return runDetector('dormantVIPs', async () => {
+    const stats = await storeStats(shop);
     const r = await db.query(
       `SELECT first_name, last_name, email, phone,
               total_spent, orders_count, last_order_date,
               EXTRACT(DAY FROM (NOW() - last_order_date))::int AS days_since
        FROM store_customers
        WHERE shop_domain = $1
-         AND total_spent > 1500
+         AND total_spent >= $2
          AND orders_count >= 2
          AND last_order_date IS NOT NULL
          AND last_order_date < NOW() - INTERVAL '45 days'
@@ -137,13 +248,13 @@ async function detectDormantVIPs(shop) {
          AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY total_spent DESC
        FETCH FIRST 5 ROWS ONLY`,
-      [shop]
+      [shop, stats.vipSpend]
     );
     return r.rows.map(c => ({
       type: 'dormant_vip',
       priority: 1,
       title: `לקוחה VIP שנעלמה: ${(c.first_name || '') + ' ' + (c.last_name || '')}`.trim(),
-      detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ב-${c.orders_count} הזמנות, אבל לא קנתה כבר ${c.days_since} ימים. שווה לפנות אליה אישית עם עגלה מותאמת והטבה לפני שתלך למתחרים.`,
+      detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ב-${c.orders_count} הזמנות (מהלקוחות המובילים בחנות), אבל לא קנתה כבר ${c.days_since} ימים. שווה לפנות אליה אישית עם עגלה מותאמת והטבה לפני שתלך למתחרים.`,
       action_hint: 'send_winback',
       data: {
         name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
@@ -474,7 +585,7 @@ async function detectCrossSell(shop) {
 
 // ---------- Main entry: gather all insights ----------
 async function getInsights(shop) {
-  const [vips, lowStock, abandoned, shift, newBig, crossSell, followUp, whatWorks] = await Promise.all([
+  const [vips, lowStock, abandoned, shift, newBig, crossSell, followUp, whatWorks, dueReorder] = await Promise.all([
     detectDormantVIPs(shop),
     detectLowStockBestsellers(shop),
     detectHighValueAbandoned(shop),
@@ -482,11 +593,17 @@ async function getInsights(shop) {
     detectNewBigCustomers(shop),
     detectCrossSell(shop),
     detectFollowUp(shop),
-    detectWhatWorks(shop)
+    detectWhatWorks(shop),
+    detectDueToReorder(shop)
   ]);
 
-  // Customer-specific (personal) opportunities first: carts, VIPs, new customers.
-  let personal = [...abandoned, ...vips, ...newBig];
+  // Customer-specific (personal) opportunities first. "Due to reorder" leads — it's
+  // the sharpest signal (right customer, right moment) — then carts, VIPs, new.
+  let personal = [...dueReorder, ...abandoned, ...vips, ...newBig];
+
+  // De-dup personal by email/phone so the same person doesn't appear twice across
+  // signals (e.g. both "due to reorder" and "dormant VIP").
+  personal = dedupPersonal(personal);
 
   // GUARANTEE a healthy batch of personal opportunities. If strict pools came back
   // thin (cooldown/opt-out emptied them), widen in two stages:
@@ -553,7 +670,21 @@ function mergePersonal(current, additions, target) {
 }
 
 function isPersonal(ins) {
-  return ins && ['dormant_vip', 'new_big_customer', 'dormant_customer', 'high_value_abandoned'].includes(ins.type);
+  return ins && ['dormant_vip', 'new_big_customer', 'dormant_customer', 'high_value_abandoned', 'due_to_reorder'].includes(ins.type);
+}
+
+// Remove duplicate people across personal signals, keeping the first (highest-priority)
+// occurrence by email/phone key.
+function dedupPersonal(list) {
+  const seen = new Set();
+  const out = [];
+  for (const ins of list) {
+    const key = (ins.data && (ins.data.email || ins.data.phone)) || '';
+    if (!key) { out.push(ins); continue; }
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(ins);
+  }
+  return out;
 }
 
 // Last resort: high-value customers, IGNORING the contact cooldown (but never
