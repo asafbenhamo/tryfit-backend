@@ -1458,6 +1458,7 @@
     do_more_of_best: arg => `המהלך "${arg}" עובד הכי טוב אצלי. בנה לי עוד קמפיין מהסוג הזה - מצא את הלקוחות המתאימים, בנה הצעה עם קופון והודעה אישית, ותראה לי לפני שליחה.`,
     welcome_second_purchase: name => `${name} קנתה רק פעם אחת. בנה הצעה אישית שתעודד אותה לקנייה שנייה - מוצרים שישלימו את מה שקנתה, קופון אישי והודעה חמה.`
   };
+  let _insightPool = []; // extra opportunities to pull from when one is swiped away
   async function loadInsights() {
     const welcome = $('welcome');
     if (!welcome) return;
@@ -1469,6 +1470,7 @@
       if (old) old.remove();
       if (!data.ok || !data.insights || data.insights.length === 0) return;
       if (!$('welcome')) return;
+      _insightPool = Array.isArray(data.pool) ? data.pool.slice() : [];
       renderInsights(data.insights);
     } catch (err) {
       console.error('loadInsights error', err);
@@ -1620,18 +1622,32 @@
       body: JSON.stringify({ password: PASSWORD, id })
     }).catch(() => {});
 
-    await dismissReq;
+    // Find a replacement: first from the in-memory pool (instant), else re-fetch.
+    function onScreenIds() {
+      return new Set([...document.querySelectorAll('.insight-card')].map(c => c.getAttribute('data-id')));
+    }
     let replacement = null;
-    try {
-      const res = await fetch('/api/insights?password=' + encodeURIComponent(PASSWORD));
-      const data = await res.json();
-      if (data.ok && data.insights) {
-        const onScreen = new Set([...document.querySelectorAll('.insight-card')]
-          .map(c => c.getAttribute('data-id')));
-        onScreen.delete(id);
-        replacement = data.insights.find(ins => !onScreen.has(ins.id));
-      }
-    } catch (e) {}
+    {
+      const on = onScreenIds(); on.delete(id);
+      const idx = _insightPool.findIndex(ins => ins && !on.has(ins.id));
+      if (idx !== -1) { replacement = _insightPool.splice(idx, 1)[0]; }
+    }
+    if (!replacement) {
+      // pool empty → ask the server (it may have reset the deck and have fresh ones)
+      await dismissReq;
+      try {
+        const res = await fetch('/api/insights?password=' + encodeURIComponent(PASSWORD));
+        const data = await res.json();
+        if (data.ok) {
+          if (Array.isArray(data.pool)) _insightPool = data.pool.slice();
+          const on = onScreenIds(); on.delete(id);
+          const candidates = [...(data.insights || []), ...(data.pool || [])];
+          replacement = candidates.find(ins => ins && !on.has(ins.id)) || null;
+          // make sure we don't immediately re-add the same one from pool
+          if (replacement) _insightPool = _insightPool.filter(p => p.id !== replacement.id);
+        }
+      } catch (e) {}
+    }
 
     setTimeout(() => {
       if (!slot) { _swiping = false; return; }

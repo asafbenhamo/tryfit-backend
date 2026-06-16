@@ -525,13 +525,17 @@ async function getInsights(shop) {
     visible = withIds;
   }
 
-  const all = visible.slice(0, 8);
+  // Show a handful; keep the rest as a pool to pull replacements from on swipe.
+  const DISPLAY = 5;
+  const display = visible.slice(0, DISPLAY);
+  const pool = visible.slice(DISPLAY);
 
   return {
     ok: true,
     generated_at: new Date().toISOString(),
-    count: all.length,
-    insights: all
+    count: display.length,
+    insights: display,
+    pool: pool
   };
 }
 
