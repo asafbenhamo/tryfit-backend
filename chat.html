@@ -1452,77 +1452,92 @@
     }
   }
   let _insightsCache = [];
+
+  // Compute the "action argument" for an insight's button.
+  function insightArg(ins) {
+    const hint = ins.action_hint || '';
+    let arg = (ins.data && (ins.data.name || ins.data.title)) || '';
+    if (hint === 'cross_sell_campaign' && ins.data) {
+      arg = 'מי שקנה "' + (ins.data.product_a || '') + '" → להציע "' + (ins.data.product_b || '') + '"';
+    }
+    if (hint === 'do_more_of_best' && ins.data) {
+      arg = ins.data.action_label || '';
+    }
+    return arg;
+  }
+
+  // Build a single insight card as a DOM element (reused for initial render + swipe replace).
+  function buildInsightCard(ins) {
+    const hint = ins.action_hint || '';
+    const arg = insightArg(ins);
+    const card = document.createElement('div');
+    card.className = 'insight-card p' + (ins.priority || 4);
+    card.setAttribute('data-id', ins.id || '');
+    let html = '<div class="insight-title">' + esc(ins.title) + '</div>';
+    html += '<div class="insight-detail">' + esc(ins.detail) + '</div>';
+    if (ACTION_PROMPTS[hint]) {
+      html += '<button class="insight-btn" data-hint="' + hint + '" data-arg="' + esc(arg) + '">צור פעולה ←</button>';
+    }
+    card.innerHTML = html;
+    return card;
+  }
+
+  // Wire the "צור פעולה" button inside a card.
+  function wireInsightButton(card) {
+    const btn = card.querySelector('.insight-btn');
+    if (!btn) return;
+    btn.onclick = () => {
+      const hint = btn.getAttribute('data-hint');
+      const arg = btn.getAttribute('data-arg');
+      const promptFn = ACTION_PROMPTS[hint];
+      if (promptFn) { input.value = promptFn(arg); sendMessage(); }
+    };
+  }
+
   function renderInsights(insights) {
     const w = $('welcome');
     if (!w) return;
     _insightsCache = insights.slice();
     const wrap = document.createElement('div');
     wrap.className = 'insights-wrap';
-    let html = '<div class="insights-head">✨ הזדמנויות שמצאתי בשבילך היום <span style="font-weight:400;font-size:11px;color:var(--text-dim)">(החלק ימינה כדי לדלג)</span></div>';
-    insights.forEach((ins, i) => {
-      const hint = ins.action_hint || '';
-      let arg = (ins.data && (ins.data.name || ins.data.title)) || '';
-      if (hint === 'cross_sell_campaign' && ins.data) {
-        arg = 'מי שקנה "' + (ins.data.product_a || '') + '" → להציע "' + (ins.data.product_b || '') + '"';
-      }
-      if (hint === 'do_more_of_best' && ins.data) {
-        arg = ins.data.action_label || '';
-      }
-      html += '<div class="insight-card p' + (ins.priority || 4) + '" data-id="' + esc(ins.id || '') + '" style="animation-delay:' + (i * 0.07) + 's">';
-      html += '<div class="insight-title">' + esc(ins.title) + '</div>';
-      html += '<div class="insight-detail">' + esc(ins.detail) + '</div>';
-      if (ACTION_PROMPTS[hint]) {
-        html += '<button class="insight-btn" data-hint="' + hint + '" data-arg="' + esc(arg) + '">צור פעולה ←</button>';
-      }
-      html += '</div>';
+    const head = document.createElement('div');
+    head.className = 'insights-head';
+    head.innerHTML = '✨ הזדמנויות שמצאתי בשבילך היום <span style="font-weight:400;font-size:11px;color:var(--text-dim)">(החלק שמאלה כדי לדלג)</span>';
+    wrap.appendChild(head);
+    insights.forEach(ins => {
+      const card = buildInsightCard(ins);
+      wrap.appendChild(card);
     });
-    wrap.innerHTML = html;
     const slot = document.getElementById('homeInsightsSlot');
     if (slot) { slot.innerHTML = ''; slot.appendChild(wrap); }
     else w.parentNode.insertBefore(wrap, w);
-    wrap.querySelectorAll('.insight-btn').forEach(btn => {
-      btn.onclick = () => {
-        const hint = btn.getAttribute('data-hint');
-        const arg = btn.getAttribute('data-arg');
-        const promptFn = ACTION_PROMPTS[hint];
-        if (promptFn) {
-          input.value = promptFn(arg);
-          sendMessage();
-        }
-      };
+    wrap.querySelectorAll('.insight-card').forEach(card => {
+      wireInsightButton(card);
+      attachSwipe(card);
     });
-    wrap.querySelectorAll('.insight-card').forEach(card => attachSwipe(card));
   }
 
-  // Swipe-right (or drag) to dismiss an opportunity; the server hides it for a
-  // couple of days and we reload to surface a fresh one in its place.
+  // Swipe LEFT to skip an opportunity. The card slides out to the left, then a
+  // fresh opportunity slides in from the right in its place — so it's clear that
+  // one was replaced, not just removed. Server hides the skipped one for 2 days.
+  let _swiping = false;
   function attachSwipe(card) {
     let startX = 0, curX = 0, dragging = false;
-    const threshold = 90;
-    function start(x) { startX = x; dragging = true; card.style.transition = 'none'; }
+    const threshold = 80;
+    function start(x) { if (_swiping) return; startX = x; dragging = true; card.style.transition = 'none'; }
     function move(x) {
       if (!dragging) return;
       curX = x - startX;
-      if (curX < 0) curX = 0; // only allow rightward swipe (RTL: visually toward start)
+      if (curX > 0) curX = 0; // only allow LEFT swipe (negative)
       card.style.transform = 'translateX(' + curX + 'px)';
-      card.style.opacity = String(Math.max(0.3, 1 - curX / 300));
+      card.style.opacity = String(Math.max(0.35, 1 + curX / 300));
     }
     async function end() {
       if (!dragging) return;
       dragging = false;
-      card.style.transition = 'transform .25s, opacity .25s';
-      if (curX > threshold) {
-        card.style.transform = 'translateX(120%)';
-        card.style.opacity = '0';
-        const id = card.getAttribute('data-id');
-        try {
-          await fetch('/api/insights/dismiss', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password: PASSWORD, id })
-          });
-        } catch (e) {}
-        setTimeout(() => { loadInsights(); }, 260);
+      card.style.transition = 'transform .22s ease-in, opacity .22s ease-in';
+      if (curX < -threshold) {
+        await dismissCard(card);
       } else {
         card.style.transform = '';
         card.style.opacity = '';
@@ -1535,6 +1550,69 @@
     card.addEventListener('mousedown', e => { start(e.clientX); e.preventDefault(); });
     window.addEventListener('mousemove', e => { if (dragging) move(e.clientX); });
     window.addEventListener('mouseup', () => { if (dragging) end(); });
+  }
+
+  // Animate a card out to the LEFT, fetch a fresh opportunity, and slide it IN
+  // from the right in the same spot.
+  async function dismissCard(card) {
+    if (_swiping) return;
+    _swiping = true;
+    const id = card.getAttribute('data-id');
+    // 1) slide the old card out to the left
+    card.style.transition = 'transform .25s ease-in, opacity .25s ease-in';
+    card.style.transform = 'translateX(-120%)';
+    card.style.opacity = '0';
+
+    // tell the server (in parallel)
+    const dismissReq = fetch('/api/insights/dismiss', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: PASSWORD, id })
+    }).catch(() => {});
+
+    // collapse the old card's height smoothly after it slid out
+    setTimeout(() => {
+      card.style.transition = 'height .2s ease, margin .2s ease, padding .2s ease';
+      card.style.height = '0px';
+      card.style.marginTop = '0px';
+      card.style.marginBottom = '0px';
+      card.style.paddingTop = '0px';
+      card.style.paddingBottom = '0px';
+      card.style.overflow = 'hidden';
+    }, 250);
+
+    // 2) fetch the refreshed list and pick a replacement not already on screen
+    await dismissReq;
+    let replacement = null;
+    try {
+      const res = await fetch('/api/insights?password=' + encodeURIComponent(PASSWORD));
+      const data = await res.json();
+      if (data.ok && data.insights) {
+        const onScreen = new Set([...document.querySelectorAll('.insight-card')]
+          .map(c => c.getAttribute('data-id')));
+        onScreen.delete(id);
+        replacement = data.insights.find(ins => !onScreen.has(ins.id));
+      }
+    } catch (e) {}
+
+    setTimeout(() => {
+      if (replacement) {
+        // 3) build the new card, insert where the old one was, slide it in from the right
+        const newCard = buildInsightCard(replacement);
+        newCard.style.transform = 'translateX(120%)';
+        newCard.style.opacity = '0';
+        card.parentNode.insertBefore(newCard, card);
+        card.remove();
+        attachSwipe(newCard);
+        wireInsightButton(newCard);
+        void newCard.offsetWidth; // force reflow
+        newCard.style.transition = 'transform .3s ease-out, opacity .3s ease-out';
+        newCard.style.transform = 'translateX(0)';
+        newCard.style.opacity = '1';
+      } else {
+        card.remove();
+      }
+      _swiping = false;
+    }, 470);
   }
   function esc(s) {
     return String(s == null ? '' : s)
