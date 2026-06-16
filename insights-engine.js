@@ -53,6 +53,14 @@ async function dismissOpportunity(shop, opportunityId) {
   return { ok: true };
 }
 
+// Clear all dismissals for a shop (used to restart the deck once swiped through).
+async function clearDismissed(shop) {
+  await ensureDismissTable();
+  await db.query(`DELETE FROM dismissed_opportunities WHERE shop_domain = $1`,
+    [shop.toLowerCase().trim()]).catch(()=>{});
+  return { ok: true };
+}
+
 // Set of opportunity IDs currently hidden for this shop (within the dismiss window).
 async function getDismissedSet(shop) {
   await ensureDismissTable();
@@ -508,7 +516,14 @@ async function getInsights(shop) {
   // swiped away (hidden for DISMISS_DAYS), so swiping surfaces fresh ones.
   const dismissed = await getDismissedSet(shop);
   const withIds = [...supporting, ...personalSorted].map(ins => ({ ...ins, id: opportunityId(ins) }));
-  const visible = withIds.filter(ins => !dismissed.has(ins.id));
+  let visible = withIds.filter(ins => !dismissed.has(ins.id));
+
+  // If the merchant has swiped through everything, start the deck over: clear the
+  // dismiss list and show all opportunities again.
+  if (visible.length === 0 && withIds.length > 0) {
+    await clearDismissed(shop);
+    visible = withIds;
+  }
 
   const all = visible.slice(0, 8);
 

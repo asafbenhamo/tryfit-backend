@@ -1557,13 +1557,18 @@
     const slot = card.closest('.insight-slot');
     const bg = slot ? slot.querySelector('.swipe-bg.skip') : null;
     function start(x, y) { if (_swiping) return; startX = x; startY = y; dragging = true; decided = false; card.style.transition = 'none'; }
-    function move(x, y) {
+    function move(x, y, ev) {
       if (!dragging) return;
       const dx = x - startX, dy = y - startY;
-      if (!decided) { if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return; decided = true; if (Math.abs(dy) > Math.abs(dx)) { dragging = false; return; } }
+      if (!decided) {
+        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+        decided = true;
+        if (Math.abs(dy) > Math.abs(dx)) { dragging = false; return; } // vertical → let it scroll
+      }
+      if (ev && ev.cancelable) ev.preventDefault(); // horizontal → take over, stop scroll
       curX = dx > 0 ? 0 : dx; // left only
       const prog = Math.min(1, -curX / 160);
-      card.style.transform = 'translateX(' + curX + 'px) rotate(' + (curX / 45) + 'deg)';
+      card.style.transform = 'translateX(' + curX + 'px) rotate(' + (curX / 40) + 'deg)';
       card.style.opacity = String(Math.max(0.4, 1 + curX / 320));
       if (bg) bg.style.opacity = String(prog);
     }
@@ -1581,10 +1586,10 @@
       curX = 0;
     }
     card.addEventListener('touchstart', e => start(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
-    card.addEventListener('touchmove', e => move(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
+    card.addEventListener('touchmove', e => move(e.touches[0].clientX, e.touches[0].clientY, e), { passive: false });
     card.addEventListener('touchend', end);
     card.addEventListener('mousedown', e => { start(e.clientX, e.clientY); e.preventDefault(); });
-    window.addEventListener('mousemove', e => { if (dragging) move(e.clientX, e.clientY); });
+    window.addEventListener('mousemove', e => { if (dragging) move(e.clientX, e.clientY, e); });
     window.addEventListener('mouseup', () => { if (dragging) end(); });
   }
 
