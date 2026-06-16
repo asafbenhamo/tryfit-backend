@@ -275,8 +275,11 @@
     border-radius: 16px; padding: 14px 16px; margin-bottom: 10px;
     animation: rise 0.4s cubic-bezier(0.16,1,0.3,1); animation-fill-mode: both;
     border-right: 4px solid var(--accent);
-    position: relative; z-index: 1; touch-action: pan-y;
+    position: relative; z-index: 1; touch-action: pan-y; will-change: transform;
   }
+  /* While actively dragging, kill the entry animation so our transform wins. */
+  .insight-card.dragging { animation: none !important; transition: none !important; }
+  .insight-card.flinging { animation: none !important; }
   /* Tinder-style swipe: card sits in a slot; a red "skip" layer shows behind it
      as it slides left, and the replacement slides in with a green flash. */
   .insight-slot { position: relative; margin-bottom: 10px; }
@@ -1552,57 +1555,64 @@
   // fresh opportunity drops into the same slot with a green flash.
   let _swiping = false;
   function attachSwipe(card) {
-    let startX = 0, startY = 0, curX = 0, dragging = false, decided = false;
-    const threshold = 80;
+    let startX = 0, startY = 0, curX = 0, dragging = false, decided = false, horizontal = false;
+    const threshold = 75;
     const slot = card.closest('.insight-slot');
     const bg = slot ? slot.querySelector('.swipe-bg.skip') : null;
-    function start(x, y) { if (_swiping) return; startX = x; startY = y; dragging = true; decided = false; card.style.transition = 'none'; }
+    function start(x, y) {
+      if (_swiping) return;
+      startX = x; startY = y; dragging = true; decided = false; horizontal = false; curX = 0;
+    }
     function move(x, y, ev) {
       if (!dragging) return;
       const dx = x - startX, dy = y - startY;
       if (!decided) {
-        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
         decided = true;
-        if (Math.abs(dy) > Math.abs(dx)) { dragging = false; return; } // vertical → let it scroll
+        horizontal = Math.abs(dx) >= Math.abs(dy);
+        if (!horizontal) { dragging = false; return; } // vertical → scroll normally
+        card.classList.add('dragging'); // kill CSS entry animation so our transform applies
       }
-      if (ev && ev.cancelable) ev.preventDefault(); // horizontal → take over, stop scroll
+      if (ev && ev.cancelable) ev.preventDefault();
       curX = dx > 0 ? 0 : dx; // left only
-      const prog = Math.min(1, -curX / 160);
-      card.style.transform = 'translateX(' + curX + 'px) rotate(' + (curX / 40) + 'deg)';
-      card.style.opacity = String(Math.max(0.4, 1 + curX / 320));
+      const prog = Math.min(1, -curX / 150);
+      card.style.transform = 'translateX(' + curX + 'px) rotate(' + (curX / 35) + 'deg)';
+      card.style.opacity = String(Math.max(0.45, 1 + curX / 340));
       if (bg) bg.style.opacity = String(prog);
     }
-    async function end() {
+    function end() {
       if (!dragging) return;
       dragging = false;
-      if (curX < -threshold) {
-        await dismissCard(card);
+      if (horizontal && curX < -threshold) {
+        dismissCard(card, slot, bg);
       } else {
-        card.style.transition = 'transform .2s, opacity .2s';
-        card.style.transform = '';
-        card.style.opacity = '';
+        card.style.transition = 'transform .2s ease, opacity .2s ease';
+        card.style.transform = 'translateX(0) rotate(0)';
+        card.style.opacity = '1';
         if (bg) bg.style.opacity = '0';
+        setTimeout(() => card.classList.remove('dragging'), 200);
       }
-      curX = 0;
+      curX = 0; horizontal = false;
     }
     card.addEventListener('touchstart', e => start(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
     card.addEventListener('touchmove', e => move(e.touches[0].clientX, e.touches[0].clientY, e), { passive: false });
     card.addEventListener('touchend', end);
-    card.addEventListener('mousedown', e => { start(e.clientX, e.clientY); e.preventDefault(); });
-    window.addEventListener('mousemove', e => { if (dragging) move(e.clientX, e.clientY, e); });
+    card.addEventListener('mousedown', e => { start(e.clientX, e.clientY); });
+    window.addEventListener('mousemove', e => { if (dragging && decided) move(e.clientX, e.clientY, e); });
     window.addEventListener('mouseup', () => { if (dragging) end(); });
   }
 
-  async function dismissCard(card) {
+  async function dismissCard(card, slot, bg) {
     if (_swiping) return;
     _swiping = true;
-    const slot = card.closest('.insight-slot');
-    const bg = slot ? slot.querySelector('.swipe-bg.skip') : null;
+    slot = slot || card.closest('.insight-slot');
+    bg = bg || (slot ? slot.querySelector('.swipe-bg.skip') : null);
     const id = card.getAttribute('data-id');
     if (bg) bg.style.opacity = '1';
-    // 1) fling the card off-screen to the left
-    card.style.transition = 'transform .28s ease-in, opacity .28s ease-in';
-    card.style.transform = 'translateX(-140%) rotate(-12deg)';
+    // fling the card off-screen to the left
+    card.classList.add('flinging');
+    card.style.transition = 'transform .3s ease-in, opacity .3s ease-in';
+    card.style.transform = 'translateX(-140%) rotate(-14deg)';
     card.style.opacity = '0';
 
     const dismissReq = fetch('/api/insights/dismiss', {
@@ -1610,7 +1620,6 @@
       body: JSON.stringify({ password: PASSWORD, id })
     }).catch(() => {});
 
-    // 2) find a replacement not already on screen
     await dismissReq;
     let replacement = null;
     try {
@@ -1627,14 +1636,13 @@
     setTimeout(() => {
       if (!slot) { _swiping = false; return; }
       if (replacement) {
-        // 3) drop the new card into the same slot with a green flash
         const newCard = buildInsightCard(replacement);
         if (bg) bg.style.opacity = '0';
         card.remove();
         slot.appendChild(newCard);
         wireInsightButton(newCard);
         attachSwipe(newCard);
-        newCard.style.transform = 'translateY(-8px)';
+        newCard.style.transform = 'translateY(-6px)';
         newCard.style.opacity = '0';
         void newCard.offsetWidth;
         newCard.style.transition = 'transform .3s ease-out, opacity .3s ease-out';
@@ -1643,7 +1651,6 @@
         slot.classList.add('flash-green');
         setTimeout(() => slot.classList.remove('flash-green'), 750);
       } else {
-        // nothing left — collapse the slot away
         slot.style.transition = 'height .25s ease, opacity .25s ease, margin .25s ease';
         slot.style.height = slot.offsetHeight + 'px';
         void slot.offsetWidth;
@@ -1651,7 +1658,7 @@
         setTimeout(() => slot.remove(), 260);
       }
       _swiping = false;
-    }, 300);
+    }, 320);
   }
   function esc(s) {
     return String(s == null ? '' : s)
