@@ -275,6 +275,25 @@
     border-radius: 16px; padding: 14px 16px; margin-bottom: 10px;
     animation: rise 0.4s cubic-bezier(0.16,1,0.3,1); animation-fill-mode: both;
     border-right: 4px solid var(--accent);
+    position: relative; z-index: 1; touch-action: pan-y;
+  }
+  /* Tinder-style swipe: card sits in a slot; a red "skip" layer shows behind it
+     as it slides left, and the replacement slides in with a green flash. */
+  .insight-slot { position: relative; margin-bottom: 10px; }
+  .insight-slot .insight-card { margin-bottom: 0; }
+  .swipe-bg {
+    position: absolute; inset: 0; border-radius: 16px; display: flex;
+    align-items: center; padding: 0 22px; opacity: 0; z-index: 0;
+    font-weight: 800; font-size: 15px; color: #fff;
+  }
+  .swipe-bg.skip { justify-content: flex-start; background: linear-gradient(90deg,#e0395a,#f0617f); }
+  .insight-slot.flash-green .insight-card {
+    animation: greenFlash 0.7s ease-out;
+  }
+  @keyframes greenFlash {
+    0% { box-shadow: 0 0 0 0 rgba(37,198,133,0.0); background: #eafaf2; }
+    30% { box-shadow: 0 0 0 3px rgba(37,198,133,0.5); background: #eafaf2; }
+    100% { box-shadow: 0 0 0 0 rgba(37,198,133,0.0); background: var(--bg-soft); }
   }
   .insight-card.p1 { border-right-color: #e0395a; }
   .insight-card.p2 { border-right-color: #f5a623; }
@@ -1433,7 +1452,8 @@
     investigate_drop: () => `מה גרם לירידה במכירות השבוע? ומה התוכנית להחזיר את המומנטום?`,
     cross_sell_campaign: arg => `בנה קמפיין מכירה צולבת: ${arg}. מצא את הלקוחות שקנו את המוצר הראשון אבל לא את השני, ובנה להם הצעה ממוקדת עם קופון והודעה אישית שמסבירה למה השני משלים את הראשון.`,
     follow_up_campaign: () => `יש לקוחות שפנינו אליהן ולא הגיבו. בנה קמפיין מעקב עם גישה אחרת מהפעם הקודמת - הודעה שונה, אולי הטבה מעט גדולה יותר או תזכורת עדינה. תראה לי את הרשימה לפני שליחה.`,
-    do_more_of_best: arg => `המהלך "${arg}" עובד הכי טוב אצלי. בנה לי עוד קמפיין מהסוג הזה - מצא את הלקוחות המתאימים, בנה הצעה עם קופון והודעה אישית, ותראה לי לפני שליחה.`
+    do_more_of_best: arg => `המהלך "${arg}" עובד הכי טוב אצלי. בנה לי עוד קמפיין מהסוג הזה - מצא את הלקוחות המתאימים, בנה הצעה עם קופון והודעה אישית, ותראה לי לפני שליחה.`,
+    welcome_second_purchase: name => `${name} קנתה רק פעם אחת. בנה הצעה אישית שתעודד אותה לקנייה שנייה - מוצרים שישלימו את מה שקנתה, קופון אישי והודעה חמה.`
   };
   async function loadInsights() {
     const welcome = $('welcome');
@@ -1464,6 +1484,19 @@
       arg = ins.data.action_label || '';
     }
     return arg;
+  }
+
+  // Build a single insight card as a DOM element, wrapped in a slot that holds
+  // the red "skip" background behind it (Tinder-style).
+  function buildInsightSlot(ins) {
+    const slot = document.createElement('div');
+    slot.className = 'insight-slot';
+    const bg = document.createElement('div');
+    bg.className = 'swipe-bg skip';
+    bg.innerHTML = '✕ דילגנו';
+    slot.appendChild(bg);
+    slot.appendChild(buildInsightCard(ins));
+    return slot;
   }
 
   // Build a single insight card as a DOM element (reused for initial render + swipe replace).
@@ -1504,10 +1537,7 @@
     head.className = 'insights-head';
     head.innerHTML = '✨ הזדמנויות שמצאתי בשבילך היום <span style="font-weight:400;font-size:11px;color:var(--text-dim)">(החלק שמאלה כדי לדלג)</span>';
     wrap.appendChild(head);
-    insights.forEach(ins => {
-      const card = buildInsightCard(ins);
-      wrap.appendChild(card);
-    });
+    insights.forEach(ins => wrap.appendChild(buildInsightSlot(ins)));
     const slot = document.getElementById('homeInsightsSlot');
     if (slot) { slot.innerHTML = ''; slot.appendChild(wrap); }
     else w.parentNode.insertBefore(wrap, w);
@@ -1517,70 +1547,65 @@
     });
   }
 
-  // Swipe LEFT to skip an opportunity. The card slides out to the left, then a
-  // fresh opportunity slides in from the right in its place — so it's clear that
-  // one was replaced, not just removed. Server hides the skipped one for 2 days.
+  // Swipe LEFT to skip (Tinder-style). As the card drags left a red "skip" layer
+  // is revealed; releasing past the threshold flings it off-screen left, then a
+  // fresh opportunity drops into the same slot with a green flash.
   let _swiping = false;
   function attachSwipe(card) {
-    let startX = 0, curX = 0, dragging = false;
+    let startX = 0, startY = 0, curX = 0, dragging = false, decided = false;
     const threshold = 80;
-    function start(x) { if (_swiping) return; startX = x; dragging = true; card.style.transition = 'none'; }
-    function move(x) {
+    const slot = card.closest('.insight-slot');
+    const bg = slot ? slot.querySelector('.swipe-bg.skip') : null;
+    function start(x, y) { if (_swiping) return; startX = x; startY = y; dragging = true; decided = false; card.style.transition = 'none'; }
+    function move(x, y) {
       if (!dragging) return;
-      curX = x - startX;
-      if (curX > 0) curX = 0; // only allow LEFT swipe (negative)
-      card.style.transform = 'translateX(' + curX + 'px)';
-      card.style.opacity = String(Math.max(0.35, 1 + curX / 300));
+      const dx = x - startX, dy = y - startY;
+      if (!decided) { if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return; decided = true; if (Math.abs(dy) > Math.abs(dx)) { dragging = false; return; } }
+      curX = dx > 0 ? 0 : dx; // left only
+      const prog = Math.min(1, -curX / 160);
+      card.style.transform = 'translateX(' + curX + 'px) rotate(' + (curX / 45) + 'deg)';
+      card.style.opacity = String(Math.max(0.4, 1 + curX / 320));
+      if (bg) bg.style.opacity = String(prog);
     }
     async function end() {
       if (!dragging) return;
       dragging = false;
-      card.style.transition = 'transform .22s ease-in, opacity .22s ease-in';
       if (curX < -threshold) {
         await dismissCard(card);
       } else {
+        card.style.transition = 'transform .2s, opacity .2s';
         card.style.transform = '';
         card.style.opacity = '';
+        if (bg) bg.style.opacity = '0';
       }
       curX = 0;
     }
-    card.addEventListener('touchstart', e => start(e.touches[0].clientX), { passive: true });
-    card.addEventListener('touchmove', e => move(e.touches[0].clientX), { passive: true });
+    card.addEventListener('touchstart', e => start(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
+    card.addEventListener('touchmove', e => move(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
     card.addEventListener('touchend', end);
-    card.addEventListener('mousedown', e => { start(e.clientX); e.preventDefault(); });
-    window.addEventListener('mousemove', e => { if (dragging) move(e.clientX); });
+    card.addEventListener('mousedown', e => { start(e.clientX, e.clientY); e.preventDefault(); });
+    window.addEventListener('mousemove', e => { if (dragging) move(e.clientX, e.clientY); });
     window.addEventListener('mouseup', () => { if (dragging) end(); });
   }
 
-  // Animate a card out to the LEFT, fetch a fresh opportunity, and slide it IN
-  // from the right in the same spot.
   async function dismissCard(card) {
     if (_swiping) return;
     _swiping = true;
+    const slot = card.closest('.insight-slot');
+    const bg = slot ? slot.querySelector('.swipe-bg.skip') : null;
     const id = card.getAttribute('data-id');
-    // 1) slide the old card out to the left
-    card.style.transition = 'transform .25s ease-in, opacity .25s ease-in';
-    card.style.transform = 'translateX(-120%)';
+    if (bg) bg.style.opacity = '1';
+    // 1) fling the card off-screen to the left
+    card.style.transition = 'transform .28s ease-in, opacity .28s ease-in';
+    card.style.transform = 'translateX(-140%) rotate(-12deg)';
     card.style.opacity = '0';
 
-    // tell the server (in parallel)
     const dismissReq = fetch('/api/insights/dismiss', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: PASSWORD, id })
     }).catch(() => {});
 
-    // collapse the old card's height smoothly after it slid out
-    setTimeout(() => {
-      card.style.transition = 'height .2s ease, margin .2s ease, padding .2s ease';
-      card.style.height = '0px';
-      card.style.marginTop = '0px';
-      card.style.marginBottom = '0px';
-      card.style.paddingTop = '0px';
-      card.style.paddingBottom = '0px';
-      card.style.overflow = 'hidden';
-    }, 250);
-
-    // 2) fetch the refreshed list and pick a replacement not already on screen
+    // 2) find a replacement not already on screen
     await dismissReq;
     let replacement = null;
     try {
@@ -1595,24 +1620,33 @@
     } catch (e) {}
 
     setTimeout(() => {
+      if (!slot) { _swiping = false; return; }
       if (replacement) {
-        // 3) build the new card, insert where the old one was, slide it in from the right
+        // 3) drop the new card into the same slot with a green flash
         const newCard = buildInsightCard(replacement);
-        newCard.style.transform = 'translateX(120%)';
-        newCard.style.opacity = '0';
-        card.parentNode.insertBefore(newCard, card);
+        if (bg) bg.style.opacity = '0';
         card.remove();
-        attachSwipe(newCard);
+        slot.appendChild(newCard);
         wireInsightButton(newCard);
-        void newCard.offsetWidth; // force reflow
+        attachSwipe(newCard);
+        newCard.style.transform = 'translateY(-8px)';
+        newCard.style.opacity = '0';
+        void newCard.offsetWidth;
         newCard.style.transition = 'transform .3s ease-out, opacity .3s ease-out';
-        newCard.style.transform = 'translateX(0)';
+        newCard.style.transform = 'translateY(0)';
         newCard.style.opacity = '1';
+        slot.classList.add('flash-green');
+        setTimeout(() => slot.classList.remove('flash-green'), 750);
       } else {
-        card.remove();
+        // nothing left — collapse the slot away
+        slot.style.transition = 'height .25s ease, opacity .25s ease, margin .25s ease';
+        slot.style.height = slot.offsetHeight + 'px';
+        void slot.offsetWidth;
+        slot.style.height = '0px'; slot.style.opacity = '0'; slot.style.marginBottom = '0px'; slot.style.overflow = 'hidden';
+        setTimeout(() => slot.remove(), 260);
       }
       _swiping = false;
-    }, 470);
+    }, 300);
   }
   function esc(s) {
     return String(s == null ? '' : s)
