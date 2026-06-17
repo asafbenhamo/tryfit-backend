@@ -28,6 +28,34 @@ function digits(s) {
   return String(s || "").replace(/[^0-9]/g, "");
 }
 
+// Make sure we have a column recording WHICH order closed each action. This is how
+// we guarantee a single order can never be credited to more than one action (e.g.
+// when the merchant sent the same customer two different coupons by email + WhatsApp).
+let _colReady = false;
+async function ensureOrderColumn() {
+  if (_colReady) return;
+  await db.query(`ALTER TABLE advisor_actions ADD COLUMN IF NOT EXISTS converting_order_id TEXT`).catch(()=>{});
+  // Try to enforce uniqueness, but don't crash if legacy duplicate rows exist —
+  // the upfront orderAlreadyCredited() guard already prevents new double-counts.
+  await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_converting_order
+                  ON advisor_actions (shop_domain, converting_order_id)
+                  WHERE converting_order_id IS NOT NULL`)
+    .catch(e => console.warn('[attribution] unique index not created (likely legacy dupes):', e.message));
+  _colReady = true;
+}
+
+// Has this specific order already been credited to some action? If so, we must not
+// credit it again — this is the core guard against double-counting one sale.
+async function orderAlreadyCredited(shopDomain, orderId) {
+  if (!orderId) return false;
+  const r = await db.query(
+    `SELECT 1 FROM advisor_actions
+     WHERE shop_domain = $1 AND converting_order_id = $2 FETCH FIRST 1 ROWS ONLY`,
+    [shopDomain, String(orderId)]
+  );
+  return r.rows.length > 0;
+}
+
 function buildBuyerName(order) {
   const name = (
     (order.customer ? `${order.customer.first_name || ""} ${order.customer.last_name || ""}`.trim() : "") ||
@@ -41,6 +69,16 @@ function buildBuyerName(order) {
 // Try to close exactly one pending action for a single order.
 // Returns { closed: bool, amount, via } describing what happened.
 async function attributeOrder(shopDomain, order) {
+  await ensureOrderColumn();
+  const orderId = order.id != null ? String(order.id) : (order.order_id != null ? String(order.order_id) : null);
+
+  // GUARD: if this exact order already credited an action, never credit it again.
+  // This stops one sale from being counted twice when the same customer got two
+  // different coupons (e.g. one by email and one by WhatsApp).
+  if (orderId && await orderAlreadyCredited(shopDomain, orderId)) {
+    return { closed: false, alreadyCredited: true };
+  }
+
   const orderTotal = parseFloat(order.total_price || order.current_total_price || 0);
   const buyerEmail = (order.email || (order.customer && order.customer.email) || "").toLowerCase() || null;
   const buyerPhone = digits(order.phone || (order.customer && order.customer.phone) || (order.shipping_address && order.shipping_address.phone)) || null;
@@ -55,6 +93,7 @@ async function attributeOrder(shopDomain, order) {
     const r = await db.query(
       `UPDATE advisor_actions
        SET outcome = 'converted', attributed_revenue = $3, closed_at = NOW(),
+           converting_order_id = $4,
            details = details || '{"attribution":"coupon"}'::jsonb
        WHERE id = (
          SELECT id FROM advisor_actions
@@ -62,7 +101,7 @@ async function attributeOrder(shopDomain, order) {
          ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
        )
        RETURNING id`,
-      [shopDomain, code, orderTotal]
+      [shopDomain, code, orderTotal, orderId]
     );
     if (r.rows.length > 0) {
       console.log(`💰 [Attribution - coupon] ${code} +${orderTotal}₪ (action ${r.rows[0].id})`);
@@ -75,6 +114,7 @@ async function attributeOrder(shopDomain, order) {
     const r = await db.query(
       `UPDATE advisor_actions
        SET outcome = 'converted', attributed_revenue = $4, closed_at = NOW(),
+           converting_order_id = $5,
            details = details || '{"attribution":"draft_order"}'::jsonb
        WHERE id = (
          SELECT id FROM advisor_actions
@@ -84,7 +124,7 @@ async function attributeOrder(shopDomain, order) {
          ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
        )
        RETURNING id`,
-      [shopDomain, buyerEmail, buyerPhone, orderTotal]
+      [shopDomain, buyerEmail, buyerPhone, orderTotal, orderId]
     );
     if (r.rows.length > 0) {
       console.log(`💰 [Attribution - draft cart] +${orderTotal}₪ (action ${r.rows[0].id})`);
@@ -97,6 +137,7 @@ async function attributeOrder(shopDomain, order) {
     const r = await db.query(
       `UPDATE advisor_actions
        SET outcome = 'converted', attributed_revenue = $4, closed_at = NOW(),
+           converting_order_id = $6,
            details = details || '{"attribution":"time_window_3d"}'::jsonb
        WHERE id = (
          SELECT id FROM advisor_actions
@@ -109,7 +150,7 @@ async function attributeOrder(shopDomain, order) {
          ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
        )
        RETURNING id`,
-      [shopDomain, buyerEmail, buyerPhone, orderTotal, orderCreatedAt]
+      [shopDomain, buyerEmail, buyerPhone, orderTotal, orderCreatedAt, orderId]
     );
     if (r.rows.length > 0) {
       console.log(`💰 [Attribution - 3day phone/email] ${buyerEmail || buyerPhone} +${orderTotal}₪ (action ${r.rows[0].id})`);
@@ -122,6 +163,7 @@ async function attributeOrder(shopDomain, order) {
     const r = await db.query(
       `UPDATE advisor_actions
        SET outcome = 'converted', attributed_revenue = $3, closed_at = NOW(),
+           converting_order_id = $5,
            details = details || '{"attribution":"name_window_3d"}'::jsonb
        WHERE id = (
          SELECT id FROM advisor_actions
@@ -133,7 +175,7 @@ async function attributeOrder(shopDomain, order) {
          ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
        )
        RETURNING id`,
-      [shopDomain, buyerName, orderTotal, orderCreatedAt]
+      [shopDomain, buyerName, orderTotal, orderCreatedAt, orderId]
     );
     if (r.rows.length > 0) {
       console.log(`💰 [Attribution - name 3day] "${buyerName}" +${orderTotal}₪ (action ${r.rows[0].id})`);
