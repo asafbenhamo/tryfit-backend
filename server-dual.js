@@ -1551,6 +1551,7 @@ app.get("/api/advisor-actions-log", async (req, res) => {
        FROM advisor_actions
        WHERE shop_domain = $1
          AND action_type NOT IN ('daily_report','morning_report')
+         AND outcome <> 'duplicate'
        ORDER BY (outcome = 'converted') DESC, created_at DESC
        FETCH FIRST 500 ROWS ONLY`,
       [shop]
@@ -2771,112 +2772,23 @@ function handleOrderWebhook(req, res) {
 
     setImmediate(async () => {
       try {
-        const orderTotal = parseFloat(order.total_price || order.current_total_price || 0);
-        const buyerEmail = (order.email || order.customer?.email || "").toLowerCase() || null;
-        const buyerPhone = (order.phone || order.customer?.phone || order.shipping_address?.phone || "").replace(/[^0-9]/g, "") || null;
-        // Buyer full name (for name-based attribution fallback). Prefer the customer
-        // profile name, fall back to the shipping/billing address name.
-        const buyerName = (
-          (order.customer ? `${order.customer.first_name || ""} ${order.customer.last_name || ""}`.trim() : "") ||
-          (order.shipping_address?.name || "") ||
-          (order.billing_address?.name || "")
-        ).trim().toLowerCase() || null;
-        // Order timestamp — time-window tiers must only credit if the order came
-        // AFTER the outreach, never before.
-        const orderCreatedAt = order.created_at || order.processed_at || null;
-
-        const codes = (order.discount_codes || []).map(d => (d.code || "").toUpperCase()).filter(Boolean);
-        let closedByCoupon = false;
-        for (const code of codes) {
-          const r = await db.query(
-            `UPDATE advisor_actions
-             SET outcome = 'converted', attributed_revenue = $3, closed_at = NOW()
-             WHERE shop_domain = $1 AND coupon_code = $2 AND outcome = 'pending'
-             RETURNING id`,
-            [shopDomain, code, orderTotal]
-          );
-          if (r.rows.length > 0) {
-            closedByCoupon = true;
-            console.log(`💰 [Loop closed - coupon] ${code} converted! +${orderTotal}₪ (action ${r.rows[0].id})`);
-          }
-        }
-
-        const draftId = order.source_identifier || (order.note_attributes || []).find(a => a.name === 'draft_order_id')?.value || null;
-        if (!closedByCoupon && order.source_name === 'draft_order') {
-          const r = await db.query(
-            `UPDATE advisor_actions
-             SET outcome = 'converted', attributed_revenue = $4, closed_at = NOW(),
-                 details = details || '{"attribution":"draft_order"}'::jsonb
-             WHERE id = (
-               SELECT id FROM advisor_actions
-               WHERE shop_domain = $1 AND action_type = 'personalized_cart' AND outcome = 'pending'
-                 AND ( ($2::text IS NOT NULL AND lower(target_email) = $2)
-                    OR ($3::text IS NOT NULL AND regexp_replace(target_phone,'[^0-9]','','g') = $3) )
-               ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
-             )
-             RETURNING id`,
-            [shopDomain, buyerEmail, buyerPhone, orderTotal]
-          );
-          if (r.rows.length > 0) {
-            closedByCoupon = true;
-            console.log(`💰 [Loop closed - draft cart] +${orderTotal}₪ (action ${r.rows[0].id})`);
-          }
-        }
-
-        let closedByWindow = false;
-        if (!closedByCoupon && (buyerEmail || buyerPhone)) {
-          const r = await db.query(
-            `UPDATE advisor_actions
-             SET outcome = 'converted', attributed_revenue = $4, closed_at = NOW(),
-                 details = details || '{"attribution":"time_window_3d"}'::jsonb
-             WHERE id = (
-               SELECT id FROM advisor_actions
-               WHERE shop_domain = $1
-                 AND outcome = 'pending'
-                 AND created_at <= $5::timestamptz
-                 AND created_at >= $5::timestamptz - INTERVAL '3 days'
-                 AND (
-                   ($2::text IS NOT NULL AND lower(target_email) = $2)
-                   OR ($3::text IS NOT NULL AND regexp_replace(target_phone, '[^0-9]', '', 'g') = $3)
-                 )
-               ORDER BY created_at DESC
-               FETCH FIRST 1 ROWS ONLY
-             )
-             RETURNING id`,
-            [shopDomain, buyerEmail, buyerPhone, orderTotal, orderCreatedAt]
-          );
-          if (r.rows.length > 0) {
-            closedByWindow = true;
-            console.log(`💰 [Loop closed - 3day window] customer ${buyerEmail || buyerPhone} bought! +${orderTotal}₪ (action ${r.rows[0].id})`);
-          }
-        }
-
-        // --- Attribution 3: by customer NAME within 3 days (last resort) ---
-        // Fires only if NOTHING above matched, so a single order is never counted
-        // twice. Matches the buyer's name (stored in details.customer_name) against
-        // a pending action from the last 3 days. Name is not unique, so this is the
-        // weakest signal and is intentionally last.
-        if (!closedByCoupon && !closedByWindow && buyerName) {
-          const r = await db.query(
-            `UPDATE advisor_actions
-             SET outcome = 'converted', attributed_revenue = $3, closed_at = NOW(),
-                 details = details || '{"attribution":"name_window_3d"}'::jsonb
-             WHERE id = (
-               SELECT id FROM advisor_actions
-               WHERE shop_domain = $1
-                 AND outcome = 'pending'
-                 AND created_at <= $4::timestamptz
-                 AND created_at >= $4::timestamptz - INTERVAL '3 days'
-                 AND lower(btrim(details->>'customer_name')) = $2
-               ORDER BY created_at DESC
-               FETCH FIRST 1 ROWS ONLY
-             )
-             RETURNING id`,
-            [shopDomain, buyerName, orderTotal, orderCreatedAt]
-          );
-          if (r.rows.length > 0) {
-            console.log(`💰 [Loop closed - name 3day] customer "${buyerName}" bought (no code)! +${orderTotal}₪ (action ${r.rows[0].id})`);
-          }
+        // Use the centralized, guarded attribution path (attribution-engine) so a
+        // single order can NEVER credit more than one action — even when the same
+        // customer received two different coupons (email + WhatsApp) and used none.
+        const r = await attributionEngine.attributeOrder(shopDomain, order);
+        if (r && r.closed) {
+          console.log(`💰 [Webhook] order credited via ${r.via} +${Math.round(r.amount || 0)}₪`);
+          try {
+            const push = require('./push-engine');
+            if (push.isConfigured()) {
+              const amt = Math.round(r.amount || 0).toLocaleString();
+              await push.sendToShop(shopDomain, {
+                title: '🎉 מכירה חדשה בזכות היועץ!',
+                body: `לקוחה השלימה רכישה של ${amt}₪. היועץ סגר עוד עסקה.`,
+                tag: 'conversion', url: '/'
+              });
+            }
+          } catch (e) { /* never let push break attribution */ }
         }
       } catch (err) {
         console.error("⚠️  [Webhook] Order loop-close failed:", err.message);
