@@ -81,7 +81,7 @@ const EXCLUDE_OPTED_OUT = `
 // Best customers by lifetime spend (or orders). Includes everyone by default.
 async function getTopCustomers(shopDomain, options = {}) {
   return safe('getTopCustomers', async () => {
-    const limit = Math.min(parseInt(options.limit) || 10, 100);
+    const limit = Math.min(parseInt(options.limit) || 10, 300);
     const sortBy = CUSTOMER_SORT[options.sortBy] || 'total_spent';
     const params = [shopDomain];
     const ex = buildExcludeContacted(options.excludeContacted, params.length);
@@ -106,7 +106,7 @@ async function getDormantCustomers(shopDomain, options = {}) {
   return safe('getDormantCustomers', async () => {
     const daysInactive = parseInt(options.daysInactive) || 30;
     const minSpent = parseFloat(options.minSpent) || 0;
-    const limit = Math.min(parseInt(options.limit) || 20, 100);
+    const limit = Math.min(parseInt(options.limit) || 20, 300);
     const params = [shopDomain, minSpent, String(daysInactive)];
     const ex = buildExcludeContacted(options.excludeContacted, params.length);
     params.push(...ex.params);
@@ -148,7 +148,7 @@ async function getDormantCustomers(shopDomain, options = {}) {
 // Registered but never bought. Target for first-order coupon.
 async function getNeverPurchased(shopDomain, options = {}) {
   return safe('getNeverPurchased', async () => {
-    const limit = Math.min(parseInt(options.limit) || 20, 100);
+    const limit = Math.min(parseInt(options.limit) || 20, 300);
     const params = [shopDomain];
     const ex = buildExcludeContacted(options.excludeContacted, params.length);
     params.push(...ex.params);
@@ -170,7 +170,7 @@ async function getNeverPurchased(shopDomain, options = {}) {
 // Most loyal: more than one order.
 async function getRepeatCustomers(shopDomain, options = {}) {
   return safe('getRepeatCustomers', async () => {
-    const limit = Math.min(parseInt(options.limit) || 20, 100);
+    const limit = Math.min(parseInt(options.limit) || 20, 300);
     const params = [shopDomain];
     const ex = buildExcludeContacted(options.excludeContacted, params.length);
     params.push(...ex.params);
