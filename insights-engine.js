@@ -687,34 +687,34 @@ function dedupPersonal(list) {
   return out;
 }
 
-// Last resort: high-value customers, IGNORING the contact cooldown (but never
-// opted-out). Resilient to NULL last_order_date. Pulls a WIDE pool and randomly
-// samples from it, so each visit surfaces DIFFERENT customers worth contacting
-// (not the same top 3 every time).
+// Last resort: real customers worth contacting, IGNORING the contact cooldown (but
+// never opted-out). Resilient to NULL last_order_date. Pulls from the ENTIRE base
+// (not just the top spenders) and randomly samples, so over time the merchant can
+// reach every customer worth reaching — not the same few hundred.
 async function detectPersonalLastResort(shop) {
   return runDetector('personalLastResort', async () => {
+    // Pull every customer who has bought at least once and isn't opted out. We keep
+    // a low spend floor just to drop near-zero/junk rows, not to exclude real buyers.
+    // We randomize IN SQL and cap the fetch generously so performance stays fine even
+    // with tens of thousands of customers, while still rotating across the whole base.
     const r = await db.query(
       `SELECT first_name, last_name, email, phone,
               total_spent, orders_count,
               EXTRACT(DAY FROM (NOW() - COALESCE(last_order_date, shopify_updated_at, shopify_created_at)))::int AS days_since
        FROM store_customers
        WHERE shop_domain = $1
-         AND total_spent > 200
+         AND total_spent > 50
          AND orders_count >= 1
+         AND (email IS NOT NULL OR phone IS NOT NULL)
          AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
-       ORDER BY total_spent DESC
-       FETCH FIRST 400 ROWS ONLY`,
+       ORDER BY random()
+       FETCH FIRST 300 ROWS ONLY`,
       [shop]
     );
-    // Randomly sample from the top-400 pool so suggestions rotate widely. We surface
-    // a large batch (real customers worth contacting) to feed the swipe pool, so the
-    // merchant can keep swiping through genuinely different people.
-    const pool = [...r.rows];
-    for (let i = pool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [pool[i], pool[j]] = [pool[j], pool[i]];
-    }
-    return pool.slice(0, 60).map(c => {
+    // Already randomized by SQL; surface a large batch to feed the swipe pool so the
+    // merchant can keep swiping through genuinely different people across visits.
+    const pool = r.rows;
+    return pool.slice(0, 120).map(c => {
       const days = c.days_since;
       const sinceTxt = (days != null && days > 0) ? `לא קנתה כבר ${days} ימים. ` : '';
       return {
