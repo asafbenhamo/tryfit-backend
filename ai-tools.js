@@ -151,6 +151,9 @@ async function getDormantCustomers(shopDomain, options = {}) {
     const daysInactive = parseInt(options.daysInactive) || 30;
     const minSpent = parseFloat(options.minSpent) || 0;
     const limit = Math.min(parseInt(options.limit) || 20, 300);
+    // Rotation: default to random order so repeated calls surface DIFFERENT people
+    // (not the same top-spenders every time). 'value' = highest spenders first.
+    const order = options.sortMode === 'value' ? 'c.total_spent DESC' : 'random()';
     const params = [shopDomain, minSpent, String(daysInactive)];
     const ex = buildExcludeContacted(options.excludeContacted, params.length, options.onlyNew ? 3650 : options.contactedWindowDays);
     params.push(...ex.params);
@@ -176,7 +179,7 @@ async function getDormantCustomers(shopDomain, options = {}) {
          AND c.total_spent >= $2
          AND (c.last_order_date IS NULL
               OR c.last_order_date < NOW() - ($3 || ' days')::interval)${ex.clause.replace(/\bstore_customers\./g, 'c.')}${EXCLUDE_OPTED_OUT.replace(/store_customers\./g, 'c.')}
-       ORDER BY c.total_spent DESC
+       ORDER BY ${order}
        LIMIT $${params.length}`,
       params
     );
@@ -202,7 +205,7 @@ async function getNeverPurchased(shopDomain, options = {}) {
        FROM store_customers
        WHERE shop_domain = $1
          AND (orders_count = 0 OR orders_count IS NULL)${ex.clause}${EXCLUDE_OPTED_OUT}
-       ORDER BY last_synced_at DESC NULLS LAST
+       ORDER BY random()
        LIMIT $${params.length}`,
       params
     );
