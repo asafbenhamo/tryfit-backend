@@ -706,6 +706,7 @@ async function detectPersonalLastResort(shop) {
          AND total_spent > 50
          AND orders_count >= 1
          AND (email IS NOT NULL OR phone IS NOT NULL)
+         AND ${notRecentlyContacted('email', 'phone')}
          AND ${notOptedOut('store_customers.email', 'store_customers.phone')}
        ORDER BY random()
        FETCH FIRST 300 ROWS ONLY`,

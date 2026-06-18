@@ -41,9 +41,16 @@ const CONTACTED_COOLDOWN_DAYS = 4;
 // adds exactly ONE new placeholder ($startIndex+1) for the cooldown day count.
 // The clause references store_customers.email / store_customers.phone, so the
 // outer query MUST use the table name (not an alias) — all queries here do.
-function buildExcludeContacted(enabled, startIndex) {
-  if (!enabled) return { clause: '', params: [] };
+// Excludes customers we've already reached out to. ON BY DEFAULT — the agent must
+// pass excludeContacted:false explicitly to re-include them (e.g. the owner says
+// "contact them again"). `windowDays` controls how far back "already contacted"
+// looks; when the owner asks for genuinely NEW people, the caller passes a very
+// large window so anyone ever contacted is excluded.
+function buildExcludeContacted(enabled, startIndex, windowDays) {
+  // default ON: only skip the exclusion when explicitly set to false
+  if (enabled === false) return { clause: '', params: [] };
   const idx = startIndex + 1;
+  const days = windowDays != null ? String(windowDays) : String(CONTACTED_COOLDOWN_DAYS);
   const clause = `
     AND NOT EXISTS (
       SELECT 1 FROM advisor_actions aa
@@ -57,7 +64,7 @@ function buildExcludeContacted(enabled, startIndex) {
            AND regexp_replace(aa.target_phone,'[^0-9]','','g') = regexp_replace(store_customers.phone,'[^0-9]','','g'))
         )
     )`;
-  return { clause, params: [String(CONTACTED_COOLDOWN_DAYS)] };
+  return { clause, params: [days] };
 }
 
 // SQL fragment that excludes customers who opted out of messaging (message_optouts).
@@ -84,7 +91,7 @@ async function getTopCustomers(shopDomain, options = {}) {
     const limit = Math.min(parseInt(options.limit) || 10, 300);
     const sortBy = CUSTOMER_SORT[options.sortBy] || 'total_spent';
     const params = [shopDomain];
-    const ex = buildExcludeContacted(options.excludeContacted, params.length);
+    const ex = buildExcludeContacted(options.excludeContacted, params.length, options.onlyNew ? 3650 : options.contactedWindowDays);
     params.push(...ex.params);
     params.push(limit);
     const result = await db.query(
@@ -108,7 +115,7 @@ async function getDormantCustomers(shopDomain, options = {}) {
     const minSpent = parseFloat(options.minSpent) || 0;
     const limit = Math.min(parseInt(options.limit) || 20, 300);
     const params = [shopDomain, minSpent, String(daysInactive)];
-    const ex = buildExcludeContacted(options.excludeContacted, params.length);
+    const ex = buildExcludeContacted(options.excludeContacted, params.length, options.onlyNew ? 3650 : options.contactedWindowDays);
     params.push(...ex.params);
     params.push(limit);
     const result = await db.query(
@@ -150,7 +157,7 @@ async function getNeverPurchased(shopDomain, options = {}) {
   return safe('getNeverPurchased', async () => {
     const limit = Math.min(parseInt(options.limit) || 20, 300);
     const params = [shopDomain];
-    const ex = buildExcludeContacted(options.excludeContacted, params.length);
+    const ex = buildExcludeContacted(options.excludeContacted, params.length, options.onlyNew ? 3650 : options.contactedWindowDays);
     params.push(...ex.params);
     params.push(limit);
     const result = await db.query(
@@ -172,7 +179,7 @@ async function getRepeatCustomers(shopDomain, options = {}) {
   return safe('getRepeatCustomers', async () => {
     const limit = Math.min(parseInt(options.limit) || 20, 300);
     const params = [shopDomain];
-    const ex = buildExcludeContacted(options.excludeContacted, params.length);
+    const ex = buildExcludeContacted(options.excludeContacted, params.length, options.onlyNew ? 3650 : options.contactedWindowDays);
     params.push(...ex.params);
     params.push(limit);
     const result = await db.query(
