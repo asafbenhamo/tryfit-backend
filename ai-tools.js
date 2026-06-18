@@ -84,6 +84,43 @@ const EXCLUDE_OPTED_OUT = `
       )
   )`;
 
+// ---------- 0. getAudienceCounts ----------
+// Total COUNTS across the whole customer base (not a list). Answers questions like
+// "how many customers do I have", "how many are on my mailing list", "how many
+// haven't bought in 60 days". This is what lets the agent know the full size of the
+// audience, not just the sample it pulls for campaigns.
+async function getAudienceCounts(shopDomain, options = {}) {
+  return safe('getAudienceCounts', async () => {
+    const r = await db.query(
+      `SELECT
+         COUNT(*)::int AS total_customers,
+         COUNT(*) FILTER (WHERE email IS NOT NULL AND email <> '')::int AS with_email,
+         COUNT(*) FILTER (WHERE phone IS NOT NULL AND phone <> '')::int AS with_phone,
+         COUNT(*) FILTER (WHERE marketing_consent = true)::int AS marketing_subscribers,
+         COUNT(*) FILTER (WHERE orders_count > 0)::int AS buyers,
+         COUNT(*) FILTER (WHERE COALESCE(orders_count,0) = 0)::int AS never_purchased,
+         COUNT(*) FILTER (WHERE orders_count >= 2)::int AS repeat_buyers,
+         COUNT(*) FILTER (WHERE last_order_date IS NOT NULL
+                            AND last_order_date < NOW() - INTERVAL '60 days')::int AS dormant_60d
+       FROM store_customers
+       WHERE shop_domain = $1`,
+      [shopDomain]
+    );
+    // How many are reachable AND not opted out (the true "mailing list" size).
+    const reachable = await db.query(
+      `SELECT COUNT(*)::int AS contactable
+       FROM store_customers
+       WHERE shop_domain = $1
+         AND ((email IS NOT NULL AND email <> '') OR (phone IS NOT NULL AND phone <> ''))
+         ${EXCLUDE_OPTED_OUT}`,
+      [shopDomain]
+    );
+    const c = r.rows[0] || {};
+    c.contactable = (reachable.rows[0] || {}).contactable || 0;
+    return c;
+  });
+}
+
 // ---------- 1. getTopCustomers ----------
 // Best customers by lifetime spend (or orders). Includes everyone by default.
 async function getTopCustomers(shopDomain, options = {}) {
@@ -846,6 +883,7 @@ async function getTodayActivity(shopDomain, options = {}) {
 }
 
 module.exports = {
+  getAudienceCounts,
   getTopCustomers,
   getDormantCustomers,
   getNeverPurchased,

@@ -163,6 +163,11 @@ function buildSystemPrompt(shopName) {
 // ---------- Tool definitions for Claude ----------
 const TOOL_DEFINITIONS = [
   {
+    name: "getAudienceCounts",
+    description: "מחזיר ספירות כוללות של כל בסיס הלקוחות (לא רשימה - מספרים). השתמש בזה לשאלות כמו 'כמה לקוחות יש לי', 'כמה רשומים בדיוור', 'כמה לא קנו 60 יום', 'כמה אף פעם לא קנו'. מחזיר: סהכ לקוחות, כמה עם מייל, כמה עם טלפון, כמה הסכימו לדיוור (marketing_subscribers), כמה ניתנים לפנייה (contactable - יש להם מייל/טלפון ולא ביטלו), כמה קנו, כמה אף פעם לא קנו, כמה לקוחות חוזרים, וכמה רדומים מעל 60 יום.",
+    input_schema: { type: "object", properties: {} }
+  },
+  {
     name: "getTopCustomers",
     description: "מחזיר את הלקוחות הטובים ביותר לפי סך ההוצאה (lifetime) או מספר הזמנות. שימושי לשאלות כמו 'מי הלקוחות הכי טובות שלי'.",
     input_schema: {
@@ -367,6 +372,7 @@ const TOOL_DEFINITIONS = [
 
 // Map tool name -> actual function. All take (shopDomain, options).
 const TOOL_IMPL = {
+  getAudienceCounts: aiTools.getAudienceCounts,
   getTopCustomers: aiTools.getTopCustomers,
   getDormantCustomers: aiTools.getDormantCustomers,
   getNeverPurchased: aiTools.getNeverPurchased,
