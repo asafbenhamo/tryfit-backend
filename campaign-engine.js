@@ -123,6 +123,9 @@ async function runCampaign(id, shop, segment, template) {
   const isFixed = !!amountIls && amountIls > 0;
   const allowCombine = (template.combine === 'no' || template.combine === false) ? false : true;
   const days = parseInt(template.days_valid) || 2; // 48-hour validity by default
+  // Merchant's own existing coupon code, if they asked to use a specific one for the
+  // whole campaign instead of letting the agent generate personal codes.
+  const fixedCode = (template.fixed_code || template.coupon_code || '').toString().trim().toUpperCase() || null;
 
   for (const cust of segment) {
     if (!c) break;
@@ -146,16 +149,23 @@ async function runCampaign(id, shop, segment, template) {
         continue;
       }
 
-      // Personal coupon (stacks on the store's automatic discount by default)
-      const code = personalCode(cust.name || cust.email, isFixed ? Math.round(amountIls) : pct);
-      const coupon = await shopify.createDiscountCode(shop, {
-        percentage: isFixed ? null : pct,
-        amount_ils: isFixed ? amountIls : null,
-        combine: allowCombine,
-        code, days_valid: days,
-        title: `קמפיין ${c.campaign_type} - ${cust.name || cust.email || ''}`
-      });
-      const finalCode = coupon.ok ? coupon.code : null;
+      // Coupon: if the merchant supplied their OWN existing code (fixed_code), use it
+      // for everyone exactly as requested — don't create a new one. Otherwise create a
+      // personal per-customer code (the default).
+      let finalCode = null;
+      if (fixedCode) {
+        finalCode = fixedCode; // merchant's own code, used for all recipients
+      } else {
+        const code = personalCode(cust.name || cust.email, isFixed ? Math.round(amountIls) : pct);
+        const coupon = await shopify.createDiscountCode(shop, {
+          percentage: isFixed ? null : pct,
+          amount_ils: isFixed ? amountIls : null,
+          combine: allowCombine,
+          code, days_valid: days,
+          title: `קמפיין ${c.campaign_type} - ${cust.name || cust.email || ''}`
+        });
+        finalCode = coupon.ok ? coupon.code : null;
+      }
 
       // Personalize message
       let body = (template.body || '')

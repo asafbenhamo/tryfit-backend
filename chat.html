@@ -1879,7 +1879,8 @@
     let html = '<div class="action-head">🚀 קמפיין מוכן להפעלה</div>';
     html += '<div class="action-row"><span>סגמנט:</span> ' + esc(f.type || 'קמפיין') + '</div>';
     html += '<div class="action-row"><span>לקוחות:</span> ' + custs.length + '</div>';
-    if (f.amount_ils) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ₪' + esc(f.amount_ils) + '</div>';
+    if (f.code) html += '<div class="action-row"><span>קוד קופון (שלך):</span> ' + esc(f.code) + '</div>';
+    else if (f.amount_ils) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ₪' + esc(f.amount_ils) + '</div>';
     else if (f.percentage) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ' + esc(f.percentage) + '%</div>';
     if (totalValue > 0) html += '<div class="action-row"><span>צפי הכנסה:</span> ₪' + Math.round(totalValue).toLocaleString() + '</div>';
     // Show send-mode toggle ONLY for stores that have automatic WhatsApp configured.
@@ -1936,6 +1937,7 @@
               amount_ils: f.amount_ils ? parseFloat(f.amount_ils) : null,
               combine: (f.combine === 'no' || f.combine === 'false') ? 'no' : 'yes',
               days_valid: f.days ? parseInt(f.days) : 2,
+              fixed_code: f.code || null,
               subject: f.subject || 'הודעה מ-770', body: f.body || '' }
           })
         });
@@ -2012,7 +2014,8 @@
             percentage: f.percentage ? parseInt(f.percentage) : (f.amount_ils ? null : 10),
             amount_ils: f.amount_ils ? parseFloat(f.amount_ils) : null,
             combine: (f.combine === 'no' || f.combine === 'false') ? 'no' : 'yes',
-            days_valid: f.days ? parseInt(f.days) : 2
+            days_valid: f.days ? parseInt(f.days) : 2,
+            fixed_code: f.code || null
           })
         });
         const data = await res.json();
