@@ -133,53 +133,41 @@ async function attributeOrder(shopDomain, order) {
   }
 
   // --- Tier 3: by phone/email, order placed within 3 days AFTER outreach ---
+  // --- Tier 3 (NEW): customer CLICKED the tracking link in our message, then bought
+  // within 3 days of that click. This is real, provable engagement — not a guess
+  // based on time since the message. Replaces the old "bought within 3 days of any
+  // message" window. ---
   if (buyerEmail || buyerPhone) {
-    const r = await db.query(
-      `UPDATE advisor_actions
-       SET outcome = 'converted', attributed_revenue = $4, closed_at = NOW(),
-           converting_order_id = $6,
-           details = details || '{"attribution":"time_window_3d"}'::jsonb
-       WHERE id = (
-         SELECT id FROM advisor_actions
-         WHERE shop_domain = $1
-           AND outcome = 'pending'
-           AND created_at <= $5::timestamptz
-           AND created_at >= $5::timestamptz - INTERVAL '3 days'
-           AND ( ($2::text IS NOT NULL AND lower(target_email) = $2)
-              OR ($3::text IS NOT NULL AND regexp_replace(target_phone,'[^0-9]','','g') = $3) )
-         ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
-       )
-       RETURNING id`,
-      [shopDomain, buyerEmail, buyerPhone, orderTotal, orderCreatedAt, orderId]
-    );
-    if (r.rows.length > 0) {
-      console.log(`💰 [Attribution - 3day phone/email] ${buyerEmail || buyerPhone} +${orderTotal}₪ (action ${r.rows[0].id})`);
-      return { closed: true, amount: orderTotal, via: "time_window_3d" };
-    }
-  }
+    let click = null;
+    try {
+      const clickTracker = require('./click-tracker');
+      click = await clickTracker.recentClickForBuyer(shopDomain, { email: buyerEmail, phone: buyerPhone }, 3);
+    } catch (e) { /* click tracking is best-effort */ }
 
-  // --- Tier 4: by customer NAME, order placed within 3 days AFTER outreach (last resort) ---
-  if (buyerName) {
-    const r = await db.query(
-      `UPDATE advisor_actions
-       SET outcome = 'converted', attributed_revenue = $3, closed_at = NOW(),
-           converting_order_id = $5,
-           details = details || '{"attribution":"name_window_3d"}'::jsonb
-       WHERE id = (
-         SELECT id FROM advisor_actions
-         WHERE shop_domain = $1
-           AND outcome = 'pending'
-           AND created_at <= $4::timestamptz
-           AND created_at >= $4::timestamptz - INTERVAL '3 days'
-           AND lower(btrim(details->>'customer_name')) = $2
-         ORDER BY created_at DESC FETCH FIRST 1 ROWS ONLY
-       )
-       RETURNING id`,
-      [shopDomain, buyerName, orderTotal, orderCreatedAt, orderId]
-    );
-    if (r.rows.length > 0) {
-      console.log(`💰 [Attribution - name 3day] "${buyerName}" +${orderTotal}₪ (action ${r.rows[0].id})`);
-      return { closed: true, amount: orderTotal, via: "name_window_3d" };
+    if (click) {
+      // Prefer the exact action tied to the click; otherwise fall back to a pending
+      // action for this customer.
+      const r = await db.query(
+        `UPDATE advisor_actions
+         SET outcome = 'converted', attributed_revenue = $3, closed_at = NOW(),
+             converting_order_id = $4,
+             details = details || '{"attribution":"link_click"}'::jsonb
+         WHERE id = (
+           SELECT id FROM advisor_actions
+           WHERE shop_domain = $1 AND outcome = 'pending'
+             AND ( ($5::bigint IS NOT NULL AND id = $5::bigint)
+                OR ($2::text IS NOT NULL AND lower(target_email) = $2)
+                OR ($6::text IS NOT NULL AND regexp_replace(target_phone,'[^0-9]','','g') = $6) )
+           ORDER BY (id = $5::bigint) DESC, created_at DESC
+           FETCH FIRST 1 ROWS ONLY
+         )
+         RETURNING id`,
+        [shopDomain, buyerEmail, orderTotal, orderId, click.action_id || null, buyerPhone]
+      );
+      if (r.rows.length > 0) {
+        console.log(`💰 [Attribution - link click] ${buyerEmail || buyerPhone} +${orderTotal}₪ (action ${r.rows[0].id})`);
+        return { closed: true, amount: orderTotal, via: "link_click" };
+      }
     }
   }
 
@@ -193,7 +181,7 @@ async function runAttribution(shopDomain = SHOP) {
   }
   const sinceDate = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
   let scanned = 0, closed = 0, totalAmount = 0;
-  const breakdown = { coupon: 0, draft_order: 0, time_window_3d: 0, name_window_3d: 0 };
+  const breakdown = { coupon: 0, draft_order: 0, link_click: 0 };
 
   try {
     // status=any so we catch paid orders regardless of fulfillment state.

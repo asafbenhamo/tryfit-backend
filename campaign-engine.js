@@ -165,13 +165,32 @@ async function runCampaign(id, shop, segment, template) {
       // Always state the 48-hour validity so it matches the real coupon expiry,
       // and to create urgency. Only add it if not already mentioned.
       if (finalCode && !body.includes('48 שעות')) body += `\nהקוד תקף ל-48 שעות בלבד ⏰`;
-      // Always include a link to the store so the customer can act on the offer.
-      const STORE_URL = shopify.getPublicDomain(shop);
-      if (!body.includes(STORE_URL.replace(/^https?:\/\//, ''))) body += `\n\nלרכישה: ${STORE_URL}`;
+
+      const BASE = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
 
       if (hasPhone) {
-        // WhatsApp: PREPARE a ready link. Do NOT count as "sent" - the merchant
-        // sends it by clicking. We add it to the whatsapp list for the UI.
+        // Create the action row FIRST so we can tie a tracking link to it. Attribution
+        // will credit the advisor only if she clicks this link (or uses the coupon).
+        let actionId = null;
+        try {
+          const ins = await db.query(
+            `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+            [shop, c.campaign_type, contact.email, contact.phone,
+             JSON.stringify({ channel: 'whatsapp', campaign_id: id, prepared: true, customer_name: cust.name || null }), finalCode]
+          );
+          actionId = ins.rows[0] && ins.rows[0].id;
+        } catch (e) { console.error('[campaign] log:', e.message); }
+
+        // Build a unique tracking link and append it to the message.
+        let buyLink = shopify.getPublicDomain(shop);
+        try {
+          const clickTracker = require('./click-tracker');
+          const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone });
+          buyLink = `${BASE}/go/${token}`;
+        } catch (e) { /* fall back to plain store link */ }
+        body += `\n\nלרכישה: ${buyLink}`;
+
         let wa = String(contact.phone).replace(/[^0-9]/g, '');
         if (wa.startsWith('0')) wa = '972' + wa.slice(1);
         const waLink = `https://wa.me/${wa}?text=${encodeURIComponent(body)}`;
@@ -186,16 +205,27 @@ async function runCampaign(id, shop, segment, template) {
         c.prepared++; c.done++;
         c.revenue_potential += parseFloat(cust.est_value || 0);
 
-        // Log as 'prepared' (not converted) so attribution still works when she buys,
-        // but we are honest that it hasn't been sent yet.
-        await db.query(
-          `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [shop, c.campaign_type, contact.email, contact.phone,
-           JSON.stringify({ channel: 'whatsapp', campaign_id: id, prepared: true, customer_name: cust.name || null }), finalCode]
-        ).catch(e => console.error('[campaign] log:', e.message));
-
       } else if (contact.email) {
+        // Create the action first to tie a tracking link to it.
+        let actionId = null;
+        try {
+          const ins = await db.query(
+            `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+            [shop, c.campaign_type, contact.email, contact.phone,
+             JSON.stringify({ channel: 'email', campaign_id: id, customer_name: cust.name || null }), finalCode]
+          );
+          actionId = ins.rows[0] && ins.rows[0].id;
+        } catch (e) { console.error('[campaign] log:', e.message); }
+
+        let buyLink = shopify.getPublicDomain(shop);
+        try {
+          const clickTracker = require('./click-tracker');
+          const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone });
+          buyLink = `${BASE}/go/${token}`;
+        } catch (e) { /* fall back */ }
+        body += `\n\nלרכישה: ${buyLink}`;
+
         // Email: auto-send through the gate (already checked above)
         const html = mailer.buildHtmlEmail(body, { brand: '770', to: contact.email });
         const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || 'הודעה מ-770', html, text: body });
@@ -203,13 +233,6 @@ async function runCampaign(id, shop, segment, template) {
 
         c.sent++; c.done++;
         c.revenue_potential += parseFloat(cust.est_value || 0);
-
-        await db.query(
-          `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [shop, c.campaign_type, contact.email, contact.phone,
-           JSON.stringify({ channel: 'email', campaign_id: id, customer_name: cust.name || null }), finalCode]
-        ).catch(e => console.error('[campaign] log:', e.message));
 
       } else {
         c.skipped++; c.done++; c.log.push({ customer: cust.name, skipped: 'no_contact' }); continue;

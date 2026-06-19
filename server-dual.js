@@ -1213,6 +1213,26 @@ app.post("/api/memory/delete", express.json(), async (req, res) => {
   }
 });
 
+// Click-tracking redirect: the link inside outreach messages points here. We record
+// the click (proof the customer engaged) and forward them to the store. Attribution
+// later credits the advisor only if a purchase follows this click within the window.
+app.get("/go/:token", async (req, res) => {
+  try {
+    const clickTracker = require("./click-tracker");
+    const row = await clickTracker.recordClick(req.params.token);
+    let dest = null;
+    if (row && row.shop_domain) {
+      dest = shopify.getPublicDomain(row.shop_domain);
+    }
+    if (!dest) dest = "https://" + (process.env.DEFAULT_PUBLIC_DOMAIN || "sevenseventy.co.il");
+    if (!/^https?:\/\//.test(dest)) dest = "https://" + dest;
+    res.redirect(302, dest);
+  } catch (err) {
+    console.error("click redirect error:", err.message);
+    res.redirect(302, "https://sevenseventy.co.il");
+  }
+});
+
 app.get("/api/working-hours", (req, res) => {
   if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   res.json(compliance.workingHoursStatus());
