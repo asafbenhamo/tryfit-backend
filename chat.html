@@ -436,6 +436,89 @@
     .sidebar.open { transform: translateX(0); }
     .overlay.show { display: block; }
   }
+  /* ===== Team screen + bottom navigation ===== */
+  .bottom-nav {
+    position: fixed; bottom: 0; left: 0; right: 0; height: 60px;
+    background: var(--bg); border-top: 1px solid var(--border);
+    display: flex; z-index: 50; padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+  .bottom-nav button {
+    flex: 1; background: none; border: none; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; font-family: 'Heebo', sans-serif; font-size: 11px; color: var(--text-dim);
+    transition: color 0.15s;
+  }
+  .bottom-nav button.active { color: var(--accent); }
+  .bottom-nav button .nav-ic { font-size: 20px; line-height: 1; }
+  .view { display: none; }
+  .view.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  /* leave room for the bottom nav */
+  .main.has-nav .messages { padding-bottom: 70px; }
+  #teamView { overflow-y: auto; padding: 18px 16px 80px; background: var(--bg-soft); }
+  .team-hero {
+    background: linear-gradient(135deg, #0b2a4a, #0b8aff);
+    border-radius: 20px; padding: 20px; color: #fff; margin-bottom: 18px;
+  }
+  .team-hero h2 { font-size: 20px; font-weight: 800; margin-bottom: 4px; }
+  .team-hero p { font-size: 13.5px; opacity: 0.9; line-height: 1.5; }
+  .team-hero .hero-stat { margin-top: 12px; display: flex; gap: 18px; }
+  .team-hero .hero-stat div span { display: block; }
+  .team-hero .hero-num { font-size: 22px; font-weight: 800; }
+  .team-hero .hero-lbl { font-size: 11px; opacity: 0.85; }
+  .agent-grid { display: flex; flex-direction: column; gap: 12px; }
+  .agent-card {
+    background: var(--bg); border: 1px solid var(--border-strong);
+    border-radius: 16px; padding: 16px; display: flex; align-items: center; gap: 14px;
+    cursor: pointer; transition: transform 0.12s, box-shadow 0.12s; text-align: right;
+  }
+  .agent-card:active { transform: scale(0.98); }
+  .agent-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
+  .agent-ic {
+    width: 52px; height: 52px; border-radius: 14px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 26px;
+  }
+  .agent-ic.campaigner { background: #e6f1fb; }
+  .agent-ic.sales { background: #e1f7ee; }
+  .agent-ic.manager { background: #fdf0e1; }
+  .agent-ic.support { background: #f3e9fb; }
+  .agent-ic.marketing { background: #fce8ef; }
+  .agent-info { flex: 1; min-width: 0; }
+  .agent-name { font-size: 15.5px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+  .agent-desc { font-size: 12.5px; color: var(--text-dim); line-height: 1.45; }
+  .agent-badge {
+    font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 20px; flex-shrink: 0;
+  }
+  .agent-badge.live { background: #e1f7ee; color: #128a5a; }
+  .agent-badge.soon { background: #f1efe8; color: #8a8780; }
+  .agent-stat-row { margin-top: 8px; display: flex; gap: 14px; }
+  .agent-stat { font-size: 11.5px; color: var(--text); }
+  .agent-stat b { color: var(--accent); font-weight: 800; }
+  /* agent detail screen */
+  #agentDetailView { overflow-y: auto; padding: 0 0 80px; background: var(--bg-soft); }
+  .agent-detail-hero { padding: 22px 18px 18px; color: #fff; }
+  .agent-detail-hero.campaigner { background: linear-gradient(135deg,#0b2a4a,#0b8aff); }
+  .agent-detail-hero.sales { background: linear-gradient(135deg,#0a4a32,#1fc285); }
+  .agent-detail-hero.manager { background: linear-gradient(135deg,#7a4a10,#f5a623); }
+  .agent-detail-hero.support { background: linear-gradient(135deg,#4a1a6a,#9b51e0); }
+  .agent-detail-hero.marketing { background: linear-gradient(135deg,#6a1030,#e0395a); }
+  .agent-detail-back {
+    background: rgba(255,255,255,0.2); border: none; color: #fff; cursor: pointer;
+    font-family: 'Heebo', sans-serif; font-size: 14px; padding: 6px 12px; border-radius: 10px; margin-bottom: 14px;
+  }
+  .agent-detail-hero h2 { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
+  .agent-detail-hero p { font-size: 14px; opacity: 0.92; line-height: 1.5; }
+  .agent-detail-body { padding: 18px 16px; }
+  .detail-section-title { font-size: 13px; font-weight: 700; color: var(--text-dim); margin: 4px 0 10px; }
+  .cap-item {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 13px 15px; margin-bottom: 9px; display: flex; align-items: flex-start; gap: 11px;
+  }
+  .cap-item .cap-ic { font-size: 18px; flex-shrink: 0; }
+  .cap-item .cap-txt { font-size: 13.5px; color: var(--text); line-height: 1.5; }
+  .soon-banner {
+    background: #fef9ed; border: 1px solid #f5d98a; border-radius: 12px;
+    padding: 14px 16px; font-size: 13.5px; color: #8a6d2a; line-height: 1.55; margin-bottom: 16px;
+  }
 </style>
 </head>
 <body>
@@ -477,7 +560,7 @@
     </div>
   </aside>
 
-  <div class="main" id="main" style="display:none">
+  <div class="main has-nav" id="main" style="display:none">
     <div class="header">
       <button class="menu-btn" onclick="toggleSidebar()">☰</button>
       <div class="money-counter month" id="moneyCounterMonth" title="כמה כסף היועץ עשה לך החודש (מתאפס ב-1 לחודש)">
@@ -493,19 +576,39 @@
         <div class="money-amount" id="moneyAmount">—</div>
       </div>
     </div>
-    <div class="messages" id="messages">
-      <div class="welcome" id="welcome">
-        <h2>איך אפשר לעזור?</h2>
-        <p>שאלי אותי כל דבר על החנות — לקוחות, מכירות, מוצרים, או רעיונות לקמפיינים.</p>
+
+    <!-- CHAT VIEW -->
+    <div class="view active" id="chatView">
+      <div class="messages" id="messages">
+        <div class="welcome" id="welcome">
+          <h2>איך אפשר לעזור?</h2>
+          <p>שאלי אותי כל דבר על החנות — לקוחות, מכירות, מוצרים, או רעיונות לקמפיינים.</p>
+        </div>
+      </div>
+      <div class="composer">
+        <div class="composer-inner">
+          <textarea id="input" rows="1" placeholder="כתבי הודעה ליועץ..."></textarea>
+          <button id="send" onclick="sendMessage()">➤</button>
+        </div>
+        <div class="hint">היועץ מבוסס על נתונים אמיתיים מהחנות שלך</div>
       </div>
     </div>
-    <div class="composer">
-      <div class="composer-inner">
-        <textarea id="input" rows="1" placeholder="כתבי הודעה ליועץ..."></textarea>
-        <button id="send" onclick="sendMessage()">➤</button>
-      </div>
-      <div class="hint">היועץ מבוסס על נתונים אמיתיים מהחנות שלך</div>
-    </div>
+
+    <!-- TEAM VIEW -->
+    <div class="view" id="teamView"></div>
+
+    <!-- AGENT DETAIL VIEW -->
+    <div class="view" id="agentDetailView"></div>
+
+    <!-- BOTTOM NAV -->
+    <nav class="bottom-nav">
+      <button id="navChat" class="active" onclick="switchView('chat')">
+        <span class="nav-ic">💬</span><span>היועץ</span>
+      </button>
+      <button id="navTeam" onclick="switchView('team')">
+        <span class="nav-ic">👥</span><span>הצוות שלי</span>
+      </button>
+    </nav>
   </div>
 
 <script>
@@ -516,6 +619,130 @@
   let busy = false;
   let currentConvoId = null;
   const $ = id => document.getElementById(id);
+
+  // ===== Team / agents =====
+  // The advisor is the "head of team". These are the agents it runs. Two are live
+  // today (campaigner + sales); the rest are on the roadmap.
+  const AGENTS = [
+    {
+      id: 'campaigner', icon: '🧠', cls: 'campaigner', status: 'live',
+      name: 'הקמפיינר', short: 'המוח — מוצא הזדמנויות והעלאת מכירות',
+      tagline: 'מוצא עסקאות, מבין למה מכירות יורדות, ויודע איך להעלות אותן.',
+      caps: [
+        ['🔍','מזהה הזדמנויות מכירה אמיתיות מתוך כל בסיס הלקוחות'],
+        ['🎯','בונה פילוח חכם — מי הכי שווה לפנות אליו ומתי'],
+        ['🎟️','יוצר קופונים אישיים לכל לקוחה (אחוז, סכום, משלוח חינם, 3+1, קטגוריה)'],
+        ['📉','מבין למה מכירות ירדו ומציע איך להעלות אותן'],
+        ['🔥','מקדם מוצרים חמים ונותן הנחות על מוצרים שנתקעו']
+      ]
+    },
+    {
+      id: 'sales', icon: '🤝', cls: 'sales', status: 'live',
+      name: 'איש המכירות', short: 'פונה ללקוחות וסוגר עסקאות',
+      tagline: 'פונה אישית ללקוחות, סוגר לידים, ומדווח על כל מכירה.',
+      caps: [
+        ['💬','פונה ללקוחות דרך וואטסאפ, מייל ו-SMS לפי הנחיית הקמפיינר'],
+        ['❤️','כל פנייה אישית ואנושית — מרגישה אמיתית, לא רובוטית'],
+        ['🔗','עוקב אחרי כל ליד וסוגר מעגל — יודע מי קנה בזכותו'],
+        ['📊','מדווח חזרה על כל מכירה עם הוכחה (קופון או קליק על קישור)']
+      ]
+    },
+    {
+      id: 'manager', icon: '🏪', cls: 'manager', status: 'soon',
+      name: 'מנהל החנות', short: 'מסדר את האתר כדי להעלות מכירות',
+      tagline: 'מנתח את סידור החנות ומסדר אותה אוטומטית כדי למכור יותר.',
+      caps: [
+        ['🆕','דוחף קולקציות חדשות ומוצרים חמים למעלה'],
+        ['🏷️','מזהה מוצרים שלא נמכרים ונותן עליהם הנחה ממוקדת'],
+        ['🎯','פופאפים מותאמים אישית לפי מי שגולש באתר'],
+        ['⚙️','יוצר אוטומציות שמעלות המרות']
+      ]
+    },
+    {
+      id: 'support', icon: '🎧', cls: 'support', status: 'soon',
+      name: 'שירות לקוחות', short: 'עונה ללקוחות 24/7',
+      tagline: 'סוכן שעונה ללקוחות, פותר בעיות, ומרגיש אנושי ומחובר לחנות.',
+      caps: [
+        ['💡','עונה על שאלות לקוחות בצורה חכמה ומדויקת'],
+        ['🛍️','מחובר לחנות — יודע על מוצרים, הזמנות ומלאי'],
+        ['❤️','אישי ואנושי — הלקוח מרגיש שמדברים איתו, לא עם בוט']
+      ]
+    },
+    {
+      id: 'marketing', icon: '📢', cls: 'marketing', status: 'soon',
+      name: 'איש השיווק', short: 'קמפיינים, פוסטים וסרטוני AI',
+      tagline: 'יוצר קמפיינים, פוסטים וסרטוני AI ומביא תנועה חדשה לאתר.',
+      caps: [
+        ['🎬','יוצר פוסטים וסרטוני AI לשיווק החנות'],
+        ['📱','מנהל קמפיינים בפייסבוק ואינסטגרם'],
+        ['🔬','מנתח מתחרים ומה עובד היום בשוק'],
+        ['💰','מקבל תקציב ומביא תנועה חדשה לתוך האתר']
+      ]
+    }
+  ];
+
+  function switchView(which) {
+    ['chat','team','agentDetail'].forEach(v => {
+      const el = $(v + 'View'); if (el) el.classList.remove('active');
+    });
+    $('navChat').classList.toggle('active', which === 'chat');
+    $('navTeam').classList.toggle('active', which === 'team');
+    if (which === 'chat') { $('chatView').classList.add('active'); }
+    else if (which === 'team') { $('teamView').classList.add('active'); renderTeam(); }
+    else if (which === 'agentDetail') { $('agentDetailView').classList.add('active'); }
+  }
+
+  async function renderTeam() {
+    const v = $('teamView');
+    const liveCount = AGENTS.filter(a => a.status === 'live').length;
+    let html = '<div class="team-hero">'
+      + '<h2>👑 הצוות שלך</h2>'
+      + '<p>היועץ הוא ראש הצוות. הוא מפעיל בשבילך צוות סוכנים שעובד 24/7 כדי להעלות מכירות — אתה רק מאשר ומקבל דיווחים.</p>'
+      + '<div class="hero-stat"><div><span class="hero-num">' + liveCount + '</span><span class="hero-lbl">סוכנים פעילים</span></div>'
+      + '<div><span class="hero-num" id="teamRevenue">—</span><span class="hero-lbl">הכנסות שהצוות עשה</span></div></div>'
+      + '</div>';
+    html += '<div class="agent-grid">';
+    AGENTS.forEach(a => {
+      html += '<div class="agent-card" onclick="openAgent(\'' + a.id + '\')">'
+        + '<div class="agent-ic ' + a.cls + '">' + a.icon + '</div>'
+        + '<div class="agent-info"><div class="agent-name">' + a.name + '</div>'
+        + '<div class="agent-desc">' + a.short + '</div></div>'
+        + '<div class="agent-badge ' + (a.status === 'live' ? 'live' : 'soon') + '">'
+        + (a.status === 'live' ? 'פעיל' : 'בקרוב') + '</div>'
+        + '</div>';
+    });
+    html += '</div>';
+    v.innerHTML = html;
+    // Fill the revenue stat from the existing money counter if present.
+    const money = $('moneyAmount');
+    if (money && money.textContent && money.textContent !== '—') {
+      const tr = $('teamRevenue'); if (tr) tr.textContent = money.textContent;
+    }
+  }
+
+  function openAgent(id) {
+    const a = AGENTS.find(x => x.id === id);
+    if (!a) return;
+    const v = $('agentDetailView');
+    let html = '<div class="agent-detail-hero ' + a.cls + '">'
+      + '<button class="agent-detail-back" onclick="switchView(\'team\')">→ חזרה לצוות</button>'
+      + '<h2>' + a.icon + ' ' + a.name + '</h2>'
+      + '<p>' + a.tagline + '</p></div>';
+    html += '<div class="agent-detail-body">';
+    if (a.status === 'soon') {
+      html += '<div class="soon-banner">🔜 הסוכן הזה בפיתוח. הנה מה שהוא יידע לעשות כשייכנס לצוות:</div>';
+    }
+    html += '<div class="detail-section-title">מה הסוכן עושה</div>';
+    a.caps.forEach(c => {
+      html += '<div class="cap-item"><span class="cap-ic">' + c[0] + '</span><span class="cap-txt">' + c[1] + '</span></div>';
+    });
+    if (a.status === 'live' && a.id === 'campaigner') {
+      html += '<div style="margin-top:14px"><button class="insight-btn" onclick="switchView(\'chat\')">דבר עם היועץ ←</button></div>';
+    }
+    html += '</div>';
+    v.innerHTML = html;
+    switchView('agentDetail');
+  }
 
   // When a master has selected a store, automatically attach ?shop=/shop: to our
   // own API requests so the backend serves the right store. Store logins don't
