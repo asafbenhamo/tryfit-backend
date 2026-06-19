@@ -84,7 +84,18 @@ const EXCLUDE_OPTED_OUT = `
       )
   )`;
 
-// ---------- 0. getAudienceCounts ----------
+// ---------- getCollections ----------
+// Lists the store's categories (collections) so the agent can create a coupon
+// limited to a specific category by its id.
+async function getCollections(shopDomain) {
+  return safe('getCollections', async () => {
+    const shopify = require('./shopify-client');
+    const cols = await shopify.getCollections(shopDomain);
+    return { count: cols.length, collections: cols };
+  });
+}
+
+// ---------- getAudienceCounts ----------
 // Total COUNTS across the whole customer base (not a list). Answers questions like
 // "how many customers do I have", "how many are on my mailing list", "how many
 // haven't bought in 60 days". This is what lets the agent know the full size of the
@@ -887,6 +898,7 @@ async function getTodayActivity(shopDomain, options = {}) {
 
 module.exports = {
   getAudienceCounts,
+  getCollections,
   getTopCustomers,
   getDormantCustomers,
   getNeverPurchased,

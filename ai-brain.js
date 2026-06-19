@@ -133,7 +133,13 @@ function buildSystemPrompt(shopName) {
 - **הנחה באחוזים מול שקלים:** אם ההנחה באחוזים - השתמש ב-percentage=15. אם ההנחה בשקלים - השתמש ב-amount_ils=77 במקום percentage. "77 שקל" = amount_ils=77, ולא percentage=77.
 - **כפל מבצעים:** כברירת מחדל הקופון מצטבר בנוסף להנחת האתר הקיימת. רק אם ביקשו במפורש "בלי כפל" הוסף combine=no לבלוק.
 - days=2 תמיד (תוקף 48 שעות).
-- **קוד קופון קיים של בעל החנות (חשוב):** אם בעל החנות אומר שהוא כבר יצר קוד קופון בעצמו ורוצה שתשתמש בו (למשל "תשלח לכולם את הקוד SUMMER20", "יש לי קוד מוכן בשם X"), הוסף לבלוק code=SUMMER20 והשתמש בו במקום ליצור קוד חדש. אל תיצור קוד משלך כשבעל החנות ביקש קוד ספציפי. במקרה כזה כולם יקבלו את אותו קוד (הקוד שלו). אם בעל החנות לא נתן קוד - אל תוסיף code= והמערכת תיצור קופון אישי לכל לקוחה כרגיל.
+- **סוגי קופונים מתקדמים (חדש):** הבלוק תומך בסוגי קופונים נוספים. הוסף את השדות המתאימים לבלוק CAMPAIGN:
+  • **משלוח חינם:** הוסף coupon_type=free_shipping (אפשר לשלב עם min_subtotal לדרישת מינימום).
+  • **קנייה מעל סכום:** הוסף min_subtotal=300 (הקופון תקף רק בקנייה מעל 300₪). עובד עם percentage או amount_ils.
+  • **3+1 וכדומה (קנה X קבל Y):** הוסף coupon_type=bxgy|buy_quantity=3|get_quantity=1 (קנה 3 קבל 1 חינם).
+  • **קופון על קטגוריה מסוימת:** קודם קרא ל-getCollections כדי למצוא את ה-id של הקטגוריה, ואז הוסף collection_id=12345 לבלוק (הקופון יחול רק על אותה קטגוריה).
+  דוגמה למשלוח חינם מעל 300: [[CAMPAIGN:type=winback|coupon_type=free_shipping|min_subtotal=300|days=2|subject=...|body=...|customers=...]]
+  דוגמה ל-3+1 על קטגוריה: [[CAMPAIGN:type=promo|coupon_type=bxgy|buy_quantity=3|get_quantity=1|collection_id=12345|days=2|subject=...|body=...|customers=...]]
 - ערך_משוער = הערכת ההכנסה הצפויה מהלקוחה. אם לא ידוע, שים 0.
 - אפשר עד 300 לקוחות בקמפיין אחד. אם הסגמנט גדול יותר, אפשר לפנות בקבוצות לאורך זמן. רשימות הלקוחות מתחלפות בכל קריאה (סדר אקראי) - כך שכל פעם שמבקשים "עוד" מקבלים אנשים שונים, לא את אותם אנשים שוב.
 - **זיכרון של מי שכבר פנינו אליו (חשוב מאוד):** כל הכלים מסננים אוטומטית (כברירת מחדל) לקוחות שכבר פנינו אליהם לאחרונה - אתה לא צריך לבקש את זה. לעולם אל תציע לפנות שוב לאותו אדם שכבר טיפלנו בו, אלא אם בעל החנות מבקש זאת במפורש (ואז העבר excludeContacted=false).
@@ -163,6 +169,11 @@ function buildSystemPrompt(shopName) {
 
 // ---------- Tool definitions for Claude ----------
 const TOOL_DEFINITIONS = [
+  {
+    name: "getCollections",
+    description: "מחזיר את רשימת הקטגוריות (collections) של החנות עם ה-id, השם, וכמה מוצרים בכל אחת. השתמש בזה כשבעל החנות מבקש קופון שתקף רק על קטגוריה מסוימת (למשל 'הנחה רק על נעליים') - קודם שלוף את הקטגוריות, מצא את ה-id המתאים, ואז צור קופון עם collection_id.",
+    input_schema: { type: "object", properties: {} }
+  },
   {
     name: "getAudienceCounts",
     description: "מחזיר ספירות כוללות של כל בסיס הלקוחות (לא רשימה - מספרים). השתמש בזה לשאלות כמו 'כמה לקוחות יש לי', 'כמה רשומים בדיוור', 'כמה לא קנו 60 יום', 'כמה אף פעם לא קנו'. מחזיר: סהכ לקוחות, כמה עם מייל, כמה עם טלפון, כמה הסכימו לדיוור (marketing_subscribers), כמה ניתנים לפנייה (contactable - יש להם מייל/טלפון ולא ביטלו), כמה קנו, כמה אף פעם לא קנו, כמה לקוחות חוזרים, וכמה רדומים מעל 60 יום.",
@@ -375,6 +386,7 @@ const TOOL_DEFINITIONS = [
 // Map tool name -> actual function. All take (shopDomain, options).
 const TOOL_IMPL = {
   getAudienceCounts: aiTools.getAudienceCounts,
+  getCollections: aiTools.getCollections,
   getTopCustomers: aiTools.getTopCustomers,
   getDormantCustomers: aiTools.getDormantCustomers,
   getNeverPurchased: aiTools.getNeverPurchased,

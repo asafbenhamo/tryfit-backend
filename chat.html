@@ -1938,6 +1938,11 @@
               combine: (f.combine === 'no' || f.combine === 'false') ? 'no' : 'yes',
               days_valid: f.days ? parseInt(f.days) : 2,
               fixed_code: f.code || null,
+              coupon_type: f.coupon_type || null,
+              collection_id: f.collection_id || null,
+              min_subtotal: f.min_subtotal || null,
+              buy_quantity: f.buy_quantity || null,
+              get_quantity: f.get_quantity || null,
               subject: f.subject || 'הודעה מ-770', body: f.body || '' }
           })
         });

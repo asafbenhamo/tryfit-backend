@@ -664,6 +664,25 @@ async function backfillCustomerData(shopDomain, params) {
 }
 
 /**
+ * List the store's collections (categories) — both custom and smart collections.
+ * Used so the advisor can create a coupon limited to a specific category.
+ */
+async function getCollections(shopDomain) {
+  if (!hasTokenForShop(shopDomain)) return [];
+  const out = [];
+  for (const kind of ['custom_collections', 'smart_collections']) {
+    try {
+      const data = await shopifyGet(shopDomain, `${kind}.json?limit=250`);
+      const arr = data[kind] || [];
+      for (const col of arr) {
+        out.push({ id: col.id, title: col.title, handle: col.handle, products_count: col.products_count });
+      }
+    } catch (e) { /* one kind failing shouldn't block the other */ }
+  }
+  return out;
+}
+
+/**
  * Verify Shopify API connectivity on startup.
  */
 async function verifyConnection(shopDomain) {
@@ -1239,29 +1258,77 @@ async function createDiscountCode(shopDomain, opts = {}) {
   // Default to stacking ON (combine with the store's automatic discount).
   const allowCombine = opts.combine === false ? false : true;
 
+  // ---- Coupon type detection ----
+  // free_shipping: discount applies to the shipping line.
+  // bxgy: "buy X get Y" (e.g. 3+1). prerequisite_quantity buy, entitled_quantity free.
+  // collection: discount limited to a specific category/collection (entitled_collection_ids).
+  // min_subtotal: only valid above a spend threshold (e.g. "over 300₪").
+  const isFreeShipping = opts.type === 'free_shipping' || opts.free_shipping === true;
+  const isBxgy = opts.type === 'bxgy' || (opts.buy_quantity && opts.get_quantity);
+  const collectionId = opts.collection_id || (Array.isArray(opts.collection_ids) && opts.collection_ids[0]) || null;
+  const minSubtotal = opts.min_subtotal != null ? parseFloat(opts.min_subtotal) : null;
+
   let priceRuleId = null;
   try {
-    // Step 1: create the price rule (the discount definition)
-    const prBody = {
-      price_rule: {
-        title: opts.title || `יועץ: ${code}`,
-        target_type: 'line_item',
-        target_selection: 'all',
-        allocation_method: 'across',
-        value_type: isFixed ? 'fixed_amount' : 'percentage',
-        value: isFixed ? `-${fixedAmount}.0` : `-${percentage}.0`,
-        customer_selection: 'all',
-        once_per_customer: true,
-        usage_limit: opts.usage_limit || null,
-        starts_at: startsAt.toISOString(),
-        ends_at: endsAt.toISOString(),
-        combines_with: {
-          order_discounts: allowCombine,
-          product_discounts: allowCombine,
-          shipping_discounts: allowCombine
-        }
+    // Step 1: build the price rule (the discount definition), shaped by coupon type.
+    const pr = {
+      title: opts.title || `יועץ: ${code}`,
+      customer_selection: 'all',
+      once_per_customer: true,
+      usage_limit: opts.usage_limit || null,
+      starts_at: startsAt.toISOString(),
+      ends_at: endsAt.toISOString(),
+      combines_with: {
+        order_discounts: allowCombine,
+        product_discounts: allowCombine,
+        shipping_discounts: allowCombine
       }
     };
+
+    if (isFreeShipping) {
+      // Free shipping coupon (optionally only above a subtotal).
+      pr.target_type = 'shipping_line';
+      pr.target_selection = 'all';
+      pr.allocation_method = 'each';
+      pr.value_type = 'percentage';
+      pr.value = '-100.0';
+    } else if (isBxgy) {
+      // Buy X Get Y (e.g. 3+1): buy `buy_quantity`, get `get_quantity` free.
+      pr.target_type = 'line_item';
+      pr.target_selection = collectionId ? 'entitled' : 'all';
+      pr.allocation_method = 'each';
+      pr.value_type = 'percentage';
+      pr.value = '-100.0'; // the "get" items are 100% off
+      pr.prerequisite_to_entitlement_quantity_ratio = {
+        prerequisite_quantity: parseInt(opts.buy_quantity) || 3,
+        entitled_quantity: parseInt(opts.get_quantity) || 1
+      };
+      pr.allocation_limit = parseInt(opts.get_quantity) || 1;
+      if (collectionId) {
+        pr.entitled_collection_ids = [Number(collectionId)];
+        pr.prerequisite_collection_ids = [Number(collectionId)];
+      }
+    } else {
+      // Standard percentage or fixed-amount discount.
+      pr.target_type = 'line_item';
+      pr.allocation_method = 'across';
+      pr.value_type = isFixed ? 'fixed_amount' : 'percentage';
+      pr.value = isFixed ? `-${fixedAmount}.0` : `-${percentage}.0`;
+      if (collectionId) {
+        // Limit the discount to one collection/category.
+        pr.target_selection = 'entitled';
+        pr.entitled_collection_ids = [Number(collectionId)];
+      } else {
+        pr.target_selection = 'all';
+      }
+    }
+
+    // Minimum purchase requirement (e.g. "valid over 300₪").
+    if (minSubtotal && minSubtotal > 0) {
+      pr.prerequisite_subtotal_range = { greater_than_or_equal_to: String(minSubtotal) };
+    }
+
+    const prBody = { price_rule: pr };
     const prRes = await fetch(`${base}/price_rules.json`, {
       method: 'POST', headers, body: JSON.stringify(prBody)
     });
@@ -1402,6 +1469,7 @@ module.exports = {
   saveAbandonedCheckout,
   syncAbandonedCheckouts,
   createDiscountCode,
+  getCollections,
   deleteDiscountCode,
   getPublicDomain,
   createDraftOrder

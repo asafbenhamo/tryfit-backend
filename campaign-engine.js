@@ -126,6 +126,13 @@ async function runCampaign(id, shop, segment, template) {
   // Merchant's own existing coupon code, if they asked to use a specific one for the
   // whole campaign instead of letting the agent generate personal codes.
   const fixedCode = (template.fixed_code || template.coupon_code || '').toString().trim().toUpperCase() || null;
+  // Extended coupon types (optional): free_shipping, bxgy (3+1), category-limited,
+  // and minimum-spend requirements.
+  const couponType = (template.coupon_type || '').toString().trim() || null; // 'free_shipping' | 'bxgy'
+  const collectionId = template.collection_id ? Number(template.collection_id) : null;
+  const minSubtotal = template.min_subtotal != null && template.min_subtotal !== '' ? parseFloat(template.min_subtotal) : null;
+  const buyQty = template.buy_quantity ? parseInt(template.buy_quantity) : null;
+  const getQty = template.get_quantity ? parseInt(template.get_quantity) : null;
 
   for (const cust of segment) {
     if (!c) break;
@@ -162,6 +169,12 @@ async function runCampaign(id, shop, segment, template) {
           amount_ils: isFixed ? amountIls : null,
           combine: allowCombine,
           code, days_valid: days,
+          // Extended coupon types (all optional, passed from the campaign template):
+          type: couponType,                    // 'free_shipping' | 'bxgy' | undefined
+          collection_id: collectionId,         // limit to a category
+          min_subtotal: minSubtotal,           // valid only above this spend
+          buy_quantity: buyQty, get_quantity: getQty, // for 3+1 style
+          free_shipping: couponType === 'free_shipping',
           title: `קמפיין ${c.campaign_type} - ${cust.name || cust.email || ''}`
         });
         finalCode = coupon.ok ? coupon.code : null;
