@@ -1220,12 +1220,23 @@ app.get("/go/:token", async (req, res) => {
   try {
     const clickTracker = require("./click-tracker");
     const row = await clickTracker.recordClick(req.params.token);
-    let dest = null;
+    let base = null;
     if (row && row.shop_domain) {
-      dest = shopify.getPublicDomain(row.shop_domain);
+      base = shopify.getPublicDomain(row.shop_domain);
     }
-    if (!dest) dest = "https://" + (process.env.DEFAULT_PUBLIC_DOMAIN || "sevenseventy.co.il");
-    if (!/^https?:\/\//.test(dest)) dest = "https://" + dest;
+    if (!base) base = "https://" + (process.env.DEFAULT_PUBLIC_DOMAIN || "sevenseventy.co.il");
+    if (!/^https?:\/\//.test(base)) base = "https://" + base;
+    base = base.replace(/\/+$/, "");
+
+    // If she has a personal coupon, send her through Shopify's discount link so the
+    // code is auto-applied to her cart — frictionless for her, and it makes the sale
+    // attributable through the coupon (the strongest, dispute-proof signal).
+    let dest;
+    if (row && row.coupon_code) {
+      dest = `${base}/discount/${encodeURIComponent(row.coupon_code)}?redirect=/`;
+    } else {
+      dest = base;
+    }
     res.redirect(302, dest);
   } catch (err) {
     console.error("click redirect error:", err.message);

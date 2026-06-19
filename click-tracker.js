@@ -14,33 +14,37 @@ async function ensureTables() {
       action_id BIGINT,
       target_email TEXT,
       target_phone TEXT,
+      coupon_code TEXT,
       clicked_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`).catch(e => console.error('[clicks] ensureTables:', e.message));
+  await db.query(`ALTER TABLE message_clicks ADD COLUMN IF NOT EXISTS coupon_code TEXT`).catch(()=>{});
   await db.query(`CREATE INDEX IF NOT EXISTS idx_clicks_shop ON message_clicks(shop_domain)`).catch(()=>{});
   await db.query(`CREATE INDEX IF NOT EXISTS idx_clicks_contact ON message_clicks(shop_domain, target_email, target_phone)`).catch(()=>{});
 }
 ensureTables();
 
-// Create a short unique token for a tracking link, tied to the action + customer.
-async function createLink(shopDomain, { actionId, email, phone }) {
+// Create a short unique token for a tracking link, tied to the action + customer +
+// the personal coupon (so clicking can auto-apply it in the store).
+async function createLink(shopDomain, { actionId, email, phone, couponCode }) {
   await ensureTables();
   const token = crypto.randomBytes(6).toString('base64url'); // ~8 chars, URL-safe
   await db.query(
-    `INSERT INTO message_clicks (shop_domain, token, action_id, target_email, target_phone)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [shopDomain, token, actionId || null, email || null, phone || null]
+    `INSERT INTO message_clicks (shop_domain, token, action_id, target_email, target_phone, coupon_code)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [shopDomain, token, actionId || null, email || null, phone || null, couponCode || null]
   ).catch(e => console.error('[clicks] createLink:', e.message));
   return token;
 }
 
-// Record that a token was clicked (idempotent: keeps the FIRST click time).
+// Record that a token was clicked (idempotent: keeps the FIRST click time). Returns
+// the row including which coupon to auto-apply on the store.
 async function recordClick(token) {
   await ensureTables();
   const r = await db.query(
     `UPDATE message_clicks SET clicked_at = COALESCE(clicked_at, NOW())
      WHERE token = $1
-     RETURNING shop_domain, target_email, target_phone, action_id`,
+     RETURNING shop_domain, target_email, target_phone, action_id, coupon_code`,
     [token]
   ).catch(() => ({ rows: [] }));
   return r.rows[0] || null;

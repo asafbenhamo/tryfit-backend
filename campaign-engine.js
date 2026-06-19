@@ -186,7 +186,7 @@ async function runCampaign(id, shop, segment, template) {
         let buyLink = shopify.getPublicDomain(shop);
         try {
           const clickTracker = require('./click-tracker');
-          const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone });
+          const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone, couponCode: finalCode });
           buyLink = `${BASE}/go/${token}`;
         } catch (e) { /* fall back to plain store link */ }
         body += `\n\nלרכישה: ${buyLink}`;
@@ -221,7 +221,7 @@ async function runCampaign(id, shop, segment, template) {
         let buyLink = shopify.getPublicDomain(shop);
         try {
           const clickTracker = require('./click-tracker');
-          const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone });
+          const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone, couponCode: finalCode });
           buyLink = `${BASE}/go/${token}`;
         } catch (e) { /* fall back */ }
         body += `\n\nלרכישה: ${buyLink}`;
