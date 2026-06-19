@@ -556,6 +556,25 @@
   }
   .stat-card .sc-num { font-size: 20px; font-weight: 800; color: var(--accent); line-height: 1.1; }
   .stat-card .sc-lbl { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+  /* composer icon buttons (mic + image) */
+  .composer-icon-btn {
+    border: none; background: none; cursor: pointer; font-size: 19px;
+    width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; transition: background 0.15s;
+  }
+  .composer-icon-btn:hover { background: var(--border); }
+  .composer-icon-btn.recording { background: #ffe3e3; animation: recPulse 1.1s infinite; }
+  @keyframes recPulse { 0%,100% { background: #ffe3e3; } 50% { background: #ffc9c9; } }
+  .attach-preview {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin: 0 auto 8px;
+    max-width: 760px; background: var(--bg-soft); border: 1px solid var(--border-strong);
+    border-radius: 14px;
+  }
+  .attach-preview img { width: 46px; height: 46px; object-fit: cover; border-radius: 9px; }
+  .attach-preview .ap-txt { font-size: 13px; color: var(--text); flex: 1; }
+  .attach-preview .ap-remove { border: none; background: none; cursor: pointer; font-size: 18px; color: var(--text-dim); }
+  .rec-timer { font-size: 13px; color: #e0395a; font-weight: 700; }
+  .msg-image { max-width: 220px; max-height: 220px; border-radius: 12px; margin-bottom: 6px; display: block; }
 </style>
 </head>
 <body>
@@ -623,7 +642,11 @@
         </div>
       </div>
       <div class="composer">
+        <div id="attachPreview" class="attach-preview" style="display:none"></div>
         <div class="composer-inner">
+          <button id="micBtn" class="composer-icon-btn" onclick="toggleRecording()" title="הקלטה">🎙</button>
+          <button id="imgBtn" class="composer-icon-btn" onclick="document.getElementById('imgInput').click()" title="העלאת תמונה">📷</button>
+          <input type="file" id="imgInput" accept="image/*" style="display:none" onchange="onImagePicked(event)">
           <textarea id="input" rows="1" placeholder="כתבי הודעה ליועץ..."></textarea>
           <button id="send" onclick="sendMessage()">➤</button>
         </div>
@@ -2761,7 +2784,7 @@
     };
   }
 
-  function addMessageDom(role, text) {
+  function addMessageDom(role, text, imageUrl) {
     clearHomeScreen();
     const row = document.createElement('div');
     row.className = 'row ' + role;
@@ -2800,14 +2823,24 @@
       }
       return bubble;
     } else {
-      bubble.textContent = text;
+      if (imageUrl) {
+        const img = document.createElement('img');
+        img.src = imageUrl;
+        img.className = 'msg-image';
+        bubble.appendChild(img);
+      }
+      if (text) {
+        const txt = document.createElement('div');
+        txt.textContent = text;
+        bubble.appendChild(txt);
+      }
       row.appendChild(bubble);
     }
     $('messages').appendChild(row);
     return bubble;
   }
-  function addMessage(role, text) {
-    const b = addMessageDom(role, text);
+  function addMessage(role, text, imageUrl) {
+    const b = addMessageDom(role, text, imageUrl);
     trimVisibleMessages();
     scrollDown();
     return b;
@@ -2883,18 +2916,24 @@
   }
 
   /* ===== SEND ===== */
+  let _pendingImage = null; // { data, media_type, dataUrl }
+
   async function sendMessage() {
     const text = input.value.trim();
-    if (!text || busy) return;
+    if ((!text && !_pendingImage) || busy) return;
     busy = true; $('send').disabled = true;
-    addMessage('user', text);
+    const imageToSend = _pendingImage;
+    addMessage('user', text + (imageToSend ? (text ? '' : '📷 תמונה') : ''), imageToSend ? imageToSend.dataUrl : null);
     input.value = ''; input.style.height = 'auto';
+    clearAttachment();
     showTyping();
     try {
+      const body = { message: text, history: history, password: PASSWORD };
+      if (imageToSend) body.images = [{ data: imageToSend.data, media_type: imageToSend.media_type }];
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, history: history, password: PASSWORD })
+        body: JSON.stringify(body)
       });
       const data = await res.json();
       removeTyping();
@@ -2909,6 +2948,94 @@
       addMessage('ai', '⚠️ שגיאת תקשורת. נסי שוב בעוד רגע.');
     } finally {
       busy = false; $('send').disabled = false; input.focus();
+    }
+  }
+
+  // ===== Image attach =====
+  function onImagePicked(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { alert('התמונה גדולה מדי (מקסימום 10MB)'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const comma = dataUrl.indexOf(',');
+      _pendingImage = {
+        dataUrl,
+        media_type: file.type || 'image/jpeg',
+        data: dataUrl.slice(comma + 1)
+      };
+      showAttachment();
+    };
+    reader.readAsDataURL(file);
+  }
+  function showAttachment() {
+    const p = $('attachPreview');
+    if (!p || !_pendingImage) return;
+    p.innerHTML = '<img src="' + _pendingImage.dataUrl + '"><span class="ap-txt">תמונה מצורפת — כתבי מה לעשות איתה</span>'
+      + '<button class="ap-remove" onclick="clearAttachment()">✕</button>';
+    p.style.display = 'flex';
+  }
+  function clearAttachment() {
+    _pendingImage = null;
+    const p = $('attachPreview');
+    if (p) { p.style.display = 'none'; p.innerHTML = ''; }
+  }
+
+  // ===== Voice recording =====
+  let _mediaRecorder = null, _audioChunks = [], _recTimer = null, _recSeconds = 0;
+  async function toggleRecording() {
+    const btn = $('micBtn');
+    if (_mediaRecorder && _mediaRecorder.state === 'recording') {
+      _mediaRecorder.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      _audioChunks = [];
+      const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
+                 : MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
+      _mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      _mediaRecorder.ondataavailable = ev => { if (ev.data.size > 0) _audioChunks.push(ev.data); };
+      _mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        btn.classList.remove('recording'); btn.textContent = '🎙';
+        clearInterval(_recTimer);
+        const hintEl = document.querySelector('.composer .hint');
+        if (hintEl) hintEl.textContent = 'מתמלל...';
+        const blob = new Blob(_audioChunks, { type: mime || 'audio/webm' });
+        const dataUrl = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+        const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+        try {
+          const res = await fetch('/api/transcribe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: PASSWORD, audio: b64, mime: mime || 'audio/webm' })
+          });
+          const data = await res.json();
+          if (data.ok && data.text) {
+            input.value = (input.value ? input.value + ' ' : '') + data.text;
+            input.style.height = 'auto'; input.style.height = input.scrollHeight + 'px';
+            input.focus();
+          } else if (data.error === 'transcription_not_configured') {
+            alert('תמלול קולי עדיין לא מופעל. צריך להוסיף OPENAI_API_KEY ב-Railway.');
+          } else {
+            alert('לא הצלחתי לתמלל. נסי שוב.');
+          }
+        } catch (e) { alert('שגיאה בתמלול.'); }
+        if (hintEl) hintEl.textContent = 'היועץ מבוסס על נתונים אמיתיים מהחנות שלך';
+      };
+      _mediaRecorder.start();
+      btn.classList.add('recording'); btn.textContent = '⏹';
+      _recSeconds = 0;
+      const hintEl = document.querySelector('.composer .hint');
+      _recTimer = setInterval(() => {
+        _recSeconds++;
+        if (hintEl) hintEl.textContent = '● מקליט... ' + _recSeconds + ' שניות (לחצי שוב לסיום)';
+        if (_recSeconds >= 120) _mediaRecorder.stop(); // safety cap 2 min
+      }, 1000);
+    } catch (err) {
+      alert('לא ניתן לגשת למיקרופון. בדקי הרשאות.');
     }
   }
 

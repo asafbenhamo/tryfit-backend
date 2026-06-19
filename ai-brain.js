@@ -446,7 +446,7 @@ async function runTool(shopDomain, toolName, toolInput) {
 }
 
 // ---------- Main entry point ----------
-async function askBrain(shopDomain, shopName, userMessage, priorMessages = []) {
+async function askBrain(shopDomain, shopName, userMessage, priorMessages = [], images = []) {
   const client = getClient();
   let systemText = buildSystemPrompt(shopName || shopDomain);
 
@@ -468,7 +468,25 @@ async function askBrain(shopDomain, shopName, userMessage, priorMessages = []) {
       : t
   );
 
-  const messages = [...priorMessages, { role: "user", content: userMessage }];
+  // If images were attached, build a multimodal user message (text + image blocks)
+  // so the advisor can SEE store screenshots/product photos and act on them.
+  let userContent;
+  if (Array.isArray(images) && images.length > 0) {
+    userContent = [];
+    for (const img of images) {
+      if (img && img.data && img.media_type) {
+        userContent.push({
+          type: "image",
+          source: { type: "base64", media_type: img.media_type, data: img.data }
+        });
+      }
+    }
+    userContent.push({ type: "text", text: userMessage || "מה אתה רואה בתמונה? עזור לי בהתאם." });
+  } else {
+    userContent = userMessage;
+  }
+
+  const messages = [...priorMessages, { role: "user", content: userContent }];
   const toolsUsed = [];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {

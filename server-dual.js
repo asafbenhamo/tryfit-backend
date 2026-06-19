@@ -1007,23 +1007,25 @@ app.get("/api/wa-templates/list", async (req, res) => {
   }
 });
 
-app.post("/api/chat", express.json(), async (req, res) => {
+app.post("/api/chat", express.json({ limit: '12mb' }), async (req, res) => {
   try {
-    const { message, history } = req.body;
+    const { message, history, images } = req.body;
     const shop = resolveShop(req);
     if (!shop || !shopify.hasTokenForShop(shop)) {
       return res.status(401).json({ error: "גישה נדחתה" });
     }
-    if (!message || !message.trim()) {
+    const hasImages = Array.isArray(images) && images.length > 0;
+    if ((!message || !message.trim()) && !hasImages) {
       return res.status(400).json({ error: "הודעה ריקה" });
     }
     const storeCfg = shopify.getStore(shop);
     const shopName = (storeCfg && storeCfg.name) || (shop === DEFAULT_SHOP ? "770" : shop.replace(".myshopify.com", ""));
     const priorMessages = Array.isArray(history) ? history : [];
-    const result = await aiBrain.askBrain(shop, shopName, message, priorMessages);
+    const userText = (message && message.trim()) ? message : "צירפתי תמונה מהחנות. תראה אותה ותעזור לי בהתאם.";
+    const result = await aiBrain.askBrain(shop, shopName, userText, priorMessages, hasImages ? images : []);
     const cleanHistory = [
       ...priorMessages,
-      { role: "user", content: message },
+      { role: "user", content: userText + (hasImages ? " [תמונה צורפה]" : "") },
       { role: "assistant", content: result.answer }
     ];
     res.json({
@@ -1034,6 +1036,43 @@ app.post("/api/chat", express.json(), async (req, res) => {
     });
   } catch (err) {
     console.error("Chat endpoint error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Voice transcription: the app records audio and posts it here; we transcribe it to
+// Hebrew text (via OpenAI Whisper) and return the text, which the app then sends to
+// the advisor as a normal message.
+app.post("/api/transcribe", express.json({ limit: '15mb' }), async (req, res) => {
+  try {
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+    const { audio, mime } = req.body; // audio = base64 string
+    if (!audio) return res.status(400).json({ ok: false, error: "no_audio" });
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(503).json({ ok: false, error: "transcription_not_configured",
+        message: "תמלול קולי דורש מפתח OPENAI_API_KEY ב-Railway." });
+    }
+    const buf = Buffer.from(audio, 'base64');
+    const ext = (mime && mime.includes('mp4')) ? 'mp4' : (mime && mime.includes('webm')) ? 'webm' : 'm4a';
+    // Build multipart form for Whisper.
+    const form = new FormData();
+    const blob = new Blob([buf], { type: mime || 'audio/webm' });
+    form.append('file', blob, `audio.${ext}`);
+    form.append('model', 'whisper-1');
+    form.append('language', 'he');
+    const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: form
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      return res.status(502).json({ ok: false, error: 'whisper_failed', detail: t.substring(0, 200) });
+    }
+    const data = await r.json();
+    res.json({ ok: true, text: data.text || '' });
+  } catch (err) {
+    console.error("Transcribe error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -1640,6 +1679,53 @@ app.get("/api/advisor-stats", async (req, res) => {
     });
   } catch (err) {
     console.error("Advisor stats error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Live stats for the "My Team" screen — one call returns numbers per agent.
+app.get("/api/team-stats", async (req, res) => {
+  try {
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = resolveShop(req) || DEFAULT_SHOP;
+
+    // Campaigner: how many opportunities it surfaced right now.
+    let opportunities = 0;
+    try {
+      const ins = await insightsEngine.getInsights(shop);
+      opportunities = (ins.insights || []).length + (Array.isArray(ins.pool) ? ins.pool.length : 0);
+    } catch (e) {}
+
+    // Sales agent: actions sent + conversions + revenue (today + all-time).
+    const r = await db.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE outcome <> 'duplicate'
+           AND action_type NOT IN ('daily_report','morning_report'))::int AS total_actions,
+         COUNT(*) FILTER (WHERE outcome <> 'duplicate'
+           AND action_type NOT IN ('daily_report','morning_report')
+           AND created_at >= date_trunc('day', NOW()))::int AS actions_today,
+         COUNT(*) FILTER (WHERE outcome = 'converted')::int AS conversions,
+         COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome = 'converted'), 0)::numeric(12,2) AS revenue,
+         COUNT(*) FILTER (WHERE outcome = 'pending')::int AS pending
+       FROM advisor_actions
+       WHERE shop_domain = $1`,
+      [shop]
+    );
+    const a = r.rows[0] || {};
+
+    res.json({
+      ok: true,
+      campaigner: { opportunities },
+      sales: {
+        total_actions: a.total_actions || 0,
+        actions_today: a.actions_today || 0,
+        conversions: a.conversions || 0,
+        pending: a.pending || 0,
+        revenue: Math.round(parseFloat(a.revenue || 0))
+      }
+    });
+  } catch (err) {
+    console.error("team-stats error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
