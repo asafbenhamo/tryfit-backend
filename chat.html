@@ -445,80 +445,124 @@
   .bottom-nav button {
     flex: 1; background: none; border: none; cursor: pointer;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 2px; font-family: 'Heebo', sans-serif; font-size: 11px; color: var(--text-dim);
-    transition: color 0.15s;
+    gap: 3px; font-family: 'Heebo', sans-serif; font-size: 11px; font-weight: 600; color: var(--text-dim);
+    transition: color 0.15s; position: relative;
   }
   .bottom-nav button.active { color: var(--accent); }
-  .bottom-nav button .nav-ic { font-size: 20px; line-height: 1; }
-  .view { display: none; }
-  .view.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-  /* leave room for the bottom nav */
-  .main.has-nav .messages { padding-bottom: 70px; }
-  #teamView { overflow-y: auto; padding: 18px 16px 80px; background: var(--bg-soft); }
+  .bottom-nav button.active::before {
+    content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+    width: 28px; height: 3px; border-radius: 0 0 3px 3px; background: var(--accent);
+  }
+  .bottom-nav button .nav-ic { font-size: 21px; line-height: 1; }
+  /* Views stack in the space ABOVE the fixed nav. The nav is 60px tall. */
+  .main.has-nav { padding-bottom: calc(60px + env(safe-area-inset-bottom, 0)); box-sizing: border-box; }
+  .view { display: none; flex: 1; min-height: 0; }
+  .view.active { display: flex; flex-direction: column; }
+  #chatView { flex: 1; min-height: 0; }
+  #teamView, #agentDetailView { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  #teamView { padding: 18px 16px 24px; background: var(--bg-soft); }
   .team-hero {
-    background: linear-gradient(135deg, #0b2a4a, #0b8aff);
-    border-radius: 20px; padding: 20px; color: #fff; margin-bottom: 18px;
+    position: relative; overflow: hidden;
+    background: linear-gradient(135deg, #0a2540 0%, #0b5cad 55%, #0b8aff 100%);
+    border-radius: 22px; padding: 22px 22px 20px; color: #fff; margin-bottom: 20px;
+    box-shadow: 0 12px 30px -10px rgba(11,92,173,0.5);
   }
-  .team-hero h2 { font-size: 20px; font-weight: 800; margin-bottom: 4px; }
-  .team-hero p { font-size: 13.5px; opacity: 0.9; line-height: 1.5; }
-  .team-hero .hero-stat { margin-top: 12px; display: flex; gap: 18px; }
-  .team-hero .hero-stat div span { display: block; }
-  .team-hero .hero-num { font-size: 22px; font-weight: 800; }
-  .team-hero .hero-lbl { font-size: 11px; opacity: 0.85; }
-  .agent-grid { display: flex; flex-direction: column; gap: 12px; }
+  .team-hero::after {
+    content: ''; position: absolute; top: -40px; left: -30px;
+    width: 160px; height: 160px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,0.16), transparent 70%);
+  }
+  .team-hero h2 { font-size: 21px; font-weight: 800; margin-bottom: 6px; position: relative; }
+  .team-hero p { font-size: 13.5px; opacity: 0.92; line-height: 1.6; position: relative; max-width: 92%; }
+  .team-hero .hero-stat { margin-top: 18px; display: flex; gap: 14px; position: relative; }
+  .team-hero .hero-stat > div {
+    flex: 1; background: rgba(255,255,255,0.13); border-radius: 14px; padding: 11px 14px;
+  }
+  .team-hero .hero-num { font-size: 23px; font-weight: 800; display: block; line-height: 1.1; }
+  .team-hero .hero-lbl { font-size: 11px; opacity: 0.88; display: block; margin-top: 2px; }
+  .team-section-label { font-size: 12px; font-weight: 700; color: var(--text-dim); margin: 0 4px 12px; }
+  .agent-grid { display: flex; flex-direction: column; gap: 13px; }
   .agent-card {
-    background: var(--bg); border: 1px solid var(--border-strong);
-    border-radius: 16px; padding: 16px; display: flex; align-items: center; gap: 14px;
-    cursor: pointer; transition: transform 0.12s, box-shadow 0.12s; text-align: right;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 18px; padding: 16px; display: flex; align-items: center; gap: 14px;
+    cursor: pointer; transition: transform 0.14s, box-shadow 0.14s, border-color 0.14s;
+    text-align: right; box-shadow: 0 1px 3px rgba(16,24,40,0.04);
   }
-  .agent-card:active { transform: scale(0.98); }
-  .agent-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.06); }
+  .agent-card:active { transform: scale(0.985); }
+  .agent-card:hover { box-shadow: 0 8px 24px -8px rgba(16,24,40,0.14); border-color: var(--border-strong); }
+  .agent-card.is-soon { opacity: 0.93; }
   .agent-ic {
-    width: 52px; height: 52px; border-radius: 14px; flex-shrink: 0;
-    display: flex; align-items: center; justify-content: center; font-size: 26px;
+    width: 54px; height: 54px; border-radius: 15px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 27px;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,0.03);
   }
-  .agent-ic.campaigner { background: #e6f1fb; }
-  .agent-ic.sales { background: #e1f7ee; }
-  .agent-ic.manager { background: #fdf0e1; }
-  .agent-ic.support { background: #f3e9fb; }
-  .agent-ic.marketing { background: #fce8ef; }
+  .agent-ic.campaigner { background: linear-gradient(135deg,#e6f1fb,#d2e6fa); }
+  .agent-ic.sales { background: linear-gradient(135deg,#e1f7ee,#cdefdf); }
+  .agent-ic.manager { background: linear-gradient(135deg,#fdf0e1,#fae3c8); }
+  .agent-ic.support { background: linear-gradient(135deg,#f3e9fb,#e8d5f7); }
+  .agent-ic.marketing { background: linear-gradient(135deg,#fce8ef,#f9d3e0); }
   .agent-info { flex: 1; min-width: 0; }
-  .agent-name { font-size: 15.5px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
-  .agent-desc { font-size: 12.5px; color: var(--text-dim); line-height: 1.45; }
+  .agent-name { font-size: 16px; font-weight: 800; color: var(--text); margin-bottom: 1px; letter-spacing: -0.2px; }
+  .agent-role { font-size: 12px; color: var(--accent); font-weight: 700; margin-bottom: 5px; }
+  .agent-desc { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; }
   .agent-badge {
-    font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 20px; flex-shrink: 0;
+    font-size: 10px; font-weight: 800; padding: 4px 10px; border-radius: 20px;
+    flex-shrink: 0; align-self: flex-start;
   }
-  .agent-badge.live { background: #e1f7ee; color: #128a5a; }
-  .agent-badge.soon { background: #f1efe8; color: #8a8780; }
-  .agent-stat-row { margin-top: 8px; display: flex; gap: 14px; }
-  .agent-stat { font-size: 11.5px; color: var(--text); }
+  .agent-badge.live { background: #e1f7ee; color: #0f8a52; }
+  .agent-badge.live::before { content: '● '; font-size: 8px; vertical-align: middle; }
+  .agent-badge.soon { background: #eef0f3; color: #8a8f99; }
+  .agent-stat-row { margin-top: 9px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .agent-stat {
+    font-size: 11.5px; color: var(--text); background: var(--bg-soft);
+    border-radius: 8px; padding: 3px 9px;
+  }
   .agent-stat b { color: var(--accent); font-weight: 800; }
   /* agent detail screen */
-  #agentDetailView { overflow-y: auto; padding: 0 0 80px; background: var(--bg-soft); }
-  .agent-detail-hero { padding: 22px 18px 18px; color: #fff; }
-  .agent-detail-hero.campaigner { background: linear-gradient(135deg,#0b2a4a,#0b8aff); }
-  .agent-detail-hero.sales { background: linear-gradient(135deg,#0a4a32,#1fc285); }
-  .agent-detail-hero.manager { background: linear-gradient(135deg,#7a4a10,#f5a623); }
-  .agent-detail-hero.support { background: linear-gradient(135deg,#4a1a6a,#9b51e0); }
-  .agent-detail-hero.marketing { background: linear-gradient(135deg,#6a1030,#e0395a); }
+  #agentDetailView { overflow-y: auto; padding: 0 0 24px; background: var(--bg-soft); }
+  .agent-detail-hero { padding: 24px 20px 22px; color: #fff; position: relative; overflow: hidden; }
+  .agent-detail-hero::after {
+    content: ''; position: absolute; top: -50px; left: -40px; width: 180px; height: 180px;
+    border-radius: 50%; background: radial-gradient(circle, rgba(255,255,255,0.14), transparent 70%);
+  }
+  .agent-detail-hero.campaigner { background: linear-gradient(135deg,#0a2540,#0b8aff); }
+  .agent-detail-hero.sales { background: linear-gradient(135deg,#073a28,#1fc285); }
+  .agent-detail-hero.manager { background: linear-gradient(135deg,#6a3e0a,#f5a623); }
+  .agent-detail-hero.support { background: linear-gradient(135deg,#3d1559,#9b51e0); }
+  .agent-detail-hero.marketing { background: linear-gradient(135deg,#5a0d28,#e0395a); }
   .agent-detail-back {
     background: rgba(255,255,255,0.2); border: none; color: #fff; cursor: pointer;
-    font-family: 'Heebo', sans-serif; font-size: 14px; padding: 6px 12px; border-radius: 10px; margin-bottom: 14px;
+    font-family: 'Heebo', sans-serif; font-size: 13.5px; font-weight: 600;
+    padding: 7px 14px; border-radius: 11px; margin-bottom: 16px; position: relative;
   }
-  .agent-detail-hero h2 { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
-  .agent-detail-hero p { font-size: 14px; opacity: 0.92; line-height: 1.5; }
-  .agent-detail-body { padding: 18px 16px; }
-  .detail-section-title { font-size: 13px; font-weight: 700; color: var(--text-dim); margin: 4px 0 10px; }
+  .agent-detail-hero .dh-icon { font-size: 40px; margin-bottom: 8px; position: relative; }
+  .agent-detail-hero h2 { font-size: 23px; font-weight: 800; margin-bottom: 4px; position: relative; }
+  .agent-detail-hero .dh-role { font-size: 13px; font-weight: 700; opacity: 0.9; margin-bottom: 10px; position: relative; }
+  .agent-detail-hero p { font-size: 14.5px; opacity: 0.95; line-height: 1.55; position: relative; }
+  .agent-detail-body { padding: 20px 16px; }
+  .detail-section-title { font-size: 12.5px; font-weight: 700; color: var(--text-dim); margin: 4px 2px 12px; }
   .cap-item {
-    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
-    padding: 13px 15px; margin-bottom: 9px; display: flex; align-items: flex-start; gap: 11px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 14px;
+    padding: 14px 15px; margin-bottom: 10px; display: flex; align-items: flex-start; gap: 12px;
+    box-shadow: 0 1px 2px rgba(16,24,40,0.03);
   }
-  .cap-item .cap-ic { font-size: 18px; flex-shrink: 0; }
-  .cap-item .cap-txt { font-size: 13.5px; color: var(--text); line-height: 1.5; }
+  .cap-item .cap-ic {
+    font-size: 17px; flex-shrink: 0; width: 34px; height: 34px; border-radius: 9px;
+    background: var(--bg-soft); display: flex; align-items: center; justify-content: center;
+  }
+  .cap-item .cap-txt { font-size: 13.5px; color: var(--text); line-height: 1.55; padding-top: 5px; }
   .soon-banner {
-    background: #fef9ed; border: 1px solid #f5d98a; border-radius: 12px;
-    padding: 14px 16px; font-size: 13.5px; color: #8a6d2a; line-height: 1.55; margin-bottom: 16px;
+    background: linear-gradient(135deg,#fff9ed,#fef3da); border: 1px solid #f5d98a;
+    border-radius: 14px; padding: 14px 16px; font-size: 13.5px; color: #8a6d2a;
+    line-height: 1.55; margin-bottom: 18px;
   }
+  .stat-cards { display: flex; gap: 10px; margin-bottom: 18px; }
+  .stat-card {
+    flex: 1; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 14px; padding: 13px; text-align: center; box-shadow: 0 1px 2px rgba(16,24,40,0.03);
+  }
+  .stat-card .sc-num { font-size: 20px; font-weight: 800; color: var(--accent); line-height: 1.1; }
+  .stat-card .sc-lbl { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
 </style>
 </head>
 <body>
@@ -626,57 +670,58 @@
   const AGENTS = [
     {
       id: 'campaigner', icon: '🧠', cls: 'campaigner', status: 'live',
-      name: 'הקמפיינר', short: 'המוח — מוצא הזדמנויות והעלאת מכירות',
-      tagline: 'מוצא עסקאות, מבין למה מכירות יורדות, ויודע איך להעלות אותן.',
+      name: 'הקמפיינר', short: 'מנהל השיווק והאסטרטגיה',
+      tagline: 'הוא יושב על כל הנתונים של החנות ומחליט מה המהלך הבא שיכניס הכי הרבה כסף.',
       caps: [
-        ['🔍','מזהה הזדמנויות מכירה אמיתיות מתוך כל בסיס הלקוחות'],
-        ['🎯','בונה פילוח חכם — מי הכי שווה לפנות אליו ומתי'],
-        ['🎟️','יוצר קופונים אישיים לכל לקוחה (אחוז, סכום, משלוח חינם, 3+1, קטגוריה)'],
-        ['📉','מבין למה מכירות ירדו ומציע איך להעלות אותן'],
-        ['🔥','מקדם מוצרים חמים ונותן הנחות על מוצרים שנתקעו']
+        ['🔍','עובר על כל הלקוחות שלך ומסמן מי בדיוק עכשיו בשל לקנייה — לקוחה שקונה כל חודש ועברו 35 יום, VIP שנעלם, מי שזנח עגלה מלאה'],
+        ['📉','כשהמכירות יורדות הוא מבין למה — איזה מוצר הפסיק להימכר, איזה קהל ברח — ואומר לך מה לעשות עם זה'],
+        ['🎟️','מתכנן את ההטבה הנכונה לכל מהלך: למתי קופון אחוז, למתי משלוח חינם, למתי 1+3, ועל איזו קטגוריה'],
+        ['🔥','דוחף את המוצרים שמוכרים חזק ומחלץ את אלה שנתקעו במלאי לפני שהם הופכים להפסד'],
+        ['🎯','מחלק את הלקוחות לקבוצות לפי הרגלי קנייה ומחליט בדיוק לאיזו קבוצה כדאי לפנות השבוע']
       ]
     },
     {
       id: 'sales', icon: '🤝', cls: 'sales', status: 'live',
-      name: 'איש המכירות', short: 'פונה ללקוחות וסוגר עסקאות',
-      tagline: 'פונה אישית ללקוחות, סוגר לידים, ומדווח על כל מכירה.',
+      name: 'איש המכירות', short: 'איש הקשר מול הלקוחות',
+      tagline: 'לוקח את ההחלטות של הקמפיינר ויוצר מהן פניות אישיות שסוגרות עסקאות.',
       caps: [
-        ['💬','פונה ללקוחות דרך וואטסאפ, מייל ו-SMS לפי הנחיית הקמפיינר'],
-        ['❤️','כל פנייה אישית ואנושית — מרגישה אמיתית, לא רובוטית'],
-        ['🔗','עוקב אחרי כל ליד וסוגר מעגל — יודע מי קנה בזכותו'],
-        ['📊','מדווח חזרה על כל מכירה עם הוכחה (קופון או קליק על קישור)']
+        ['💬','פונה לכל לקוחה בערוץ שמתאים לה — וואטסאפ, מייל או SMS — עם הודעה שנכתבה אישית בשבילה'],
+        ['❤️','כותב כמו בן אדם, לא כמו דיוור המוני: מזכיר מה היא אהבה לקנות, פונה בשמה, גורם לה להרגיש לקוחה ולא מספר'],
+        ['🔗','מצרף לכל הודעה קופון אישי וקישור מעקב — וכך הוא יודע בדיוק מי פתח, מי לחץ ומי קנה בזכותו'],
+        ['📊','סוגר את המעגל על כל פנייה: כשלקוחה קונה, הוא מצמיד את המכירה לפנייה שלו ומראה לך כמה כסף הוא הכניס — שקל אחר שקל']
       ]
     },
     {
       id: 'manager', icon: '🏪', cls: 'manager', status: 'soon',
-      name: 'מנהל החנות', short: 'מסדר את האתר כדי להעלות מכירות',
-      tagline: 'מנתח את סידור החנות ומסדר אותה אוטומטית כדי למכור יותר.',
+      name: 'מנהל החנות', short: 'אחראי על חווית הקנייה באתר',
+      tagline: 'מסדר את החנות עצמה כך שכל מבקר רואה קודם את מה שהכי סביר שיקנה.',
       caps: [
-        ['🆕','דוחף קולקציות חדשות ומוצרים חמים למעלה'],
-        ['🏷️','מזהה מוצרים שלא נמכרים ונותן עליהם הנחה ממוקדת'],
-        ['🎯','פופאפים מותאמים אישית לפי מי שגולש באתר'],
-        ['⚙️','יוצר אוטומציות שמעלות המרות']
+        ['🆕','מקדם קולקציות חדשות ומוצרים חמים לראש העמוד, ומוריד למטה את מה שלא מושך'],
+        ['🏷️','מזהה מוצרים שתקועים במלאי ומציע עליהם הנחה ממוקדת כדי להזיז אותם'],
+        ['🎯','מקפיץ פופאפ מותאם אישית לפי מי שגולש — מבקרת חדשה תקבל הטבת הצטרפות, לקוחה חוזרת תקבל המלצה לפי מה שקנתה'],
+        ['⚙️','בונה אוטומציות באתר שמגדילות את סל הקנייה הממוצע — "עוד 50 ₪ למשלוח חינם", השלמות מוצר וכו\'']
       ]
     },
     {
       id: 'support', icon: '🎧', cls: 'support', status: 'soon',
-      name: 'שירות לקוחות', short: 'עונה ללקוחות 24/7',
-      tagline: 'סוכן שעונה ללקוחות, פותר בעיות, ומרגיש אנושי ומחובר לחנות.',
+      name: 'נציג השירות', short: 'מענה ללקוחות מסביב לשעון',
+      tagline: 'עונה ללקוחות שלך בכל שעה, יודע הכל על החנות, ומשחרר אותך מהמענה.',
       caps: [
-        ['💡','עונה על שאלות לקוחות בצורה חכמה ומדויקת'],
-        ['🛍️','מחובר לחנות — יודע על מוצרים, הזמנות ומלאי'],
-        ['❤️','אישי ואנושי — הלקוח מרגיש שמדברים איתו, לא עם בוט']
+        ['💡','עונה על שאלות לקוחות — מידות, מלאי, מדיניות החזרות, סטטוס הזמנה — מיד, גם ב-3 בלילה'],
+        ['🛍️','מחובר ישירות לנתוני החנות: יודע אילו מוצרים יש, מתי הזמנה תגיע, ומה כדאי להמליץ במקום פריט שאזל'],
+        ['❤️','מדבר בגובה העיניים ובטון של המותג שלך — הלקוח מרגיש שטיפלו בו, לא שדחו אותו לבוט'],
+        ['🤝','כשהוא מזהה לקוחה מתלבטת — הוא מעביר אותה לאיש המכירות עם ההקשר המלא, וההזדמנות לא הולכת לאיבוד']
       ]
     },
     {
       id: 'marketing', icon: '📢', cls: 'marketing', status: 'soon',
-      name: 'איש השיווק', short: 'קמפיינים, פוסטים וסרטוני AI',
-      tagline: 'יוצר קמפיינים, פוסטים וסרטוני AI ומביא תנועה חדשה לאתר.',
+      name: 'מנהל הקריאייטיב', short: 'תוכן ופרסום שמביא קהל חדש',
+      tagline: 'מביא לקוחות חדשים לחנות — מייצר את התוכן, מריץ את הפרסום, ומודד מה עובד.',
       caps: [
-        ['🎬','יוצר פוסטים וסרטוני AI לשיווק החנות'],
-        ['📱','מנהל קמפיינים בפייסבוק ואינסטגרם'],
-        ['🔬','מנתח מתחרים ומה עובד היום בשוק'],
-        ['💰','מקבל תקציב ומביא תנועה חדשה לתוך האתר']
+        ['🎬','מייצר פוסטים, תמונות וסרטוני AI לרשתות — מותאמים למוצרים שלך ולמה שתופס עכשיו'],
+        ['📱','מריץ ומנהל קמפיינים בפייסבוק ובאינסטגרם, ומכוון אותם לקהל שהכי סביר שיקנה'],
+        ['🔬','עוקב אחרי מה שעובד אצל המתחרים ומה רץ בשוק, ומתאים את המסר בהתאם'],
+        ['💰','מקבל תקציב פרסום, מחלק אותו בין הקמפיינים, ומראה לך כמה לקוחות חדשים כל שקל הביא']
       ]
     }
   ];
@@ -692,32 +737,63 @@
     else if (which === 'agentDetail') { $('agentDetailView').classList.add('active'); }
   }
 
+  let _teamStats = null;
+  async function fetchTeamStats() {
+    try {
+      const res = await fetch('/api/team-stats?password=' + encodeURIComponent(PASSWORD));
+      const data = await res.json();
+      if (data.ok) _teamStats = data;
+    } catch (e) {}
+    return _teamStats;
+  }
+
   async function renderTeam() {
     const v = $('teamView');
     const liveCount = AGENTS.filter(a => a.status === 'live').length;
     let html = '<div class="team-hero">'
-      + '<h2>👑 הצוות שלך</h2>'
-      + '<p>היועץ הוא ראש הצוות. הוא מפעיל בשבילך צוות סוכנים שעובד 24/7 כדי להעלות מכירות — אתה רק מאשר ומקבל דיווחים.</p>'
-      + '<div class="hero-stat"><div><span class="hero-num">' + liveCount + '</span><span class="hero-lbl">סוכנים פעילים</span></div>'
-      + '<div><span class="hero-num" id="teamRevenue">—</span><span class="hero-lbl">הכנסות שהצוות עשה</span></div></div>'
-      + '</div>';
-    html += '<div class="agent-grid">';
-    AGENTS.forEach(a => {
-      html += '<div class="agent-card" onclick="openAgent(\'' + a.id + '\')">'
-        + '<div class="agent-ic ' + a.cls + '">' + a.icon + '</div>'
-        + '<div class="agent-info"><div class="agent-name">' + a.name + '</div>'
-        + '<div class="agent-desc">' + a.short + '</div></div>'
-        + '<div class="agent-badge ' + (a.status === 'live' ? 'live' : 'soon') + '">'
-        + (a.status === 'live' ? 'פעיל' : 'בקרוב') + '</div>'
-        + '</div>';
-    });
+      + '<h2>הצוות שלך</h2>'
+      + '<p>היועץ הוא ראש הצוות. מתחתיו עובד צוות שלם — כל אחד עם תפקיד משלו — שעובד בשבילך מסביב לשעון. אתה רק מאשר ומקבל דיווחים.</p>'
+      + '<div class="hero-stat">'
+      + '<div><span class="hero-num">' + liveCount + ' מתוך ' + AGENTS.length + '</span><span class="hero-lbl">סוכנים פעילים</span></div>'
+      + '<div><span class="hero-num" id="teamRevenue">—</span><span class="hero-lbl">הכניס לך עד היום</span></div>'
+      + '</div></div>';
+
+    const live = AGENTS.filter(a => a.status === 'live');
+    const soon = AGENTS.filter(a => a.status === 'soon');
+
+    html += '<div class="team-section-label">עובדים עכשיו</div><div class="agent-grid">';
+    live.forEach(a => { html += agentCardHtml(a); });
     html += '</div>';
+
+    html += '<div class="team-section-label" style="margin-top:22px">מצטרפים לצוות בקרוב</div><div class="agent-grid">';
+    soon.forEach(a => { html += agentCardHtml(a); });
+    html += '</div>';
+
     v.innerHTML = html;
-    // Fill the revenue stat from the existing money counter if present.
-    const money = $('moneyAmount');
-    if (money && money.textContent && money.textContent !== '—') {
-      const tr = $('teamRevenue'); if (tr) tr.textContent = money.textContent;
-    }
+
+    const s = await fetchTeamStats();
+    if (!s) return;
+    const tr = $('teamRevenue');
+    if (tr) tr.textContent = '₪' + (s.sales.revenue || 0).toLocaleString();
+    const camp = $('stat_campaigner');
+    if (camp) camp.innerHTML = '<span class="agent-stat"><b>' + (s.campaigner.opportunities || 0) + '</b> הזדמנויות פתוחות</span>';
+    const sales = $('stat_sales');
+    if (sales) sales.innerHTML =
+        '<span class="agent-stat"><b>' + (s.sales.total_actions || 0) + '</b> פניות</span>'
+      + '<span class="agent-stat"><b>' + (s.sales.conversions || 0) + '</b> מכירות נסגרו</span>';
+  }
+
+  function agentCardHtml(a) {
+    return '<div class="agent-card ' + (a.status === 'soon' ? 'is-soon' : '') + '" onclick="openAgent(\'' + a.id + '\')">'
+      + '<div class="agent-ic ' + a.cls + '">' + a.icon + '</div>'
+      + '<div class="agent-info"><div class="agent-name">' + a.name + '</div>'
+      + '<div class="agent-role">' + a.short + '</div>'
+      + '<div class="agent-desc">' + a.tagline + '</div>'
+      + (a.status === 'live' ? '<div class="agent-stat-row" id="stat_' + a.id + '"></div>' : '')
+      + '</div>'
+      + '<div class="agent-badge ' + (a.status === 'live' ? 'live' : 'soon') + '">'
+      + (a.status === 'live' ? 'פעיל' : 'בקרוב') + '</div>'
+      + '</div>';
   }
 
   function openAgent(id) {
@@ -726,18 +802,37 @@
     const v = $('agentDetailView');
     let html = '<div class="agent-detail-hero ' + a.cls + '">'
       + '<button class="agent-detail-back" onclick="switchView(\'team\')">→ חזרה לצוות</button>'
-      + '<h2>' + a.icon + ' ' + a.name + '</h2>'
+      + '<div class="dh-icon">' + a.icon + '</div>'
+      + '<h2>' + a.name + '</h2>'
+      + '<div class="dh-role">' + a.short + '</div>'
       + '<p>' + a.tagline + '</p></div>';
     html += '<div class="agent-detail-body">';
+
     if (a.status === 'soon') {
-      html += '<div class="soon-banner">🔜 הסוכן הזה בפיתוח. הנה מה שהוא יידע לעשות כשייכנס לצוות:</div>';
+      html += '<div class="soon-banner">הסוכן הזה מצטרף לצוות בקרוב. הנה התפקיד שהוא ימלא:</div>';
     }
-    html += '<div class="detail-section-title">מה הסוכן עושה</div>';
+
+    // Live stat cards for active agents.
+    if (a.status === 'live' && _teamStats) {
+      if (a.id === 'campaigner') {
+        html += '<div class="stat-cards">'
+          + '<div class="stat-card"><div class="sc-num">' + (_teamStats.campaigner.opportunities || 0) + '</div><div class="sc-lbl">הזדמנויות פתוחות</div></div>'
+          + '</div>';
+      } else if (a.id === 'sales') {
+        html += '<div class="stat-cards">'
+          + '<div class="stat-card"><div class="sc-num">' + (_teamStats.sales.total_actions || 0) + '</div><div class="sc-lbl">פניות</div></div>'
+          + '<div class="stat-card"><div class="sc-num">' + (_teamStats.sales.conversions || 0) + '</div><div class="sc-lbl">מכירות</div></div>'
+          + '<div class="stat-card"><div class="sc-num">₪' + (_teamStats.sales.revenue || 0).toLocaleString() + '</div><div class="sc-lbl">הכנסות</div></div>'
+          + '</div>';
+      }
+    }
+
+    html += '<div class="detail-section-title">' + (a.status === 'live' ? 'מה הוא עושה בשבילך' : 'מה הוא יעשה') + '</div>';
     a.caps.forEach(c => {
       html += '<div class="cap-item"><span class="cap-ic">' + c[0] + '</span><span class="cap-txt">' + c[1] + '</span></div>';
     });
     if (a.status === 'live' && a.id === 'campaigner') {
-      html += '<div style="margin-top:14px"><button class="insight-btn" onclick="switchView(\'chat\')">דבר עם היועץ ←</button></div>';
+      html += '<div style="margin-top:16px"><button class="insight-btn" onclick="switchView(\'chat\')">דבר עם היועץ ←</button></div>';
     }
     html += '</div>';
     v.innerHTML = html;
