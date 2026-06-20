@@ -1072,6 +1072,11 @@ app.post("/api/transcribe", express.json({ limit: '15mb' }), async (req, res) =>
       `Content-Disposition: form-data; name="model"${CRLF}${CRLF}whisper-1${CRLF}` +
       `--${boundary}${CRLF}` +
       `Content-Disposition: form-data; name="language"${CRLF}${CRLF}he${CRLF}` +
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="temperature"${CRLF}${CRLF}0${CRLF}` +
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="prompt"${CRLF}${CRLF}` +
+      `שיחה בעברית עם יועץ מכירות לחנות אונליין. מילים נפוצות: לקוחות, קמפיין, קופון, הנחה, מכירות, עגלה נטושה, דיוור, וואטסאפ, הזמנה, מוצר, מלאי, הזדמנות, לפנות ללקוחות.${CRLF}` +
       `--${boundary}--${CRLF}`, 'utf8');
     const body = Buffer.concat([pre, audioBuf, post]);
 
