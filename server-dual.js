@@ -2924,7 +2924,7 @@ function handleOrderWebhook(req, res) {
               await push.sendToShop(shopDomain, {
                 title: '🎉 מכירה חדשה בזכות היועץ!',
                 body: `לקוחה השלימה רכישה של ${amt}₪. היועץ סגר עוד עסקה.`,
-                tag: 'conversion', url: '/'
+                tag: 'conversion', url: '/chat'
               });
             }
           } catch (e) { /* never let push break attribution */ }

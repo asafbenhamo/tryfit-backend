@@ -32,13 +32,19 @@ self.addEventListener('push', (event) => {
 // Tapping the notification opens (or focuses) the app.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || '/';
+  let url = (event.notification.data && event.notification.data.url) || '/chat';
+  // Make it an absolute URL within our origin.
+  const target = new URL(url, self.location.origin).href;
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      // If the advisor is already open, focus it (and navigate if possible).
       for (const client of list) {
-        if ('focus' in client) return client.focus();
+        if ('focus' in client) {
+          if ('navigate' in client) { client.navigate(target).catch(()=>{}); }
+          return client.focus();
+        }
       }
-      if (self.clients.openWindow) return self.clients.openWindow(url);
+      if (self.clients.openWindow) return self.clients.openWindow(target);
     })
   );
 });
