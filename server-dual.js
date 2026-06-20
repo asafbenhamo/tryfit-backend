@@ -34,7 +34,7 @@ app.use((req, res, next) => {
   if (req.path === "/webhooks/checkouts/create" || req.path === "/webhooks/checkouts/update" || req.path === "/webhooks/orders/create") {
     return next();
   }
-  return express.json()(req, res, next);
+  return express.json({ limit: '20mb' })(req, res, next);
 });
 
 const BACKEND_MODE = process.env.BACKEND_MODE || "fashn";
@@ -1041,8 +1041,8 @@ app.post("/api/chat", express.json({ limit: '12mb' }), async (req, res) => {
 });
 
 // Voice transcription: the app records audio and posts it here; we transcribe it to
-// Hebrew text (via OpenAI Whisper) and return the text, which the app then sends to
-// the advisor as a normal message.
+// Hebrew text (via OpenAI Whisper). The multipart body is built MANUALLY with a
+// Buffer so it works on any Node version (no dependency on global FormData/Blob).
 app.post("/api/transcribe", express.json({ limit: '15mb' }), async (req, res) => {
   try {
     if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
@@ -1052,28 +1052,50 @@ app.post("/api/transcribe", express.json({ limit: '15mb' }), async (req, res) =>
       return res.status(503).json({ ok: false, error: "transcription_not_configured",
         message: "תמלול קולי דורש מפתח OPENAI_API_KEY ב-Railway." });
     }
-    const buf = Buffer.from(audio, 'base64');
-    const ext = (mime && mime.includes('mp4')) ? 'mp4' : (mime && mime.includes('webm')) ? 'webm' : 'm4a';
-    // Build multipart form for Whisper.
-    const form = new FormData();
-    const blob = new Blob([buf], { type: mime || 'audio/webm' });
-    form.append('file', blob, `audio.${ext}`);
-    form.append('model', 'whisper-1');
-    form.append('language', 'he');
+    const audioBuf = Buffer.from(audio, 'base64');
+    if (!audioBuf || audioBuf.length < 1000) {
+      return res.status(400).json({ ok: false, error: 'audio_too_short', detail: 'ההקלטה קצרה מדי' });
+    }
+    const contentType = mime || 'audio/webm';
+    const ext = contentType.includes('mp4') ? 'mp4' : contentType.includes('mpeg') ? 'mp3'
+              : contentType.includes('wav') ? 'wav' : contentType.includes('ogg') ? 'ogg' : 'webm';
+
+    // Manually assemble a multipart/form-data body (Node-version independent).
+    const boundary = '----SmartAdvisor' + crypto.randomBytes(12).toString('hex');
+    const CRLF = '\r\n';
+    const pre = Buffer.from(
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="file"; filename="audio.${ext}"${CRLF}` +
+      `Content-Type: ${contentType}${CRLF}${CRLF}`, 'utf8');
+    const post = Buffer.from(
+      `${CRLF}--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="model"${CRLF}${CRLF}whisper-1${CRLF}` +
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="language"${CRLF}${CRLF}he${CRLF}` +
+      `--${boundary}--${CRLF}`, 'utf8');
+    const body = Buffer.concat([pre, audioBuf, post]);
+
     const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` },
-      body: form
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': String(body.length)
+      },
+      body
     });
+
+    const raw = await r.text();
     if (!r.ok) {
-      const t = await r.text();
-      return res.status(502).json({ ok: false, error: 'whisper_failed', detail: t.substring(0, 200) });
+      console.error("Whisper API error:", r.status, raw);
+      return res.status(502).json({ ok: false, error: 'whisper_failed', detail: `(${r.status}) ` + raw.substring(0, 300) });
     }
-    const data = await r.json();
-    res.json({ ok: true, text: data.text || '' });
+    let data;
+    try { data = JSON.parse(raw); } catch (e) { data = { text: raw }; }
+    res.json({ ok: true, text: (data && data.text) || '' });
   } catch (err) {
     console.error("Transcribe error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: err.message, detail: err.message });
   }
 });
 
