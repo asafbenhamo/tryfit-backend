@@ -1059,45 +1059,52 @@ app.post("/api/transcribe", express.json({ limit: '15mb' }), async (req, res) =>
     const contentType = mime || 'audio/webm';
     const ext = contentType.includes('mp4') ? 'mp4' : contentType.includes('mpeg') ? 'mp3'
               : contentType.includes('wav') ? 'wav' : contentType.includes('ogg') ? 'ogg' : 'webm';
-
-    // Manually assemble a multipart/form-data body (Node-version independent).
-    const boundary = '----SmartAdvisor' + crypto.randomBytes(12).toString('hex');
     const CRLF = '\r\n';
-    const pre = Buffer.from(
-      `--${boundary}${CRLF}` +
-      `Content-Disposition: form-data; name="file"; filename="audio.${ext}"${CRLF}` +
-      `Content-Type: ${contentType}${CRLF}${CRLF}`, 'utf8');
-    const post = Buffer.from(
-      `${CRLF}--${boundary}${CRLF}` +
-      `Content-Disposition: form-data; name="model"${CRLF}${CRLF}whisper-1${CRLF}` +
-      `--${boundary}${CRLF}` +
-      `Content-Disposition: form-data; name="language"${CRLF}${CRLF}he${CRLF}` +
-      `--${boundary}${CRLF}` +
-      `Content-Disposition: form-data; name="temperature"${CRLF}${CRLF}0${CRLF}` +
-      `--${boundary}${CRLF}` +
-      `Content-Disposition: form-data; name="prompt"${CRLF}${CRLF}` +
-      `שיחה בעברית עם יועץ מכירות לחנות אונליין. מילים נפוצות: לקוחות, קמפיין, קופון, הנחה, מכירות, עגלה נטושה, דיוור, וואטסאפ, הזמנה, מוצר, מלאי, הזדמנות, לפנות ללקוחות.${CRLF}` +
-      `--${boundary}--${CRLF}`, 'utf8');
-    const body = Buffer.concat([pre, audioBuf, post]);
+    const hePrompt = 'שיחה בעברית עם יועץ מכירות לחנות אונליין. מילים נפוצות: לקוחות, קמפיין, קופון, הנחה, מכירות, עגלה נטושה, דיוור, וואטסאפ, הזמנה, מוצר, מלאי, הזדמנות, לפנות ללקוחות.';
 
-    const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        'Content-Length': String(body.length)
-      },
-      body
-    });
-
-    const raw = await r.text();
-    if (!r.ok) {
-      console.error("Whisper API error:", r.status, raw);
-      return res.status(502).json({ ok: false, error: 'whisper_failed', detail: `(${r.status}) ` + raw.substring(0, 300) });
+    // Call OpenAI transcription with a given model. Returns { ok, status, text, raw }.
+    async function transcribeWith(model) {
+      const boundary = '----SmartAdvisor' + crypto.randomBytes(12).toString('hex');
+      const pre = Buffer.from(
+        `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="file"; filename="audio.${ext}"${CRLF}` +
+        `Content-Type: ${contentType}${CRLF}${CRLF}`, 'utf8');
+      const post = Buffer.from(
+        `${CRLF}--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="model"${CRLF}${CRLF}${model}${CRLF}` +
+        `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="language"${CRLF}${CRLF}he${CRLF}` +
+        `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="prompt"${CRLF}${CRLF}${hePrompt}${CRLF}` +
+        `--${boundary}--${CRLF}`, 'utf8');
+      const body = Buffer.concat([pre, audioBuf, post]);
+      const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': String(body.length)
+        },
+        body
+      });
+      const raw = await r.text();
+      let text = '';
+      try { text = (JSON.parse(raw).text) || ''; } catch (e) { text = raw; }
+      return { ok: r.ok, status: r.status, text, raw };
     }
-    let data;
-    try { data = JSON.parse(raw); } catch (e) { data = { text: raw }; }
-    res.json({ ok: true, text: (data && data.text) || '' });
+
+    // Try the accurate model first; if it errors (e.g. not enabled on the account),
+    // fall back to whisper-1 so transcription still works.
+    let out = await transcribeWith('gpt-4o-transcribe');
+    if (!out.ok) {
+      console.error("gpt-4o-transcribe failed:", out.status, out.raw.substring(0, 200));
+      out = await transcribeWith('whisper-1');
+    }
+    if (!out.ok) {
+      console.error("Whisper fallback also failed:", out.status, out.raw);
+      return res.status(502).json({ ok: false, error: 'whisper_failed', detail: `(${out.status}) ` + out.raw.substring(0, 300) });
+    }
+    res.json({ ok: true, text: out.text || '' });
   } catch (err) {
     console.error("Transcribe error:", err);
     res.status(500).json({ ok: false, error: err.message, detail: err.message });
