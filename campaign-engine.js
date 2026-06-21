@@ -184,12 +184,19 @@ async function runCampaign(id, shop, segment, template) {
       let body = (template.body || '')
         .replace(/\{NAME\}/g, cust.name || '')
         .replace(/\{COUPON\}/g, finalCode || '');
-      if (finalCode && !body.includes(finalCode)) body += `\n\nקוד אישי: ${finalCode}`;
-      // Always state the 48-hour validity so it matches the real coupon expiry,
-      // and to create urgency. Only add it if not already mentioned.
-      if (finalCode && !body.includes('48 שעות')) body += `\nהקוד תקף ל-48 שעות בלבד ⏰`;
+      // Only auto-append the "קוד אישי" + validity lines when WE generated a personal
+      // code. When the merchant supplied their own fixed code, the code already lives
+      // in the body text they wrote — never add a second one.
+      if (finalCode && !fixedCode) {
+        if (!body.includes(finalCode)) body += `\n\nקוד אישי: ${finalCode}`;
+        if (!body.includes('48 שעות')) body += `\nהקוד תקף ל-48 שעות בלבד ⏰`;
+      }
 
-      const BASE = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
+      // Base URL for tracking links. Be defensive: strip any accidental
+      // "NAME = value" or quotes, and keep only a clean https URL.
+      let BASE = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
+      BASE = String(BASE).replace(/^[^=]*=\s*/, '').replace(/['"\s]/g, '').replace(/\/+$/, '');
+      if (!/^https?:\/\//.test(BASE)) BASE = "https://tryfit-backend-production.up.railway.app";
 
       if (hasPhone) {
         // Create the action row FIRST so we can tie a tracking link to it. Attribution
