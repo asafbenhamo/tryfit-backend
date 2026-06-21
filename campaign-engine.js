@@ -219,7 +219,7 @@ async function runCampaign(id, shop, segment, template) {
           const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone, couponCode: finalCode });
           buyLink = `${BASE}/go/${token}`;
         } catch (e) { /* fall back to plain store link */ }
-        body += `\n\nלרכישה: ${buyLink}`;
+        body += `\n\n🛍️ למימוש ההטבה ולרכישה:\n${buyLink}`;
 
         let wa = String(contact.phone).replace(/[^0-9]/g, '');
         if (wa.startsWith('0')) wa = '972' + wa.slice(1);
@@ -254,7 +254,7 @@ async function runCampaign(id, shop, segment, template) {
           const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone, couponCode: finalCode });
           buyLink = `${BASE}/go/${token}`;
         } catch (e) { /* fall back */ }
-        body += `\n\nלרכישה: ${buyLink}`;
+        body += `\n\n🛍️ למימוש ההטבה ולרכישה:\n${buyLink}`;
 
         // Email: auto-send through the gate (already checked above)
         const html = mailer.buildHtmlEmail(body, { brand: '770', to: contact.email });
