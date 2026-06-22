@@ -1562,9 +1562,6 @@
     if (ach.pending > 0) {
       html += '<div class="summary-line">⏳ ' + ach.pending + ' פעולות ממתינות לביצוע. אני עוקב ואעדכן ברגע שייסגרו.</div>';
     }
-    if (ach.expired > 0) {
-      html += '<div class="summary-line">○ ' + ach.expired + ' פעולות פג תוקפן / לא הומרו (עברו 3 ימים).</div>';
-    }
     if ((did.actions > 0) || (ach.total_conversions > 0) || (ach.pending > 0)) {
       html += '<div class="summary-detail-row">';
       html += '<button class="summary-detail-btn" onclick="showActionsLog(\'done\')">✅ פירוט - מה שבוצע</button>';

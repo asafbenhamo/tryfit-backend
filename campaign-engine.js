@@ -17,7 +17,7 @@ const shopify = require('./shopify-client');
 const mailer = require('./mailer');
 const compliance = require('./compliance');
 
-const MAX_PER_CAMPAIGN = 50;       // safety cap
+const MAX_PER_CAMPAIGN = 50000;    // hard technical ceiling (UI confirms above 500)
 const SEND_DELAY_MS = 600;         // small pace between customers
 
 // Cooldown: don't re-contact a customer we already messaged in the last N days.
