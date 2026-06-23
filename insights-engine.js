@@ -206,7 +206,7 @@ async function detectDueToReorder(shop) {
        WHERE ${notRecentlyContacted('c.email', 'c.phone')}
          AND ${notOptedOut('c.email', 'c.phone')}
        ORDER BY (d.days_since - d.gap) ASC, c.total_spent DESC
-       FETCH FIRST 8 ROWS ONLY`,
+       FETCH FIRST 40 ROWS ONLY`,
       [shop]
     );
     return r.rows.map(c => {

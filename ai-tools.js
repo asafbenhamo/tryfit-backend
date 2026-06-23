@@ -9,6 +9,7 @@
 
 const db = require('./database');
 const shopifyClient = require('./shopify-client');
+const rfmEngine = require('./rfm-engine');
 
 // ---------- helpers ----------
 
@@ -896,6 +897,49 @@ async function getTodayActivity(shopDomain, options = {}) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// RFM SEGMENTATION — Daniel's strongest analytical tool. Scores the WHOLE base
+// (Recency/Frequency/Monetary), maps each customer to a strategic segment, and
+// returns who to contact, the recommended offer for their value tier, WHY, and
+// each customer's last product (so the message can reference what they bought).
+// Use this to plan high-converting, personal campaigns instead of generic blasts.
+// ---------------------------------------------------------------------------
+async function getRFMSegments(shop, options = {}) {
+  try {
+    const segmentFilter = options.segment || null;       // e.g. 'cant_lose'
+    const maxCustomers = Math.min(parseInt(options.limit) || 50, 2000);
+    const scored = await rfmEngine.computeRFM(shop, { limit: 2000 });
+    if (scored.length === 0) {
+      return { ok: true, total: 0, summary: [], customers: [],
+        note: 'אין מספיק נתוני הזמנות לניתוח RFM עדיין.' };
+    }
+    const summary = rfmEngine.summarize(scored);
+    let pool = scored;
+    if (segmentFilter) pool = scored.filter(c => c.segment === segmentFilter);
+    // Default ordering: by segment priority (1 = act first), then by value.
+    pool.sort((a, b) => (a.priority - b.priority) || (b.monetary - a.monetary));
+    const customers = pool.slice(0, maxCustomers).map(c => ({
+      name: c.name, email: c.email, phone: c.phone,
+      segment: c.segment, segment_label: c.segment_label,
+      total_spent: c.monetary, orders: c.frequency, days_since_order: c.recency_days,
+      last_product: c.last_product,
+      recommended_discount: c.recommended_offer.percentage,
+      offer_type: c.recommended_offer.type,
+      why: c.reason
+    }));
+    return {
+      ok: true,
+      total: scored.length,
+      summary,                  // counts + value per segment, priority-sorted
+      customers,                // the actual people to contact (with personal data)
+      data_window: 'lifetime_rfm',
+      guidance: 'פנה קודם לפלחים בעדיפות 1 (אסור לאבד / בסיכון) — שם ה-ROI הכי גבוה. השתמש ב-last_product כדי לכתוב הודעה אישית ("ראינו שאהבת X"), ובהצעה המומלצת לכל פלח (לא אותו אחוז לכולם).'
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   getAudienceCounts,
   getCollections,
@@ -917,5 +961,6 @@ module.exports = {
   getProductVariants,
   getCustomerSizes,
   getTodayActivity,
-  getNewestProducts
+  getNewestProducts,
+  getRFMSegments
 };
