@@ -19,6 +19,7 @@ const whatsappSender = require("./whatsapp-sender");
 const mailer = require("./mailer");
 const compliance = require("./compliance");
 const agentEngine = require("./agent-engine");
+const morningBrief = require("./morning-brief");
 const attributionEngine = require("./attribution-engine");
 const pushEngine = require("./push-engine");
 
@@ -1141,6 +1142,20 @@ app.get("/api/daily-summary", async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Daily summary error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Morning brief: "while you slept" + today's RFM-based plan. The autonomous
+// experience — open the app, see what closed overnight and what's ready today.
+app.get("/api/morning-brief", async (req, res) => {
+  try {
+    if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+    const shop = resolveShop(req) || DEFAULT_SHOP;
+    const result = await morningBrief.getMorningBrief(shop);
+    res.json(result);
+  } catch (err) {
+    console.error("Morning brief error:", err);
     res.status(500).json({ ok: false, error: err.message });
   }
 });

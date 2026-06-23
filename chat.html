@@ -166,6 +166,17 @@
   .summary-greeting { font-size: 16px; font-weight: 800; color: #0a2540; margin-bottom: 4px; }
   .summary-sub { font-size: 12.5px; color: var(--text-dim); margin-bottom: 14px; }
   .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 6px; }
+  .plan-moves { display: flex; flex-direction: column; gap: 10px; }
+  .plan-move { background: #fff; border: 1px solid #dbe6fb; border-radius: 13px; padding: 13px 14px; }
+  .plan-move-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .plan-move-title { font-size: 14.5px; font-weight: 800; color: #0a2540; }
+  .plan-move-rev { font-size: 14px; font-weight: 800; color: #0f8a52; }
+  .plan-move-sub { font-size: 12px; color: var(--accent); font-weight: 700; margin: 3px 0 6px; }
+  .plan-move-why { font-size: 12.5px; color: var(--text-dim); line-height: 1.5; margin-bottom: 10px; }
+  .plan-move-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: 9px;
+    padding: 8px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer; font-family: 'Heebo', sans-serif;
+  }
   .summary-stat {
     background: #fff; border: 1px solid #e8eefb; border-radius: 12px; padding: 10px 12px;
   }
@@ -1536,7 +1547,37 @@
       const data = await res.json();
       if (!data.ok || !$('welcome')) return;
       renderDailySummary(data);
+      loadMorningPlan();
     } catch (err) { /* silent */ }
+  }
+
+  // The autonomous "today's plan" card — RFM-based, prioritized by ROI.
+  async function loadMorningPlan() {
+    try {
+      const res = await fetch('/api/morning-brief?password=' + encodeURIComponent(PASSWORD));
+      const d = await res.json();
+      if (!d.ok || !d.plan || !d.plan.moves || d.plan.moves.length === 0) return;
+      const slot = document.getElementById('homeSummarySlot') || ($('welcome') && $('welcome').parentNode);
+      if (!slot) return;
+      const card = document.createElement('div');
+      card.className = 'summary-card';
+      let html = '<div class="summary-greeting">📋 התוכנית שלי להיום</div>';
+      html += '<div class="summary-sub">ניתחתי את כל הלקוחות. הנה המהלכים עם הכי הרבה פוטנציאל — לפי סדר עדיפות.</div>';
+      html += '<div class="plan-moves">';
+      d.plan.moves.forEach(m => {
+        html += '<div class="plan-move">'
+          + '<div class="plan-move-top"><span class="plan-move-title">' + m.label + '</span>'
+          + '<span class="plan-move-rev">~₪' + (m.projected_revenue||0).toLocaleString() + '</span></div>'
+          + '<div class="plan-move-sub">' + m.customers + ' לקוחות · הנחה מומלצת ' + m.discount + '%</div>'
+          + '<div class="plan-move-why">' + (m.why || '') + '</div>'
+          + '<button class="plan-move-btn" onclick="sendPrompt(\'תבנה ותשלח קמפיין לפלח ' + m.label + ' (' + m.segment + ') לפי ניתוח ה-RFM, עם הודעות אישיות לפי מה שכל לקוחה קנתה\')">שתבצע את המהלך הזה ←</button>'
+          + '</div>';
+      });
+      html += '</div>';
+      html += '<div class="summary-line" style="margin-top:10px">סה"כ פוטנציאל היום: <b>~₪' + (d.plan.projected||0).toLocaleString() + '</b> מ-' + d.plan.total_customers + ' לקוחות</div>';
+      card.innerHTML = html;
+      slot.appendChild(card);
+    } catch (e) { /* silent */ }
   }
   function renderDailySummary(d) {
     const w = $('welcome');

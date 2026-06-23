@@ -57,6 +57,17 @@ async function pullSegment(shop, task) {
         name: [c.first_name, c.last_name].filter(Boolean).join(' '), email: c.email || '', phone: c.phone || '',
         est_value: parseFloat(c.total_spent || 0) * 0.1
       }));
+    } else if (task.move_type === 'rfm_segment') {
+      // NEW: pull a specific RFM segment, carrying each customer's last product
+      // so the message can be genuinely personal ("we saw you loved X").
+      const segKey = (task.params && task.params.rfm_segment) || (task.segment) || null;
+      const r = await aiTools.getRFMSegments(shop, { segment: segKey, limit });
+      rows = (r.customers || []).map(c => ({
+        name: c.name || '', email: c.email || '', phone: c.phone || '',
+        est_value: parseFloat(c.total_spent || 0) * 0.15,
+        last_product: c.last_product || null,
+        rec_discount: c.recommended_discount || task.percentage || 10
+      }));
     }
   } catch (e) {
     console.error(`[agent] pullSegment ${task.move_type} failed:`, e.message);
@@ -84,6 +95,10 @@ function templateFor(task) {
     hot_product: {
       subject: 'הפריט שכולן מדברות עליו 🔥',
       body: `{NAME}, יש לנו פריט חדש שעף מהמדפים וחשבנו שתאהבי!\nהנה קוד אישי של ${pct}% כדי שתתפסי אותו לפני שייגמר: {COUPON}`
+    },
+    rfm_segment: {
+      subject: 'חשבנו עלייך 💜',
+      body: `היי {NAME} 💜 {PRODUCT_LINE}שמרנו לך קוד אישי של ${pct}%: {COUPON}\nנשמח לראות אותך שוב! 🛍️`
     }
   };
   return map[task.move_type] || map.dormant_vip;

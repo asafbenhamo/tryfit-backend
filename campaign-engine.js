@@ -181,8 +181,16 @@ async function runCampaign(id, shop, segment, template) {
       }
 
       // Personalize message
+      // {PRODUCT_LINE}: if we know the customer's last product, weave in a warm,
+      // personal reference ("we saw you loved X") — the key edge over generic blasts.
+      let productLine = '';
+      if (cust.last_product) {
+        productLine = `ראינו שאהבת את ${cust.last_product} - חשבנו שיעניין אותך לחזור. `;
+      }
       let body = (template.body || '')
         .replace(/\{NAME\}/g, cust.name || '')
+        .replace(/\{PRODUCT_LINE\}/g, productLine)
+        .replace(/\{PRODUCT\}/g, cust.last_product || '')
         .replace(/\{COUPON\}/g, finalCode || '');
       // Only auto-append the "קוד אישי" + validity lines when WE generated a personal
       // code. When the merchant supplied their own fixed code, the code already lives
