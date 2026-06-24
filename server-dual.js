@@ -20,6 +20,7 @@ const mailer = require("./mailer");
 const compliance = require("./compliance");
 const agentEngine = require("./agent-engine");
 const morningBrief = require("./morning-brief");
+const smsSender = require("./sms-sender");
 const attributionEngine = require("./attribution-engine");
 const pushEngine = require("./push-engine");
 
@@ -1146,6 +1147,12 @@ app.get("/api/daily-summary", async (req, res) => {
   }
 });
 
+// SMS (TextMe) configuration status — tells the UI whether to enable the SMS channel.
+app.get("/api/sms/status", (req, res) => {
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+  res.json({ ok: true, configured: smsSender.isConfigured() });
+});
+
 // Morning brief: "while you slept" + today's RFM-based plan. The autonomous
 // experience — open the app, see what closed overnight and what's ready today.
 app.get("/api/morning-brief", async (req, res) => {
@@ -1341,7 +1348,7 @@ const campaignEngine = require("./campaign-engine");
 
 app.post("/api/campaign/start", express.json(), async (req, res) => {
   try {
-    const { password, campaign_type, segment, template } = req.body;
+    const { password, campaign_type, segment, template, channels } = req.body;
     if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     if (!Array.isArray(segment) || segment.length === 0) {
@@ -1350,7 +1357,7 @@ app.post("/api/campaign/start", express.json(), async (req, res) => {
     if (!template || !template.body) {
       return res.status(400).json({ ok: false, error: "חסר תוכן הודעה" });
     }
-    const { id } = campaignEngine.startCampaign(shop, { campaign_type, segment, template });
+    const { id } = campaignEngine.startCampaign(shop, { campaign_type, segment, template, channels });
     res.json({ ok: true, campaign_id: id, total: Math.min(segment.length, campaignEngine.MAX_PER_CAMPAIGN) });
   } catch (err) {
     console.error("Campaign start error:", err);

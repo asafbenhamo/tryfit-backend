@@ -96,19 +96,22 @@ function personalCode(nameOrEmail, pct) {
  * template: { percentage, days_valid, subject, body }  body may contain {NAME} and {COUPON}
  * Returns { id } immediately; work continues async.
  */
-function startCampaign(shop, { campaign_type, segment, template }) {
+function startCampaign(shop, { campaign_type, segment, template, channels }) {
   const id = newCampaignId();
   const capped = (segment || []).slice(0, MAX_PER_CAMPAIGN);
+  const chans = Array.isArray(channels) && channels.length ? channels : ['whatsapp', 'email'];
 
   campaigns[id] = {
     shop, campaign_type: campaign_type || 'campaign',
     status: 'running', total: capped.length, done: 0,
     sent: 0, prepared: 0, skipped: 0, failed: 0, revenue_potential: 0,
+    channels: chans,
     whatsapp: [],   // prepared WhatsApp links the merchant will click to send
+    sms_sent: 0,
     started_at: new Date().toISOString(), finished_at: null, log: []
   };
 
-  runCampaign(id, shop, capped, template).catch(err => {
+  runCampaign(id, shop, capped, template, chans).catch(err => {
     console.error('[campaign] fatal:', err.message);
     if (campaigns[id]) { campaigns[id].status = 'error'; campaigns[id].error = err.message; }
   });
@@ -116,8 +119,13 @@ function startCampaign(shop, { campaign_type, segment, template }) {
   return { id };
 }
 
-async function runCampaign(id, shop, segment, template) {
+async function runCampaign(id, shop, segment, template, channels) {
   const c = campaigns[id];
+  const chans = channels || c.channels || ['whatsapp', 'email'];
+  const wantWhatsapp = chans.includes('whatsapp');
+  const wantEmail = chans.includes('email');
+  const wantSms = chans.includes('sms');
+  const smsSender = require('./sms-sender');
   const pct = parseInt(template.percentage) || 10;
   const amountIls = template.amount_ils ? parseFloat(template.amount_ils) : null;
   const isFixed = !!amountIls && amountIls > 0;
@@ -206,74 +214,61 @@ async function runCampaign(id, shop, segment, template) {
       BASE = String(BASE).replace(/^[^=]*=\s*/, '').replace(/['"\s]/g, '').replace(/\/+$/, '');
       if (!/^https?:\/\//.test(BASE)) BASE = "https://tryfit-backend-production.up.railway.app";
 
-      if (hasPhone) {
-        // Create the action row FIRST so we can tie a tracking link to it. Attribution
-        // will credit the advisor only if she clicks this link (or uses the coupon).
-        let actionId = null;
-        try {
-          const ins = await db.query(
-            `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-            [shop, c.campaign_type, contact.email, contact.phone,
-             JSON.stringify({ channel: 'whatsapp', campaign_id: id, prepared: true, customer_name: cust.name || null }), finalCode]
-          );
-          actionId = ins.rows[0] && ins.rows[0].id;
-        } catch (e) { console.error('[campaign] log:', e.message); }
+      // Create ONE action row (for attribution) + ONE tracking link, shared across
+      // whichever channels the merchant chose for this customer.
+      let actionId = null;
+      try {
+        const ins = await db.query(
+          `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [shop, c.campaign_type, contact.email, contact.phone,
+           JSON.stringify({ channels: chans, campaign_id: id, customer_name: cust.name || null }), finalCode]
+        );
+        actionId = ins.rows[0] && ins.rows[0].id;
+      } catch (e) { console.error('[campaign] log:', e.message); }
 
-        // Build a unique tracking link and append it to the message.
-        let buyLink = shopify.getPublicDomain(shop);
-        try {
-          const clickTracker = require('./click-tracker');
-          const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone, couponCode: finalCode });
-          buyLink = `${BASE}/go/${token}`;
-        } catch (e) { /* fall back to plain store link */ }
-        body += `\n\n🛍️ למימוש ההטבה ולרכישה:\n${buyLink}`;
+      let buyLink = shopify.getPublicDomain(shop);
+      try {
+        const clickTracker = require('./click-tracker');
+        const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone, couponCode: finalCode });
+        buyLink = `${BASE}/go/${token}`;
+      } catch (e) { /* fall back to plain store link */ }
+      const fullBody = body + `\n\n🛍️ למימוש ההטבה ולרכישה:\n${buyLink}`;
 
+      let didSomething = false;
+
+      // ---- WhatsApp: prepare a ready wa.me link for the merchant to click ----
+      if (wantWhatsapp && hasPhone) {
         let wa = String(contact.phone).replace(/[^0-9]/g, '');
         if (wa.startsWith('0')) wa = '972' + wa.slice(1);
-        const waLink = `https://wa.me/${wa}?text=${encodeURIComponent(body)}`;
+        const waLink = `https://wa.me/${wa}?text=${encodeURIComponent(fullBody)}`;
+        c.whatsapp.push({ name: cust.name || '', phone: contact.phone, coupon: finalCode, link: waLink, sent: false });
+        c.prepared++;
+        didSomething = true;
+      }
 
-        c.whatsapp.push({
-          name: cust.name || '',
-          phone: contact.phone,
-          coupon: finalCode,
-          link: waLink,
-          sent: false
-        });
-        c.prepared++; c.done++;
-        c.revenue_potential += parseFloat(cust.est_value || 0);
-
-      } else if (contact.email) {
-        // Create the action first to tie a tracking link to it.
-        let actionId = null;
+      // ---- SMS: send immediately via TextMe (TextMe appends its own opt-out link) ----
+      if (wantSms && hasPhone && smsSender.isConfigured()) {
         try {
-          const ins = await db.query(
-            `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
-             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-            [shop, c.campaign_type, contact.email, contact.phone,
-             JSON.stringify({ channel: 'email', campaign_id: id, customer_name: cust.name || null }), finalCode]
-          );
-          actionId = ins.rows[0] && ins.rows[0].id;
-        } catch (e) { console.error('[campaign] log:', e.message); }
+          const r = await smsSender.sendOne(shop, { phone: contact.phone, message: fullBody });
+          if (r.ok) { c.sms_sent++; didSomething = true; }
+          else if (!r.skipped) { c.log.push({ customer: cust.name, sms_failed: r.error }); }
+        } catch (e) { c.log.push({ customer: cust.name, sms_failed: e.message }); }
+      }
 
-        let buyLink = shopify.getPublicDomain(shop);
-        try {
-          const clickTracker = require('./click-tracker');
-          const token = await clickTracker.createLink(shop, { actionId, email: contact.email, phone: contact.phone, couponCode: finalCode });
-          buyLink = `${BASE}/go/${token}`;
-        } catch (e) { /* fall back */ }
-        body += `\n\n🛍️ למימוש ההטבה ולרכישה:\n${buyLink}`;
+      // ---- Email: auto-send (gate already checked) ----
+      if (wantEmail && contact.email) {
+        const html = mailer.buildHtmlEmail(fullBody, { brand: '770', to: contact.email });
+        const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || 'הודעה מ-770', html, text: fullBody });
+        if (sent.ok) { c.sent++; didSomething = true; }
+        else { c.log.push({ customer: cust.email, failed: sent.error }); }
+      }
 
-        // Email: auto-send through the gate (already checked above)
-        const html = mailer.buildHtmlEmail(body, { brand: '770', to: contact.email });
-        const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || 'הודעה מ-770', html, text: body });
-        if (!sent.ok) { c.failed++; c.done++; c.log.push({ customer: cust.email, failed: sent.error }); continue; }
-
-        c.sent++; c.done++;
+      if (didSomething) {
+        c.done++;
         c.revenue_potential += parseFloat(cust.est_value || 0);
-
       } else {
-        c.skipped++; c.done++; c.log.push({ customer: cust.name, skipped: 'no_contact' }); continue;
+        c.skipped++; c.done++; c.log.push({ customer: cust.name, skipped: 'no_matching_channel' });
       }
 
       await new Promise(r => setTimeout(r, SEND_DELAY_MS));

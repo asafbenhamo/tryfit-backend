@@ -177,6 +177,16 @@
     background: var(--accent); color: #fff; border: none; border-radius: 9px;
     padding: 8px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer; font-family: 'Heebo', sans-serif;
   }
+  .channel-pick { display: flex; flex-direction: column; gap: 7px; margin: 6px 0 10px; }
+  .chan-opt {
+    display: flex; align-items: center; gap: 9px; border: 1px solid #dbe6fb;
+    border-radius: 9px; padding: 10px 12px; cursor: pointer; font-size: 13.5px; font-weight: 600;
+    background: #fff; transition: border-color .15s;
+  }
+  .chan-opt:hover { border-color: var(--accent); }
+  .chan-opt input { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; }
+  .chan-disabled { opacity: 0.5; cursor: not-allowed; }
+  .chan-disabled input { cursor: not-allowed; }
   .summary-stat {
     background: #fff; border: 1px solid #e8eefb; border-radius: 12px; padding: 10px 12px;
   }
@@ -1166,6 +1176,17 @@
     } catch (e) { window._waConfigured = false; }
   }
 
+  // Is SMS (TextMe) configured for this store? Controls whether the SMS channel
+  // checkbox is enabled in the campaign card.
+  window._smsConfigured = false;
+  async function loadSmsConfig() {
+    try {
+      const res = await fetch('/api/sms/status?password=' + encodeURIComponent(PASSWORD));
+      const d = await res.json();
+      window._smsConfigured = !!(d && d.ok && d.configured);
+    } catch (e) { window._smsConfigured = false; }
+  }
+
   // Load and show the store's WhatsApp credit balance in the sidebar.
   async function loadCreditsBalance() {
     try {
@@ -1465,6 +1486,7 @@
     loadMoneyCounter();
     loadCreditsBalance();
     loadWaConfig();
+    loadSmsConfig();
     setInterval(loadMoneyCounter, 60000);
     setupPushNotifications();
   }
@@ -2421,6 +2443,15 @@
     else if (f.amount_ils) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ₪' + esc(f.amount_ils) + '</div>';
     else if (f.percentage) html += '<div class="action-row"><span>קופון אישי לכל אחת:</span> ' + esc(f.percentage) + '%</div>';
     if (totalValue > 0) html += '<div class="action-row"><span>צפי הכנסה:</span> ₪' + Math.round(totalValue).toLocaleString() + '</div>';
+    // Channel selector — the merchant picks which channels to send through.
+    // Same message goes out on every selected channel.
+    const smsReady = !!window._smsConfigured;
+    html += '<div class="action-row" style="margin-top:8px"><span>באיזה ערוצים לשלוח?</span></div>';
+    html += '<div class="channel-pick" data-camp="' + camp.id + '">'
+      + '<label class="chan-opt"><input type="checkbox" class="chan-cb" value="whatsapp" checked> <span>📱 וואטסאפ</span></label>'
+      + '<label class="chan-opt"><input type="checkbox" class="chan-cb" value="email" checked> <span>✉️ מייל</span></label>'
+      + '<label class="chan-opt' + (smsReady ? '' : ' chan-disabled') + '"><input type="checkbox" class="chan-cb" value="sms"' + (smsReady ? '' : ' disabled') + '> <span>💬 SMS' + (smsReady ? '' : ' (ממתין לאישור)') + '</span></label>'
+      + '</div>';
     // Show send-mode toggle ONLY for stores that have automatic WhatsApp configured.
     const autoAvailable = window._waConfigured && window._waTemplates && window._waTemplates.length > 0;
     if (autoAvailable) {
@@ -2458,11 +2489,17 @@
       const sel = card.querySelector('input[name="sendmode_' + camp.id + '"]:checked');
       return sel ? sel.value : 'manual';
     }
+    function getChannels() {
+      const boxes = card.querySelectorAll('.chan-cb:checked');
+      const chans = Array.from(boxes).map(b => b.value);
+      return chans.length ? chans : ['whatsapp']; // default safety
+    }
 
     approveBtn.onclick = () => {
       const mode = getSendMode();
       if (mode === 'auto') { startAutoCampaign(card, f, custs, custCount, approveBtn, cancelBtn, resultDiv); return; }
       // ---- manual (existing flow) ----
+      const channels = getChannels();
       confirmSendGate(custCount, 'whatsapp', async () => {
       approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'מתחיל...';
       try {
@@ -2471,6 +2508,7 @@
           body: JSON.stringify({
             password: PASSWORD, campaign_type: f.type || 'campaign',
             segment: custs,
+            channels: channels,
             template: { percentage: f.percentage ? parseInt(f.percentage) : 10,
               amount_ils: f.amount_ils ? parseFloat(f.amount_ils) : null,
               combine: (f.combine === 'no' || f.combine === 'false') ? 'no' : 'yes',
