@@ -1174,6 +1174,25 @@ app.get("/api/sms/status", (req, res) => {
   res.json({ ok: true, configured: smsSender.isConfigured() });
 });
 
+// SMS test send — lets you verify the TextMe connection with a single message
+// before trusting it in campaigns. Admin only.
+//   POST { password, phone, message? }
+app.post("/api/sms/test", express.json(), async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    if (!smsSender.isConfigured()) return res.status(400).json({ ok: false, error: "SMS לא מוגדר (חסרים משתני TEXTME ב-Railway)" });
+    const shop = resolveShop(req) || DEFAULT_SHOP;
+    const phone = (req.body.phone || "").trim();
+    const message = (req.body.message || "בדיקת מערכת SMS מהיועץ החכם ✅").trim();
+    if (!phone) return res.status(400).json({ ok: false, error: "חסר מספר טלפון" });
+    const r = await smsSender.sendOne(shop, { phone, message });
+    res.json({ ok: r.ok, result: r });
+  } catch (err) {
+    console.error("sms test error:", err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // Morning brief: "while you slept" + today's RFM-based plan. The autonomous
 // experience — open the app, see what closed overnight and what's ready today.
 app.get("/api/morning-brief", async (req, res) => {
