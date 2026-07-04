@@ -25,7 +25,9 @@
 
 const compliance = require('./compliance');
 
-const FLASHY_BASE = 'https://flashyapp.com/api';
+// Base URL for Flashy's REST API. Flashy moved off the old flashyapp.com/api host;
+// the current base is my.flashy.app. Overridable via env in case it changes again.
+const FLASHY_BASE = process.env.FLASHY_API_BASE || 'https://my.flashy.app/api';
 
 function apiKey()        { return process.env.FLASHY_API_KEY || null; }
 function listId()        { return process.env.FLASHY_LIST_ID || '31840'; }
