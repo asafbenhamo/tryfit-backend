@@ -1903,45 +1903,71 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
 
     const hasPhone = phone && String(phone).trim().length >= 8;
 
-    if (hasPhone) {
-      const optedOut = await compliance.isOptedOut(shop, { email, phone });
-      if (optedOut) {
-        return res.json({ ok: false, blocked: true, reason: "opted_out",
-          detail: "הלקוחה ביקשה לא לקבל הודעות. לא ניתן לפנות אליה." });
-      }
+    // Which channels did the merchant pick? Default: WhatsApp if phone, else email.
+    const chans = Array.isArray(req.body.channels) && req.body.channels.length
+      ? req.body.channels
+      : (hasPhone ? ['whatsapp'] : ['email']);
+
+    // Opt-out gate once (covers Flashy-imported + local opt-outs).
+    if (await compliance.isOptedOut(shop, { email, phone })) {
+      return res.json({ ok: false, blocked: true, reason: "opted_out",
+        detail: "הלקוחה ביקשה לא לקבל הודעות. לא ניתן לפנות אליה." });
+    }
+
+    result.steps.channels = {};
+    let didSomething = false;
+
+    // ---- WhatsApp: prepare a ready link for manual send ----
+    if (chans.includes('whatsapp') && hasPhone) {
       let waPhone = String(phone).replace(/[^0-9]/g, "");
       if (waPhone.startsWith("0")) waPhone = "972" + waPhone.slice(1);
       const waUrl = `https://wa.me/${waPhone}?text=${encodeURIComponent(finalBody)}`;
-      result.steps.message = { channel: "whatsapp", ready_link: waUrl, note: "לחץ לשליחה ב-WhatsApp" };
-
+      result.steps.channels.whatsapp = { channel: "whatsapp", ready_link: waUrl, note: "לחץ לשליחה ב-WhatsApp" };
+      result.steps.message = result.steps.channels.whatsapp; // backward-compat
+      didSomething = true;
       await db.query(
         `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [shop, action_type || 'whatsapp_prepared', email || null, phone, JSON.stringify({ channel: 'whatsapp', subject: message_subject, customer_name: customer_name || null }), couponCode]
       ).catch(e => console.error("log:", e.message));
+    }
 
-    } else if (email) {
+    // ---- SMS: send automatically via TextMe ----
+    if (chans.includes('sms') && hasPhone && smsSender.isConfigured()) {
+      const smsRes = await smsSender.sendOne(shop, { phone, message: finalBody });
+      result.steps.channels.sms = { channel: "sms", ok: smsRes.ok, error: smsRes.error || null };
+      if (smsRes.ok) {
+        didSomething = true;
+        await db.query(
+          `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [shop, action_type || 'sms_sent', email || null, phone, JSON.stringify({ channel: 'sms', customer_name: customer_name || null }), couponCode]
+        ).catch(e => console.error("log:", e.message));
+      }
+    }
+
+    // ---- Email: send automatically ----
+    if (chans.includes('email') && email) {
       const gate = await compliance.canContactCustomer(shop, { email, phone });
-      if (!gate.allowed) {
-        result.steps.message = { channel: "email", ok: false, blocked: true, reason: gate.reason, detail: gate.detail };
-        return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
+      if (gate.allowed) {
+        const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: storeBrand(shop), to: email, shop });
+        const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הודעה מ-770", html, text: finalBody });
+        result.steps.channels.email = { channel: "email", ok: sent.ok, error: sent.error || null, id: sent.id || null };
+        if (sent.ok) {
+          didSomething = true;
+          await db.query(
+            `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [shop, action_type || 'email_sent', email, phone || null, JSON.stringify({ channel: 'email', subject: message_subject, customer_name: customer_name || null }), couponCode]
+          ).catch(e => console.error("log:", e.message));
+        }
+      } else {
+        result.steps.channels.email = { channel: "email", ok: false, blocked: true, reason: gate.reason, detail: gate.detail };
       }
-      const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: storeBrand(shop), to: email, shop });
-      const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הודעה מ-770", html, text: finalBody });
-      if (!sent.ok) {
-        result.steps.message = { channel: "email", ok: false, error: sent.error };
-        return res.status(400).json({ ok: false, error: "שליחת המייל נכשלה: " + sent.error, steps: result.steps });
-      }
-      result.steps.message = { channel: "email", ok: true, id: sent.id };
+    }
 
-      await db.query(
-        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [shop, action_type || 'email_sent', email, phone || null, JSON.stringify({ channel: 'email', subject: message_subject, customer_name: customer_name || null }), couponCode]
-      ).catch(e => console.error("log:", e.message));
-
-    } else {
-      return res.status(400).json({ ok: false, error: "אין דרך ליצור קשר (חסר טלפון ומייל)" });
+    if (!didSomething) {
+      return res.status(400).json({ ok: false, error: "לא נשלח בשום ערוץ (בדוק שבחרת ערוץ מתאים ושיש פרטי קשר)", steps: result.steps });
     }
 
     res.json(result);

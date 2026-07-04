@@ -2902,14 +2902,16 @@
     if (f.subject) html += '<div class="action-row"><span>נושא:</span> ' + esc(f.subject) + '</div>';
     if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\{COUPON\}/g,'[הקוד האישי שלך]').replace(/\n/g,'<br>') + '</div>';
     const isWa = (f.phone && f.phone.length >= 8);
-    const autoAvailAction = isWa && window._waConfigured && window._waTemplates && window._waTemplates.length > 0;
+    const smsReady = !!window._smsConfigured;
     const actModeId = 'am_' + Math.random().toString(36).slice(2, 8);
-    if (autoAvailAction) {
-      html += '<div class="send-mode" style="display:flex;gap:8px;margin:6px 0 8px">'
-        + '<label style="flex:1;border:1px solid #dbe6fb;border-radius:8px;padding:8px;cursor:pointer;font-size:13px;text-align:center"><input type="radio" name="' + actModeId + '" value="manual" checked> ידני (אני שולח)</label>'
-        + '<label style="flex:1;border:1px solid #dbe6fb;border-radius:8px;padding:8px;cursor:pointer;font-size:13px;text-align:center"><input type="radio" name="' + actModeId + '" value="auto"> אוטומטי 💬</label>'
-        + '</div>';
-    }
+    // Channel picker: merchant chooses WhatsApp / Email / SMS (one or more).
+    // Email + SMS send automatically; WhatsApp opens a ready link to send by hand.
+    html += '<div class="action-row" style="margin-top:8px"><span>באיזה ערוצים לשלוח?</span></div>';
+    html += '<div class="channel-pick" data-act="' + actModeId + '">'
+      + (isWa ? '<label class="chan-opt"><input type="checkbox" class="chan-cb" value="whatsapp" checked> <span>📱 וואטסאפ (קישור לשליחה ידנית)</span></label>' : '')
+      + (f.email ? '<label class="chan-opt"><input type="checkbox" class="chan-cb" value="email"' + (isWa ? '' : ' checked') + '> <span>✉️ מייל (נשלח אוטומטית)</span></label>' : '')
+      + (isWa ? '<label class="chan-opt' + (smsReady ? '' : ' chan-disabled') + '"><input type="checkbox" class="chan-cb" value="sms"' + (smsReady ? '' : ' disabled') + '> <span>💬 SMS' + (smsReady ? ' (נשלח אוטומטית)' : ' (ממתין לאישור)') + '</span></label>' : '')
+      + '</div>';
     html += '<div class="action-btns"><button class="action-approve">אשר ושלח ←</button><button class="action-cancel">בטל</button></div>';
     html += '<div class="action-result" style="display:none"></div>';
     card.innerHTML = html;
@@ -2920,17 +2922,12 @@
     const resultDiv = card.querySelector('.action-result');
 
     cancelBtn.onclick = () => { card.remove(); };
-    function actSendMode() {
-      const sel = card.querySelector('input[name="' + actModeId + '"]:checked');
-      return sel ? sel.value : 'manual';
+    function actChannels() {
+      const boxes = card.querySelectorAll('.channel-pick .chan-cb:checked');
+      const chans = Array.from(boxes).map(b => b.value);
+      return chans.length ? chans : (isWa ? ['whatsapp'] : ['email']);
     }
     approveBtn.onclick = async () => {
-      if (actSendMode() === 'auto') {
-        const segment = [{ name: f.name || '', phone: f.phone || null, email: f.email || null, est_value: 0 }];
-        startAutoCampaign(card, { type: f.type || 'win_back', percentage: f.coupon ? parseInt(f.coupon) : null,
-          amount_ils: f.coupon_ils ? parseFloat(f.coupon_ils) : null }, segment, 1, approveBtn, cancelBtn, resultDiv);
-        return;
-      }
       approveBtn.disabled = true; cancelBtn.disabled = true;
       approveBtn.textContent = 'שולח...';
       try {
@@ -2940,6 +2937,7 @@
           body: JSON.stringify({
             password: PASSWORD,
             action_type: f.type || 'campaign',
+            channels: actChannels(),
             email: f.email || null,
             phone: f.phone || null,
             customer_name: f.name || null,
@@ -2959,11 +2957,16 @@
         if (data.ok) {
           let msg = '✅ בוצע! ';
           if (data.steps && data.steps.coupon && data.steps.coupon.ok) msg += 'קופון ' + data.steps.coupon.code + ' נוצר. ';
-          if (data.steps && data.steps.message) {
-            if (data.steps.message.channel === 'email' && data.steps.message.ok) msg += 'המייל נשלח.';
-            else if (data.steps.message.channel === 'whatsapp') {
-              msg += '<br><a href="' + data.steps.message.ready_link + '" target="_blank" class="wa-link">📱 לחץ לשליחה ב-WhatsApp</a>';
-            }
+          const ch = (data.steps && data.steps.channels) || {};
+          const parts = [];
+          if (ch.email && ch.email.ok) parts.push('✉️ מייל נשלח');
+          if (ch.sms && ch.sms.ok) parts.push('💬 SMS נשלח');
+          if (ch.sms && ch.sms.ok === false) parts.push('💬 SMS נכשל: ' + (ch.sms.error || ''));
+          if (parts.length) msg += '<br>' + parts.join(' · ');
+          if (ch.whatsapp && ch.whatsapp.ready_link) {
+            msg += '<br><a href="' + ch.whatsapp.ready_link + '" target="_blank" class="wa-link">📱 לחץ לשליחה ב-WhatsApp</a>';
+          } else if (data.steps && data.steps.message && data.steps.message.channel === 'whatsapp' && data.steps.message.ready_link) {
+            msg += '<br><a href="' + data.steps.message.ready_link + '" target="_blank" class="wa-link">📱 לחץ לשליחה ב-WhatsApp</a>';
           }
           resultDiv.innerHTML = msg;
           resultDiv.className = 'action-result success';
