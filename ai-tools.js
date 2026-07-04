@@ -10,6 +10,7 @@
 const db = require('./database');
 const shopifyClient = require('./shopify-client');
 const rfmEngine = require('./rfm-engine');
+const smsSender = require('./sms-sender');
 
 // ---------- helpers ----------
 
@@ -940,6 +941,28 @@ async function getRFMSegments(shop, options = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// SEND SMS — send a single SMS to a specific number via TextMe. Respects opt-out.
+// Used when the merchant asks the advisor directly to text someone (or to test).
+// ---------------------------------------------------------------------------
+async function sendSms(shop, options = {}) {
+  try {
+    if (!smsSender.isConfigured()) {
+      return { ok: false, error: 'SMS לא מוגדר עדיין (חסרים מפתחות TextMe).' };
+    }
+    const phone = (options.phone || '').trim();
+    const message = (options.message || '').trim();
+    if (!phone) return { ok: false, error: 'חסר מספר טלפון.' };
+    if (!message) return { ok: false, error: 'חסר תוכן הודעה.' };
+    const r = await smsSender.sendOne(shop, { phone, message });
+    if (r.ok) return { ok: true, sent_to: phone, note: 'ה-SMS נשלח.' };
+    if (r.skipped) return { ok: false, error: 'הנמען הסיר את עצמו מדיוור — לא נשלח.' };
+    return { ok: false, error: `שליחה נכשלה: ${r.error || 'לא ידוע'}`, detail: r.detail || null };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 module.exports = {
   getAudienceCounts,
   getCollections,
@@ -962,5 +985,6 @@ module.exports = {
   getCustomerSizes,
   getTodayActivity,
   getNewestProducts,
-  getRFMSegments
+  getRFMSegments,
+  sendSms
 };

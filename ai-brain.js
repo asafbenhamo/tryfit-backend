@@ -408,6 +408,18 @@ const TOOL_DEFINITIONS = [
     }
   },
   {
+    name: "sendSms",
+    description: "שולח SMS בודד למספר טלפון ספציפי דרך TextMe. השתמש בזה כשבעל החנות מבקש לשלוח SMS למישהו ספציפי, או לבדיקת המערכת ('תשלח SMS לבדיקה למספר X'). ההודעה מכבדת אוטומטית את רשימת ההסרה (לא ישלח למי שהסיר). ציין phone (מספר בפורמט 05XXXXXXXX) ו-message (תוכן ההודעה).",
+    input_schema: {
+      type: "object",
+      properties: {
+        phone: { type: "string", description: "מספר הטלפון לשליחה (05XXXXXXXX)" },
+        message: { type: "string", description: "תוכן ה-SMS" }
+      },
+      required: ["phone", "message"]
+    }
+  },
+  {
     name: "rememberPreference",
     description: "שמור העדפה או הנחיה קבועה שבעל החנות נותן, כדי שתחול על כל השיחות העתידיות. השתמש בזה כשבעל החנות אומר משהו שצריך לזכור לטווח ארוך - למשל 'אל תפנה ללקוחות מתחת ל-100 שקל', 'אני מעדיף וואטסאפ על מייל', 'תמיד תציע הנחה של 10%', 'אל תפנה ללקוחות מאשדוד'. אל תשתמש בזה לבקשות חד-פעמיות, רק להעדפות קבועות.",
     input_schema: {
@@ -442,7 +454,8 @@ const TOOL_IMPL = {
   getCustomerSizes: aiTools.getCustomerSizes,
   getTodayActivity: aiTools.getTodayActivity,
   getNewestProducts: aiTools.getNewestProducts,
-  getRFMSegments: aiTools.getRFMSegments
+  getRFMSegments: aiTools.getRFMSegments,
+  sendSms: aiTools.sendSms
 };
 
 // Recursively strip heavy/PII-laden fields before sending to Claude.
