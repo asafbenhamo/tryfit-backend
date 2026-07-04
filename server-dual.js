@@ -23,6 +23,7 @@ const morningBrief = require("./morning-brief");
 const smsSender = require("./sms-sender");
 const attributionEngine = require("./attribution-engine");
 const pushEngine = require("./push-engine");
+const flashySync = require("./flashy-sync");
 
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
@@ -179,6 +180,25 @@ function verifyShopifyWebhook(req, res, next) {
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok", mode: BACKEND_MODE });
+});
+
+// ===== Flashy opt-out sync =====
+// Incoming webhook from Flashy: when a contact unsubscribes there, mirror it into
+// our local opt-out list so the advisor never contacts them. Fail-safe by design.
+app.post("/webhook/flashy", express.json({ limit: "1mb" }), async (req, res) => {
+  try {
+    const secret = req.query.secret || req.headers["x-flashy-secret"] || null;
+    const result = await flashySync.handleWebhook(req.body, secret);
+    // Always 200 so Flashy doesn't retry-storm us; the result carries details.
+    res.status(200).json(result);
+  } catch (err) {
+    console.error("flashy webhook error:", err.message);
+    res.status(200).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/webhook/flashy/status", (req, res) => {
+  res.json({ ok: true, ...flashySync.status() });
 });
 
 app.get("/privacy", (req, res) => {
@@ -851,6 +871,7 @@ app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
     const { email, phone } = req.body;
     if (!email && !phone) return res.status(400).json({ ok: false, error: "צריך מייל או טלפון" });
     const r = await compliance.addOptOut(shop, { email: email || null, phone: phone || null, reason: "merchant_manual" });
+    flashySync.pushUnsubscribe({ email: email || null, phone: phone || null }).catch(() => {});
     res.json({ ok: true, removed: { email: email || null, phone: phone || null }, result: r });
   } catch (err) {
     console.error("optout/remove-customer error:", err);
@@ -1247,6 +1268,7 @@ app.post("/api/optout/add", express.json(), async (req, res) => {
     const shop = resolveShop(req);
     if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
     const result = await compliance.addOptOut(shop, { email, phone, reason });
+    flashySync.pushUnsubscribe({ email: email || null, phone: phone || null }).catch(() => {});
     res.json(result);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -1259,6 +1281,7 @@ app.get("/unsubscribe", async (req, res) => {
   // Shop can be carried in the unsubscribe link (?shop=...); fall back to 770.
   const shop = (req.query.shop || DEFAULT_SHOP).toLowerCase().trim();
   await compliance.addOptOut(shop, { email, reason: "email_link" });
+  flashySync.pushUnsubscribe({ email: email || null }).catch(() => {});
   res.send(`<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
     <style>body{font-family:Arial,sans-serif;text-align:center;padding:60px 20px;color:#333}</style></head>
     <body><h2>הוסרת מרשימת התפוצה</h2><p>לא תקבל/י יותר הודעות שיווקיות. תודה.</p></body></html>`);
