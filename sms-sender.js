@@ -65,11 +65,34 @@ async function sendOne(shop, { phone, message, sender }) {
     });
     const raw = await r.text();
     let data; try { data = JSON.parse(raw); } catch (e) { data = { raw }; }
-    // TextMe returns a status; success is typically status "1"/"0" depending on
-    // their codes — we treat HTTP ok + no error field as success, and surface the
-    // raw payload so the caller can log specifics.
-    if (!r.ok) return { ok: false, error: `http_${r.status}`, detail: raw.slice(0, 200) };
-    return { ok: true, response: data };
+
+    if (!r.ok) return { ok: false, error: `http_${r.status}`, detail: raw.slice(0, 300) };
+
+    // TextMe returns a body describing the result. Different SMS APIs use different
+    // shapes, so we check the common success signals and treat anything else as a
+    // failure (so we NEVER report a false success). We surface the raw payload.
+    // Common success indicators: status/code === 1 or "1" or "OK"/"success",
+    // or a positive "sent"/"delivered" count.
+    const okSignals = [
+      data && (data.status === 1 || data.status === '1'),
+      data && (data.code === 1 || data.code === '1' || data.code === 0 || data.code === '0'),
+      data && typeof data.status === 'string' && /ok|success|sent|נשלח/i.test(data.status),
+      data && (data.sent > 0 || data.success === true),
+      data && (data.message_id || data.messageId || data.id)
+    ];
+    const looksOk = okSignals.some(Boolean);
+
+    // Common explicit-error indicators.
+    const errText = (data && (data.error || data.message || data.reason)) || '';
+    const hasError = data && (data.error || data.status === 0 || data.status === '0' ||
+                     (typeof data.status === 'string' && /fail|error|invalid|שגיאה|נכשל/i.test(data.status)));
+
+    if (looksOk && !hasError) {
+      return { ok: true, response: data };
+    }
+    // Not a clear success — report as failure WITH the raw body so we can see exactly
+    // what TextMe said and tune the parser.
+    return { ok: false, error: errText || 'unknown_response', detail: raw.slice(0, 300), response: data };
   } catch (err) {
     return { ok: false, error: err.message };
   }

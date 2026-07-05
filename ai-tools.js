@@ -943,7 +943,8 @@ async function getRFMSegments(shop, options = {}) {
 
 // ---------------------------------------------------------------------------
 // SEND SMS — send a single SMS to a specific number via TextMe. Respects opt-out.
-// Used when the merchant asks the advisor directly to text someone (or to test).
+// Can create a REAL Shopify coupon first (so codes actually work, like campaigns).
+// Used when the merchant asks the advisor directly to text someone.
 // ---------------------------------------------------------------------------
 async function sendSms(shop, options = {}) {
   try {
@@ -951,11 +952,36 @@ async function sendSms(shop, options = {}) {
       return { ok: false, error: 'SMS לא מוגדר עדיין (חסרים מפתחות TextMe).' };
     }
     const phone = (options.phone || '').trim();
-    const message = (options.message || '').trim();
+    let message = (options.message || '').trim();
     if (!phone) return { ok: false, error: 'חסר מספר טלפון.' };
     if (!message) return { ok: false, error: 'חסר תוכן הודעה.' };
+
+    // Optionally create a REAL coupon in Shopify and insert it into the message.
+    let couponCode = null;
+    if (options.coupon_percentage || options.coupon_ils) {
+      const isFixed = !!options.coupon_ils;
+      const namePart = (options.customer_name || 'VIP').replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 8) || 'VIP';
+      const amt = isFixed ? Math.round(parseFloat(options.coupon_ils)) : parseInt(options.coupon_percentage);
+      const suffix = Math.floor(Math.random() * 900 + 100);
+      const c = await shopifyClient.createDiscountCode(shop, {
+        percentage: isFixed ? null : parseInt(options.coupon_percentage),
+        amount_ils: isFixed ? parseFloat(options.coupon_ils) : null,
+        code: `${namePart}${amt}${suffix}`,
+        days_valid: options.coupon_days ? parseInt(options.coupon_days) : 2,
+        title: `יועץ SMS: ${options.customer_name || phone}`
+      });
+      if (c.ok) {
+        couponCode = c.code;
+        // Replace {COUPON} placeholder or append the real code.
+        if (message.includes('{COUPON}')) message = message.replace(/\{COUPON\}/g, couponCode);
+        else message += `\nהקוד שלך: ${couponCode}`;
+      } else {
+        return { ok: false, error: 'יצירת הקופון נכשלה: ' + (c.error || 'לא ידוע') };
+      }
+    }
+
     const r = await smsSender.sendOne(shop, { phone, message });
-    if (r.ok) return { ok: true, sent_to: phone, note: 'ה-SMS נשלח.' };
+    if (r.ok) return { ok: true, sent_to: phone, coupon: couponCode, note: 'ה-SMS נשלח בפועל' + (couponCode ? ` עם קופון אמיתי ${couponCode}` : '') + '.' };
     if (r.skipped) return { ok: false, error: 'הנמען הסיר את עצמו מדיוור — לא נשלח.' };
     return { ok: false, error: `שליחה נכשלה: ${r.error || 'לא ידוע'}`, detail: r.detail || null };
   } catch (err) {

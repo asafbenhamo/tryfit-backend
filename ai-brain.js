@@ -409,12 +409,16 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "sendSms",
-    description: "שולח SMS בודד למספר טלפון ספציפי דרך TextMe. השתמש בזה כשבעל החנות מבקש לשלוח SMS למישהו ספציפי, או לבדיקת המערכת ('תשלח SMS לבדיקה למספר X'). ההודעה מכבדת אוטומטית את רשימת ההסרה (לא ישלח למי שהסיר). ציין phone (מספר בפורמט 05XXXXXXXX) ו-message (תוכן ההודעה).",
+    description: "שולח SMS בודד למספר טלפון ספציפי דרך TextMe. השתמש בזה כשבעל החנות מבקש לשלוח SMS למישהו ספציפי, או לבדיקת המערכת ('תשלח SMS לבדיקה למספר X'). ההודעה מכבדת אוטומטית את רשימת ההסרה (לא ישלח למי שהסיר). חשוב: אם אתה רוצה לתת קופון, ציין coupon_percentage או coupon_ils - המערכת תיצור קופון אמיתי ופעיל בשופיפיי ותכניס אותו להודעה. אל תמציא קוד קופון בעצמך בתוך ה-message! השאר {COUPON} או תן למערכת להוסיף. ציין phone (05XXXXXXXX) ו-message.",
     input_schema: {
       type: "object",
       properties: {
         phone: { type: "string", description: "מספר הטלפון לשליחה (05XXXXXXXX)" },
-        message: { type: "string", description: "תוכן ה-SMS" }
+        message: { type: "string", description: "תוכן ה-SMS. אם יש קופון, שים {COUPON} במקום שבו הקוד יופיע (או אל תזכיר קוד והמערכת תוסיף אותו בסוף)" },
+        coupon_percentage: { type: "integer", description: "אחוז הנחה (למשל 15) - ייצור קופון אמיתי בשופיפיי. אופציונלי." },
+        coupon_ils: { type: "number", description: "סכום הנחה בשקלים (במקום אחוז). אופציונלי." },
+        coupon_days: { type: "integer", description: "כמה ימים הקופון תקף (ברירת מחדל 2). אופציונלי." },
+        customer_name: { type: "string", description: "שם הלקוחה (לשם הקופון). אופציונלי." }
       },
       required: ["phone", "message"]
     }
