@@ -126,10 +126,28 @@ async function runTask(shop, task, opts = {}) {
   }
 
   // ---- MANUAL (existing behavior): prepare wa.me squares via campaign engine ----
-  const tmpl = templateFor(task);
+  let tmpl = templateFor(task);
+  const segKey = (task.params && task.params.rfm_segment) || task.segment || null;
+
+  // Maya writes segment-specific copy (AI) instead of the static template — the
+  // messages stop looking like a generic blast. Fail-safe: static template stays.
+  if (task.move_type === 'rfm_segment') {
+    try {
+      const copywriter = require('./copywriter');
+      const ai = await copywriter.generateSegmentCopy(shop, {
+        segment_key: segKey,
+        segment_label: task.title || segKey,
+        discount: task.percentage || 10,
+        sample: segment.slice(0, 3).map(s => ({ name: s.name, last_product: s.last_product }))
+      });
+      if (ai && ai.body) tmpl = { subject: ai.subject, body: ai.body };
+    } catch (e) { console.error('[agent] copywriter fallback:', e.message); }
+  }
+
   const { id: campId } = campaignEngine.startCampaign(shop, {
     campaign_type: task.move_type,
     segment,
+    segment_key: segKey,
     template: { percentage: task.percentage || 10, days_valid: 2, subject: tmpl.subject, body: tmpl.body }
   });
 

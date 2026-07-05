@@ -21,6 +21,8 @@ const compliance = require("./compliance");
 const agentEngine = require("./agent-engine");
 const morningBrief = require("./morning-brief");
 const smsSender = require("./sms-sender");
+const messageQueue = require("./message-queue");
+const noaEngine = require("./noa-engine");
 const attributionEngine = require("./attribution-engine");
 const pushEngine = require("./push-engine");
 const flashySync = require("./flashy-sync");
@@ -199,6 +201,34 @@ app.post("/webhook/flashy", express.json({ limit: "1mb" }), async (req, res) => 
 
 app.get("/webhook/flashy/status", (req, res) => {
   res.json({ ok: true, ...flashySync.status() });
+});
+
+// ===== Noa: incoming SMS replies =====
+// TextMe posts customer replies here. Noa handles opt-out keywords, answers what
+// she can from real store data, and hands off to the merchant (with a push) when
+// unsure. Configure this URL in TextMe's incoming-message webhook settings:
+//   https://tryfit-backend-production.up.railway.app/webhook/sms-incoming?secret=<TEXTME_WEBHOOK_SECRET>
+app.post("/webhook/sms-incoming", express.json({ limit: "1mb" }), async (req, res) => {
+  try {
+    const secret = process.env.TEXTME_WEBHOOK_SECRET || null;
+    if (secret && req.query.secret !== secret) {
+      return res.status(200).json({ ok: false, reason: "bad_secret" });
+    }
+    const shop = process.env.FLASHY_SHOP || DEFAULT_SHOP;
+    console.log("[noa] inbound sms:", JSON.stringify(req.body).slice(0, 300));
+    const result = await noaEngine.handleInbound(shop, req.body);
+    res.status(200).json(result);
+  } catch (err) {
+    console.error("sms-incoming error:", err.message);
+    res.status(200).json({ ok: false, error: err.message });
+  }
+});
+
+// Queue visibility: what's waiting to go out (smart-timing + follow-ups).
+app.get("/api/queue/status", async (req, res) => {
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+  const shop = resolveShop(req) || DEFAULT_SHOP;
+  res.json(await messageQueue.pendingStats(shop));
 });
 
 app.get("/privacy", (req, res) => {
@@ -1390,7 +1420,7 @@ const campaignEngine = require("./campaign-engine");
 
 app.post("/api/campaign/start", express.json(), async (req, res) => {
   try {
-    const { password, campaign_type, segment, template, channels } = req.body;
+    const { password, campaign_type, segment, template, channels, smart_timing, segment_key, followup } = req.body;
     if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     if (!Array.isArray(segment) || segment.length === 0) {
@@ -1399,7 +1429,7 @@ app.post("/api/campaign/start", express.json(), async (req, res) => {
     if (!template || !template.body) {
       return res.status(400).json({ ok: false, error: "חסר תוכן הודעה" });
     }
-    const { id } = campaignEngine.startCampaign(shop, { campaign_type, segment, template, channels });
+    const { id } = campaignEngine.startCampaign(shop, { campaign_type, segment, template, channels, smart_timing, segment_key, followup });
     res.json({ ok: true, campaign_id: id, total: Math.min(segment.length, campaignEngine.MAX_PER_CAMPAIGN) });
   } catch (err) {
     console.error("Campaign start error:", err);
@@ -3678,6 +3708,9 @@ app.listen(PORT, async () => {
   }
 
   agentEngine.resumeInterruptedPlans();
+  // Message queue: smart-timing sends + follow-up sequences (DB-backed, survives redeploys).
+  messageQueue.startScheduler();
+  noaEngine.ensureTable().catch(() => {});
 
   console.log("---\n");
 });

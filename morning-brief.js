@@ -41,6 +41,30 @@ async function getMorningBrief(shop) {
     if (scored.length === 0) return { moves: [], total_customers: 0, projected: 0 };
     const summary = rfmEngine.summarize(scored);
 
+    // LEARNING LOOP: real historical performance per segment (last 90 days).
+    // revenue-per-contact = attributed ₪ / contacts. With enough data (>=10
+    // contacts) the projection uses REAL numbers instead of the generic estimate —
+    // so the advisor gets smarter with every campaign it runs.
+    let perf = {};
+    try {
+      const h = await db.query(
+        `SELECT details->>'segment' AS seg,
+                COUNT(*)::int AS contacts,
+                COUNT(*) FILTER (WHERE outcome='converted')::int AS conversions,
+                COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome='converted'),0)::numeric AS revenue
+         FROM advisor_actions
+         WHERE shop_domain=$1 AND details->>'segment' IS NOT NULL
+           AND created_at > NOW() - INTERVAL '90 days'
+         GROUP BY details->>'segment'`, [shop]);
+      for (const row of h.rows) {
+        perf[row.seg] = {
+          contacts: row.contacts,
+          conversions: row.conversions,
+          rev_per_contact: row.contacts > 0 ? parseFloat(row.revenue) / row.contacts : 0
+        };
+      }
+    } catch (e) { /* no history yet — use estimates */ }
+
     // Build prioritized moves from the highest-ROI segments (priority 1 & 2).
     const moves = [];
     const priorityKeys = ['cant_lose', 'at_risk', 'about_to_sleep', 'one_time', 'new'];
@@ -49,14 +73,24 @@ async function getMorningBrief(shop) {
       if (seg.count === 0) continue;
       const sample = scored.find(c => c.segment === seg.key);
       const pct = sample ? sample.recommended_offer.percentage : 12;
-      // Estimate revenue: ~15% of segment value reactivated * conversion factor.
-      const projected = Math.round(seg.value * 0.12);
+      const hist = perf[seg.key];
+      let projected, basis;
+      if (hist && hist.contacts >= 10) {
+        // Real data: what a contact in this segment actually produced historically.
+        projected = Math.round(hist.rev_per_contact * seg.count);
+        basis = `מבוסס ביצועים אמיתיים: ${hist.conversions}/${hist.contacts} המרות ב-90 הימים האחרונים`;
+      } else {
+        // Not enough history yet — conservative estimate.
+        projected = Math.round(seg.value * 0.12);
+        basis = 'הערכה ראשונית (עוד אין מספיק היסטוריה לפלח הזה)';
+      }
       moves.push({
         segment: seg.key,
         label: seg.label,
         customers: seg.count,
         discount: pct,
         projected_revenue: projected,
+        basis,
         why: sample ? sample.reason : ''
       });
     }

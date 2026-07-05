@@ -96,7 +96,7 @@ function personalCode(nameOrEmail, pct) {
  * template: { percentage, days_valid, subject, body }  body may contain {NAME} and {COUPON}
  * Returns { id } immediately; work continues async.
  */
-function startCampaign(shop, { campaign_type, segment, template, channels }) {
+function startCampaign(shop, { campaign_type, segment, template, channels, smart_timing, segment_key, followup }) {
   const id = newCampaignId();
   const capped = (segment || []).slice(0, MAX_PER_CAMPAIGN);
   const chans = Array.isArray(channels) && channels.length ? channels : ['whatsapp', 'email'];
@@ -106,6 +106,11 @@ function startCampaign(shop, { campaign_type, segment, template, channels }) {
     status: 'running', total: capped.length, done: 0,
     sent: 0, prepared: 0, skipped: 0, failed: 0, revenue_potential: 0,
     channels: chans,
+    smart_timing: !!smart_timing,          // schedule each contact at her best hour
+    segment_key: segment_key || null,      // RFM segment tag (feeds the learning loop)
+    followup: followup !== false,          // auto follow-up sequence (default ON)
+    queued: 0,                             // messages placed in the smart-timing queue
+    followups_queued: 0,
     whatsapp: [],   // prepared WhatsApp links the merchant will click to send
     sms_sent: 0,
     started_at: new Date().toISOString(), finished_at: null, log: []
@@ -126,6 +131,15 @@ async function runCampaign(id, shop, segment, template, channels) {
   const wantEmail = chans.includes('email');
   const wantSms = chans.includes('sms');
   const smsSender = require('./sms-sender');
+  const mq = require('./message-queue');
+
+  // SMART TIMING: pre-compute each customer's personal best hour (from her own
+  // order history) in ONE batched query. Sends are then queued for that hour.
+  let bestHours = {};
+  if (c.smart_timing) {
+    try { bestHours = await mq.preferredHours(shop, segment.map(s => s.email)); }
+    catch (e) { console.error('[campaign] preferredHours:', e.message); }
+  }
   const pct = parseInt(template.percentage) || 10;
   const amountIls = template.amount_ils ? parseFloat(template.amount_ils) : null;
   const isFixed = !!amountIls && amountIls > 0;
@@ -222,7 +236,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
           [shop, c.campaign_type, contact.email, contact.phone,
-           JSON.stringify({ channels: chans, campaign_id: id, customer_name: cust.name || null }), finalCode]
+           JSON.stringify({ channels: chans, campaign_id: id, segment: c.segment_key || null, customer_name: cust.name || null }), finalCode]
         );
         actionId = ins.rows[0] && ins.rows[0].id;
       } catch (e) { console.error('[campaign] log:', e.message); }
@@ -247,21 +261,66 @@ async function runCampaign(id, shop, segment, template, channels) {
         didSomething = true;
       }
 
-      // ---- SMS: send immediately via TextMe (TextMe appends its own opt-out link) ----
+      // ---- SMS: instant, or queued at her personal best hour (smart timing) ----
       if (wantSms && hasPhone && smsSender.isConfigured()) {
-        try {
-          const r = await smsSender.sendOne(shop, { phone: contact.phone, message: fullBody });
-          if (r.ok) { c.sms_sent++; didSomething = true; }
-          else if (!r.skipped) { c.log.push({ customer: cust.name, sms_failed: r.error }); }
-        } catch (e) { c.log.push({ customer: cust.name, sms_failed: e.message }); }
+        if (c.smart_timing) {
+          const hour = bestHours[(contact.email || '').toLowerCase()] || 11;
+          await mq.enqueue(shop, {
+            channel: 'sms', phone: contact.phone, email: contact.email, name: cust.name || null,
+            message: fullBody, send_at: mq.computeSendAt(hour), kind: 'timed',
+            campaign_id: id, segment: c.segment_key || null
+          }).then(() => { c.queued++; didSomething = true; })
+            .catch(e => c.log.push({ customer: cust.name, sms_failed: e.message }));
+        } else {
+          try {
+            const r = await smsSender.sendOne(shop, { phone: contact.phone, message: fullBody });
+            if (r.ok) { c.sms_sent++; didSomething = true; }
+            else if (!r.skipped) { c.log.push({ customer: cust.name, sms_failed: r.error }); }
+          } catch (e) { c.log.push({ customer: cust.name, sms_failed: e.message }); }
+        }
       }
 
-      // ---- Email: auto-send (gate already checked) ----
+      // ---- Email: instant, or queued at her personal best hour (smart timing) ----
       if (wantEmail && contact.email) {
-        const html = mailer.buildHtmlEmail(fullBody, { brand: '770', to: contact.email });
-        const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || 'הודעה מ-770', html, text: fullBody });
-        if (sent.ok) { c.sent++; didSomething = true; }
-        else { c.log.push({ customer: cust.email, failed: sent.error }); }
+        if (c.smart_timing) {
+          const hour = bestHours[(contact.email || '').toLowerCase()] || 11;
+          await mq.enqueue(shop, {
+            channel: 'email', email: contact.email, phone: contact.phone, name: cust.name || null,
+            subject: template.subject || 'הודעה מ-770',
+            message: fullBody, send_at: mq.computeSendAt(hour), kind: 'timed',
+            campaign_id: id, segment: c.segment_key || null
+          }).then(() => { c.queued++; didSomething = true; })
+            .catch(e => c.log.push({ customer: cust.email, failed: e.message }));
+        } else {
+          const html = mailer.buildHtmlEmail(fullBody, { brand: '770', to: contact.email });
+          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || 'הודעה מ-770', html, text: fullBody });
+          if (sent.ok) { c.sent++; didSomething = true; }
+          else { c.log.push({ customer: cust.email, failed: sent.error }); }
+        }
+      }
+
+      // ---- SEQUENCE: auto follow-up in 3 days for whoever doesn't convert. ----
+      // Research: a sequence converts 2-3x a one-shot. The follow-up gets a FRESH
+      // coupon (created at send time — the original 48h code will have expired),
+      // slightly sweeter (+5%, capped 25%). Skipped automatically at send time if
+      // she converted or opted out. Only when we generate personal % codes.
+      if (c.followup && didSomething && !isFixed && !fixedCode && pct > 0) {
+        const fuChannel = (wantSms && hasPhone && smsSender.isConfigured()) ? 'sms'
+                        : (wantEmail && contact.email) ? 'email' : null;
+        if (fuChannel) {
+          const firstName = (cust.name || '').split(' ')[0];
+          const fuPct = Math.min(pct + 5, 25);
+          const fuProduct = cust.last_product ? `ראינו שאהבת את ${cust.last_product} — ` : '';
+          const fuBody = `היי${firstName ? ' ' + firstName : ''} 💜 רק תזכורת קטנה — ${fuProduct}ההטבה שלך עדיין מחכה.\nקוד חדש בשבילך (${fuPct}%): {COUPON}\nתקף ל-48 שעות ⏰\n🛍️ למימוש:\n{LINK}`;
+          await mq.enqueue(shop, {
+            channel: fuChannel, phone: contact.phone, email: contact.email, name: cust.name || null,
+            subject: 'שמרנו לך את זה 💜',
+            message: fuBody, send_at: mq.computeSendAt(11, 3), kind: 'followup', step: 2,
+            campaign_id: id, segment: c.segment_key || null,
+            coupon_pct: fuPct, coupon_days: 2
+          }).then(() => { c.followups_queued++; })
+            .catch(e => console.error('[campaign] followup enqueue:', e.message));
+        }
       }
 
       if (didSomething) {

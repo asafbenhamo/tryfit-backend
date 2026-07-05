@@ -2452,6 +2452,11 @@
       + '<label class="chan-opt"><input type="checkbox" class="chan-cb" value="email" checked> <span>✉️ מייל</span></label>'
       + '<label class="chan-opt' + (smsReady ? '' : ' chan-disabled') + '"><input type="checkbox" class="chan-cb" value="sms"' + (smsReady ? '' : ' disabled') + '> <span>💬 SMS' + (smsReady ? '' : ' (ממתין לאישור)') + '</span></label>'
       + '</div>';
+    // Smart upgrades: per-customer send hour + automatic follow-up sequence.
+    html += '<div class="channel-pick" style="margin-top:2px">'
+      + '<label class="chan-opt"><input type="checkbox" class="smart-timing-cb"> <span>🕐 תזמון חכם — כל לקוחה תקבל בשעה שהיא הכי קונה</span></label>'
+      + '<label class="chan-opt"><input type="checkbox" class="followup-cb" checked> <span>🔁 הודעת המשך אוטומטית בעוד 3 ימים למי שלא קנתה (קוד חדש)</span></label>'
+      + '</div>';
     // Show send-mode toggle ONLY for stores that have automatic WhatsApp configured.
     const autoAvailable = window._waConfigured && window._waTemplates && window._waTemplates.length > 0;
     if (autoAvailable) {
@@ -2500,6 +2505,8 @@
       if (mode === 'auto') { startAutoCampaign(card, f, custs, custCount, approveBtn, cancelBtn, resultDiv); return; }
       // ---- manual (existing flow) ----
       const channels = getChannels();
+      const smartTiming = !!(card.querySelector('.smart-timing-cb') && card.querySelector('.smart-timing-cb').checked);
+      const followupOn = !(card.querySelector('.followup-cb') && !card.querySelector('.followup-cb').checked);
       confirmSendGate(custCount, 'whatsapp', async () => {
       approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'מתחיל...';
       try {
@@ -2509,6 +2516,9 @@
             password: PASSWORD, campaign_type: f.type || 'campaign',
             segment: custs,
             channels: channels,
+            smart_timing: smartTiming,
+            followup: followupOn,
+            segment_key: f.segment || f.rfm_segment || null,
             template: { percentage: f.percentage ? parseInt(f.percentage) : 10,
               amount_ils: f.amount_ils ? parseFloat(f.amount_ils) : null,
               combine: (f.combine === 'no' || f.combine === 'false') ? 'no' : 'yes',
