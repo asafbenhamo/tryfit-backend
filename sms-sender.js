@@ -48,19 +48,25 @@ async function sendOne(shop, { phone, message, sender }) {
     return { ok: false, error: 'opted_out', skipped: true };
   }
 
+  // Body per TextMe docs: everything wrapped in "sms", username under "user",
+  // each phone as { "_": "05xxxxxxxx" }. Auth is via Bearer TOKEN header.
   const body = {
-    username: process.env.TEXTME_USERNAME,
-    password: process.env.TEXTME_API_KEY,
-    source: (sender || process.env.TEXTME_SENDER || '770').slice(0, 11),
-    message: message,
-    add_unsubscribe: 3, // TextMe appends its own one-click removal link (legal)
-    destinations: { phone: [{ phone: to }] }
+    sms: {
+      user: { username: process.env.TEXTME_USERNAME },
+      source: (sender || process.env.TEXTME_SENDER || '770').slice(0, 11),
+      message: message,
+      add_unsubscribe: 3, // TextMe appends its own one-click removal link (legal)
+      destinations: { phone: [ { "_": to } ] }
+    }
   };
 
   try {
     const r = await fetch(TEXTME_ENDPOINT, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.TEXTME_API_KEY}`
+      },
       body: JSON.stringify(body)
     });
     const raw = await r.text();
@@ -68,31 +74,16 @@ async function sendOne(shop, { phone, message, sender }) {
 
     if (!r.ok) return { ok: false, error: `http_${r.status}`, detail: raw.slice(0, 300) };
 
-    // TextMe returns a body describing the result. Different SMS APIs use different
-    // shapes, so we check the common success signals and treat anything else as a
-    // failure (so we NEVER report a false success). We surface the raw payload.
-    // Common success indicators: status/code === 1 or "1" or "OK"/"success",
-    // or a positive "sent"/"delivered" count.
-    const okSignals = [
-      data && (data.status === 1 || data.status === '1'),
-      data && (data.code === 1 || data.code === '1' || data.code === 0 || data.code === '0'),
-      data && typeof data.status === 'string' && /ok|success|sent|נשלח/i.test(data.status),
-      data && (data.sent > 0 || data.success === true),
-      data && (data.message_id || data.messageId || data.id)
-    ];
-    const looksOk = okSignals.some(Boolean);
-
-    // Common explicit-error indicators.
-    const errText = (data && (data.error || data.message || data.reason)) || '';
-    const hasError = data && (data.error || data.status === 0 || data.status === '0' ||
-                     (typeof data.status === 'string' && /fail|error|invalid|שגיאה|נכשל/i.test(data.status)));
-
-    if (looksOk && !hasError) {
-      return { ok: true, response: data };
+    // TextMe success = status 0 (with a shipment_id). Any nonzero status is an error;
+    // the "message" field then describes it. We never report a false success.
+    const status = data && data.status;
+    const isSuccess = (status === 0 || status === '0');
+    if (isSuccess) {
+      return { ok: true, response: data, shipment_id: data.shipment_id || null };
     }
-    // Not a clear success — report as failure WITH the raw body so we can see exactly
-    // what TextMe said and tune the parser.
-    return { ok: false, error: errText || 'unknown_response', detail: raw.slice(0, 300), response: data };
+    // Error: surface TextMe's own message + the raw body for debugging.
+    const msg = (data && data.message) ? data.message : 'unknown_response';
+    return { ok: false, error: `TextMe status ${status}: ${msg}`, detail: raw.slice(0, 300), response: data };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -121,10 +112,12 @@ async function getBalance() {
   try {
     const r = await fetch('https://my.textme.co.il/api/getBalance', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.TEXTME_API_KEY}`
+      },
       body: JSON.stringify({
-        username: process.env.TEXTME_USERNAME,
-        password: process.env.TEXTME_API_KEY
+        username: process.env.TEXTME_USERNAME
       })
     });
     const raw = await r.text();
