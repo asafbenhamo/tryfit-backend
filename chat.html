@@ -3079,31 +3079,48 @@
 
   /* ===== TYPING ===== */
   let typingTimer = null;
-  const THINKING_STAGES = [
+  // Two phases: a fixed opening, then an endless loop of "team at work" stages so
+  // long tool-runs (30-90s) always show fresh activity instead of freezing.
+  const THINKING_OPEN = [
     'קורא את השאלה...',
-    'שולף נתונים מהחנות...',
-    'מנתח לקוחות והזמנות...',
+    'שולף נתונים מהחנות...'
+  ];
+  const THINKING_LOOP = [
+    'דניאל מנתח את הלקוחות...',
+    'בודק פלחים והזדמנויות...',
+    'מאיה בוחנת ניסוחים...',
+    'מצליב מול ההזמנות האחרונות...',
     'בודק מה במלאי...',
-    'מחבר את התובנות...',
-    'מנסח לך תשובה...'
+    'מחשב צפי הכנסה...',
+    'מוודא רשימת הסרה...',
+    'מרכיב את התוכנית...',
+    'עוד רגע, מלטש את התשובה...'
   ];
   function showTyping() {
     const row = document.createElement('div');
     row.className = 'row ai';
     row.id = 'typing-msg';
-    row.innerHTML = '<div class="bubble"><div class="typing"><div class="dots"><span></span><span></span><span></span></div><div class="txt" id="typing-txt">' + THINKING_STAGES[0] + '</div></div></div>';
+    row.innerHTML = '<div class="bubble"><div class="typing"><div class="dots"><span></span><span></span><span></span></div><div class="txt" id="typing-txt">' + THINKING_OPEN[0] + '</div></div></div>';
     $('messages').appendChild(row);
     scrollDown();
+    const startedAt = Date.now();
     let stage = 0;
     const advance = () => {
       stage++;
       const txt = $('typing-txt');
       if (!txt) return;
-      if (stage < THINKING_STAGES.length) {
-        txt.textContent = THINKING_STAGES[stage];
-        const delay = stage < 3 ? 1100 : 2200;
-        typingTimer = setTimeout(advance, delay);
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      let line;
+      if (stage < THINKING_OPEN.length) {
+        line = THINKING_OPEN[stage];
+      } else {
+        // Loop forever through the team-at-work stages.
+        line = THINKING_LOOP[(stage - THINKING_OPEN.length) % THINKING_LOOP.length];
       }
+      // After 12s add a living elapsed counter so it's clear work is happening.
+      if (secs >= 12) line += ' (' + secs + ' שנ׳)';
+      txt.textContent = line;
+      typingTimer = setTimeout(advance, stage < 2 ? 1100 : 2600);
     };
     typingTimer = setTimeout(advance, 1100);
   }
