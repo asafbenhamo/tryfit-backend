@@ -942,21 +942,19 @@ async function getRFMSegments(shop, options = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// SEND SMS — send a single SMS to a specific number via TextMe. Respects opt-out.
-// Can create a REAL Shopify coupon first (so codes actually work, like campaigns).
-// Used when the merchant asks the advisor directly to text someone.
+// SEND SMS — send a single SMS via TextMe. Respects opt-out, creates a REAL
+// Shopify coupon (like campaigns), and ALWAYS appends a tracked purchase link
+// so (a) the customer has somewhere to click, (b) the sale is attributed.
 // ---------------------------------------------------------------------------
 async function sendSms(shop, options = {}) {
   try {
-    if (!smsSender.isConfigured()) {
-      return { ok: false, error: 'SMS לא מוגדר עדיין (חסרים מפתחות TextMe).' };
-    }
+    if (!smsSender.isConfigured()) return { ok: false, error: 'SMS לא מוגדר עדיין (חסרים מפתחות TextMe).' };
     const phone = (options.phone || '').trim();
-    let message = (options.message || '').trim();
     if (!phone) return { ok: false, error: 'חסר מספר טלפון.' };
+    let message = (options.message || '').trim();
     if (!message) return { ok: false, error: 'חסר תוכן הודעה.' };
 
-    // Optionally create a REAL coupon in Shopify and insert it into the message.
+    // 1. Real coupon (if requested) — same as before.
     let couponCode = null;
     if (options.coupon_percentage || options.coupon_ils) {
       const isFixed = !!options.coupon_ils;
@@ -970,24 +968,47 @@ async function sendSms(shop, options = {}) {
         days_valid: options.coupon_days ? parseInt(options.coupon_days) : 2,
         title: `יועץ SMS: ${options.customer_name || phone}`
       });
-      if (c.ok) {
-        couponCode = c.code;
-        // Replace {COUPON} placeholder or append the real code.
-        if (message.includes('{COUPON}')) message = message.replace(/\{COUPON\}/g, couponCode);
-        else message += `\nהקוד שלך: ${couponCode}`;
-      } else {
-        return { ok: false, error: 'יצירת הקופון נכשלה: ' + (c.error || 'לא ידוע') };
-      }
+      if (!c.ok) return { ok: false, error: 'יצירת הקופון נכשלה: ' + (c.error || 'לא ידוע') };
+      couponCode = c.code;
+      if (message.includes('{COUPON}')) message = message.replace(/\{COUPON\}/g, couponCode);
+      else message += `\nהקוד שלך: ${couponCode}`;
     }
 
+    // 2. Attribution row + tracked purchase link, ALWAYS appended (unless the
+    //    message already contains a link the advisor deliberately included).
+    let actionId = null;
+    try {
+      const ins = await db.query(
+        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+        [shop, 'sms_single', null, phone,
+         JSON.stringify({ channel: 'sms', customer_name: options.customer_name || null }), couponCode]
+      );
+      actionId = ins.rows[0] && ins.rows[0].id;
+    } catch (e) { /* log-only */ }
+
+    if (!/https?:\/\//.test(message)) {
+      let link = shopifyClient.getPublicDomain(shop);
+      try {
+        const clickTracker = require('./click-tracker');
+        const token = await clickTracker.createLink(shop, { actionId, email: null, phone, couponCode });
+        let BASE = process.env.PUBLIC_BASE_URL || 'https://tryfit-backend-production.up.railway.app';
+        BASE = String(BASE).replace(/^[^=]*=\s*/, '').replace(/['"\s]/g, '').replace(/\/+$/, '');
+        if (!/^https?:\/\//.test(BASE)) BASE = 'https://tryfit-backend-production.up.railway.app';
+        link = `${BASE}/go/${token}`;
+      } catch (e) { /* plain store domain fallback */ }
+      message += `\n🛍️ למימוש ולקנייה:\n${link}`;
+    }
+
+    // 3. Send.
     const r = await smsSender.sendOne(shop, { phone, message });
-    if (r.ok) return { ok: true, sent_to: phone, coupon: couponCode, note: 'ה-SMS נשלח בפועל' + (couponCode ? ` עם קופון אמיתי ${couponCode}` : '') + '.' };
+    if (r.ok) return { ok: true, sent_to: phone, coupon: couponCode, note: 'ה-SMS נשלח עם קישור רכישה מעוקב' + (couponCode ? ` וקופון אמיתי ${couponCode}` : '') + '.' };
     if (r.skipped) return { ok: false, error: 'הנמען הסיר את עצמו מדיוור — לא נשלח.' };
     return { ok: false, error: `שליחה נכשלה: ${r.error || 'לא ידוע'}`, detail: r.detail || null };
   } catch (err) {
     return { ok: false, error: err.message };
   }
-}
+};
 
 module.exports = {
   getAudienceCounts,
