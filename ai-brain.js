@@ -6,7 +6,7 @@
 const Anthropic = require("@anthropic-ai/sdk");
 const aiTools = require("./ai-tools");
 
-const MODEL = "claude-sonnet-4-6";
+const MODEL = "claude-sonnet-5";
 const MAX_TOOL_ROUNDS = 6; // safety cap on the tool-use loop
 
 // Lazy client init so the server never crashes at boot if the key is missing.
