@@ -2745,14 +2745,21 @@
     const f = cart.fields;
     const card = document.createElement('div');
     card.className = 'action-card';
-    const channel = (f.phone && f.phone.length >= 8) ? 'WhatsApp' : 'מייל';
+    const cartHasPhone = (f.phone && f.phone.length >= 8);
+    const cartSmsReady = !!window._smsConfigured;
     const itemCount = (f.items || '').split(',').filter(Boolean).length;
     let html = '<div class="action-head">🛍️ עגלה מותאמת מוכנה לאישור</div>';
     html += '<div class="action-row"><span>נמען:</span> ' + esc(f.name || f.email || f.phone || '—') + '</div>';
-    html += '<div class="action-row"><span>ערוץ:</span> ' + channel + '</div>';
     html += '<div class="action-row"><span>פריטים בעגלה:</span> ' + itemCount + '</div>';
     if (f.discount) html += '<div class="action-row"><span>הנחה:</span> ' + esc(f.discount) + '%</div>';
     if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\{COUPON\}/g,'[הקוד האישי שלך]').replace(/\n/g,'<br>') + '</div>';
+    // Channel picker — the merchant decides where the cart goes (one or more).
+    html += '<div class="action-row" style="margin-top:8px"><span>באיזה ערוצים לשלוח?</span></div>';
+    html += '<div class="channel-pick">'
+      + (cartHasPhone ? '<label class="chan-opt"><input type="checkbox" class="chan-cb" value="whatsapp" checked> <span>📱 וואטסאפ (קישור לשליחה ידנית)</span></label>' : '')
+      + (f.email ? '<label class="chan-opt"><input type="checkbox" class="chan-cb" value="email"' + (cartHasPhone ? '' : ' checked') + '> <span>✉️ מייל (נשלח אוטומטית)</span></label>' : '')
+      + (cartHasPhone ? '<label class="chan-opt' + (cartSmsReady ? '' : ' chan-disabled') + '"><input type="checkbox" class="chan-cb" value="sms"' + (cartSmsReady ? '' : ' disabled') + '> <span>💬 SMS' + (cartSmsReady ? ' (נשלח אוטומטית)' : ' (ממתין לאישור)') + '</span></label>' : '')
+      + '</div>';
     html += '<div class="action-btns"><button class="action-approve">בנה עגלה ושלח ←</button><button class="action-cancel">בטל</button></div>';
     html += '<div class="action-result" style="display:none"></div>';
     card.innerHTML = html;
@@ -2762,6 +2769,11 @@
     const cancelBtn = card.querySelector('.action-cancel');
     const resultDiv = card.querySelector('.action-result');
     cancelBtn.onclick = () => card.remove();
+    function cartChannels() {
+      const boxes = card.querySelectorAll('.channel-pick .chan-cb:checked');
+      const chans = Array.from(boxes).map(b => b.value);
+      return chans.length ? chans : (cartHasPhone ? ['whatsapp'] : ['email']);
+    }
     approveBtn.onclick = async () => {
       approveBtn.disabled = true; cancelBtn.disabled = true; approveBtn.textContent = 'בונה...';
       try {
@@ -2774,6 +2786,7 @@
           body: JSON.stringify({
             password: PASSWORD, email: f.email || null, phone: f.phone || null,
             customer_name: f.name || null, items,
+            channels: cartChannels(),
             discount_percentage: f.discount ? parseInt(f.discount) : null,
             message_subject: f.subject || 'הכנו לך משהו מיוחד', message_body: f.body || ''
           })
@@ -2784,10 +2797,16 @@
         if (data.ok) {
           let msg = '✅ העגלה נבנתה! ';
           if (data.steps.cart) msg += 'סכום: ₪' + data.steps.cart.total + '. ';
-          if (data.steps.message && data.steps.message.channel === 'whatsapp') {
+          const ch = (data.steps && data.steps.channels) || {};
+          const parts = [];
+          if (ch.email && ch.email.ok) parts.push('✉️ מייל נשלח');
+          if (ch.sms && ch.sms.ok) parts.push('💬 SMS נשלח');
+          if (ch.sms && ch.sms.ok === false) parts.push('💬 SMS נכשל: ' + (ch.sms.error || ''));
+          if (parts.length) msg += '<br>' + parts.join(' · ');
+          if (ch.whatsapp && ch.whatsapp.ready_link) {
+            msg += '<br><a href="' + ch.whatsapp.ready_link + '" target="_blank" class="wa-link">📱 שלח ב-WhatsApp</a>';
+          } else if (data.steps.message && data.steps.message.channel === 'whatsapp' && data.steps.message.ready_link) {
             msg += '<br><a href="' + data.steps.message.ready_link + '" target="_blank" class="wa-link">📱 שלח ב-WhatsApp</a>';
-          } else if (data.steps.message && data.steps.message.ok) {
-            msg += 'הלינק נשלח במייל.';
           }
           resultDiv.innerHTML = msg; resultDiv.className = 'action-result success';
           loadMoneyCounter();

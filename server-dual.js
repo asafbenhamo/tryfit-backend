@@ -2012,7 +2012,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     const {
       password, email, phone, customer_name,
       items, discount_percentage,
-      message_subject, message_body
+      message_subject, message_body, channels
     } = req.body;
 
     if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
@@ -2074,24 +2074,50 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     const result = { ok: true, steps: { cart: { ok: true, total: draft.total, pay_url: payUrl, editable_url: editableCartUrl, coupon: cartCoupon } } };
 
     const hasPhone = phone && String(phone).trim().length >= 8;
-    if (hasPhone) {
+
+    // Which channels did the merchant pick? (WhatsApp = manual link; Email + SMS
+    // send automatically.) Default keeps the old behavior when nothing is passed.
+    const chans = Array.isArray(channels) && channels.length
+      ? channels
+      : (hasPhone ? ['whatsapp'] : ['email']);
+
+    result.steps.channels = {};
+    let didSomething = false;
+
+    // ---- WhatsApp: prepare a ready link for manual send ----
+    if (chans.includes('whatsapp') && hasPhone) {
       let waPhone = String(phone).replace(/[^0-9]/g, "");
       if (waPhone.startsWith("0")) waPhone = "972" + waPhone.slice(1);
       const waUrl = `https://wa.me/${waPhone}?text=${encodeURIComponent(finalBody)}`;
-      result.steps.message = { channel: "whatsapp", ready_link: waUrl };
-    } else if (email) {
+      result.steps.channels.whatsapp = { channel: "whatsapp", ready_link: waUrl };
+      result.steps.message = result.steps.channels.whatsapp; // backward-compat for old UI
+      didSomething = true;
+    }
+
+    // ---- SMS: send the cart automatically via TextMe ----
+    if (chans.includes('sms') && hasPhone && smsSender.isConfigured()) {
+      const smsRes = await smsSender.sendOne(shop, { phone, message: finalBody });
+      result.steps.channels.sms = { channel: "sms", ok: smsRes.ok, error: smsRes.error || null };
+      if (smsRes.ok) didSomething = true;
+    }
+
+    // ---- Email: send automatically ----
+    if (chans.includes('email') && email) {
       const gate = await compliance.canContactCustomer(shop, { email, phone });
-      if (!gate.allowed) {
-        return res.json({ ok: false, blocked: true, reason: gate.reason, detail: gate.detail, steps: result.steps });
+      if (gate.allowed) {
+        const html = mailer.buildHtmlEmail(message_body || "הכנו לך עגלה אישית!", {
+          cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email, shop
+        });
+        const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
+        result.steps.channels.email = { channel: "email", ok: sent.ok, error: sent.error || null, id: sent.id || null };
+        if (sent.ok) { didSomething = true; if (!result.steps.message) result.steps.message = result.steps.channels.email; }
+      } else {
+        result.steps.channels.email = { channel: "email", ok: false, blocked: true, reason: gate.reason, detail: gate.detail };
       }
-      const html = mailer.buildHtmlEmail(message_body || "הכנו לך עגלה אישית!", {
-        cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email, shop
-      });
-      const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
-      if (!sent.ok) return res.status(400).json({ ok: false, error: "שליחת המייל נכשלה: " + sent.error });
-      result.steps.message = { channel: "email", ok: true, id: sent.id };
-    } else {
-      return res.status(400).json({ ok: false, error: "אין דרך ליצור קשר" });
+    }
+
+    if (!didSomething) {
+      return res.status(400).json({ ok: false, error: "לא נשלח בשום ערוץ (בדוק שבחרת ערוץ ושיש פרטי קשר)", steps: result.steps });
     }
 
     await db.query(
