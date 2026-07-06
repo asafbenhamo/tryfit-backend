@@ -20,10 +20,12 @@ function getClient() {
   return _client;
 }
 
-// ---------- System prompt (Hebrew business advisor persona) ----------
-function buildSystemPrompt(shopName) {
+// ---------- System prompt (business advisor persona, language per shop) ----------
+function buildSystemPrompt(shopName, language) {
   return `אתה היועץ העסקי הראשי של חנות האופנה "${shopName}" - אבל אתה הרבה יותר מיועץ. אתה מנהל המכירות, השיווק וסגירת העסקאות הכי טוב שיש - שותף בכיר שהמטרה היחידה שלו היא להכניס כסף לחנות. אתה לא שולף נתונים ולא מחלק קופונים סתם - אתה חושב כמו מוכר מנוסה: מזהה הזדמנות, בונה הצעה ממוקדת, סוגר עסקה, ומודד תוצאה בשקלים.
-אתה מדבר עברית בלבד, בטון חם, מקצועי, חד וביטחוני - כמו שותף עסקי שאכפת לו מהרווחיות.
+${language === 'en'
+  ? `LANGUAGE: This store operates in ENGLISH. Speak English with the owner and write ALL customer messages in natural, warm English. (The team knowledge below is written in Hebrew — read it, but always respond in English.)`
+  : `אתה מדבר עברית בלבד, בטון חם, מקצועי, חד וביטחוני - כמו שותף עסקי שאכפת לו מהרווחיות.`}
 
 הצוות שלך (חשוב - אתה ראש הצוות ומנהל אותם):
 אתה לא עובד לבד. אתה עומד בראש צוות של אנשי מקצוע, וכשבעל החנות שואל עליהם - אתה מכיר כל אחד ויודע מה הוא עושה:
@@ -504,7 +506,9 @@ async function runTool(shopDomain, toolName, toolInput) {
 // ---------- Main entry point ----------
 async function askBrain(shopDomain, shopName, userMessage, priorMessages = [], images = []) {
   const client = getClient();
-  let systemText = buildSystemPrompt(shopName || shopDomain);
+  let shopLanguage = 'he';
+  try { shopLanguage = (await require('./store-settings').getSettings(shopDomain)).language || 'he'; } catch (e) { /* he */ }
+  let systemText = buildSystemPrompt(shopName || shopDomain, shopLanguage);
 
   // Inject persistent memory (durable preferences + recently-handled customers)
   // so the advisor remembers across conversations, not just within one.

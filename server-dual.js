@@ -3355,22 +3355,51 @@ app.get("/auth/callback", async (req, res) => {
 
     // Use the operator-chosen password if provided in the install link, else random.
     const advisorPassword = presetPassword || crypto.randomBytes(5).toString("hex");
-    const displayName = shopDomain.replace(".myshopify.com", "");
+
+    // Pull the shop's real details (name, owner email, country) so onboarding is
+    // personal from second one — and the store's language is set automatically:
+    // Israeli shops get Hebrew, everyone else English. (Asaf: Hebrew stays sellable.)
+    let shopInfo = {};
+    try {
+      const sRes = await fetch(`https://${shopDomain}/admin/api/2026-01/shop.json`, {
+        headers: { "X-Shopify-Access-Token": tokenData.access_token }
+      });
+      const sData = await sRes.json();
+      shopInfo = (sData && sData.shop) || {};
+    } catch (e) { /* defaults below */ }
+
+    const displayName = shopInfo.name || shopDomain.replace(".myshopify.com", "");
+    const ownerEmail = shopInfo.email || shopInfo.customer_email || null;
+    const isIsraeli = (shopInfo.country_code === "IL") ||
+                      ((shopInfo.primary_locale || "").toLowerCase().startsWith("he"));
 
     await shopify.upsertStore({
       shop_domain: shopDomain,
       access_token: tokenData.access_token,
       advisor_password: advisorPassword,
       display_name: displayName,
-      public_domain: null
+      owner_email: ownerEmail,
+      public_domain: shopInfo.domain || null
     });
 
-    // Register webhooks (checkouts + orders) for this shop.
+    // Per-shop defaults: brand from the real shop name, language by country,
+    // currency accordingly, daily smart-outreach cap 500.
+    try {
+      await storeSettings.updateSettings(shopDomain, {
+        brand: displayName,
+        language: isIsraeli ? "he" : "en",
+        currency: isIsraeli ? "₪" : "$",
+        daily_cap: 500
+      });
+    } catch (e) { console.error("[OAuth] settings init:", e.message); }
+
+    // Register webhooks (checkouts + orders + uninstalled) for this shop.
     try {
       const topics = [
         { topic: "checkouts/create", address: `${APP_BASE_URL}/webhooks/checkouts/create` },
         { topic: "checkouts/update", address: `${APP_BASE_URL}/webhooks/checkouts/update` },
-        { topic: "orders/create", address: `${APP_BASE_URL}/webhooks/orders/create` }
+        { topic: "orders/create", address: `${APP_BASE_URL}/webhooks/orders/create` },
+        { topic: "app/uninstalled", address: `${APP_BASE_URL}/webhooks/app/uninstalled` }
       ];
       for (const t of topics) {
         await fetch(`https://${shopDomain}/admin/api/2026-01/webhooks.json`, {
@@ -3381,7 +3410,11 @@ app.get("/auth/callback", async (req, res) => {
       }
     } catch (e) { console.error("[OAuth] webhook registration:", e.message); }
 
-    // Kick off backfill in the background (OAuth-connected = enabled by definition).
+    // Personal chat link — the "install and get your agent" moment.
+    const chatLink = `${APP_BASE_URL}/chat?shop=${encodeURIComponent(shopDomain)}&password=${encodeURIComponent(advisorPassword)}`;
+
+    // Kick off backfill in the background; when done, email the owner that the
+    // team is ready, with their personal link.
     backfillStatus[shopDomain] = { current_phase: "starting", started_at: new Date().toISOString() };
     setImmediate(async () => {
       try {
@@ -3389,23 +3422,37 @@ app.get("/auth/callback", async (req, res) => {
           backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], current_phase: progress.phase, ...(progress.stats || {}) };
         });
         backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], ...result };
+        // "Your team is ready" email (bilingual by shop language).
+        if (ownerEmail) {
+          const he = isIsraeli;
+          const subject = he ? `הצוות של ${displayName} מוכן לעבודה 🎉` : `Your ${displayName} sales team is ready 🎉`;
+          const bodyTxt = he
+            ? `היי!\n\nסיימנו לנתח את החנות שלך. דניאל (האנליסט), מאיה (המכירות) ונועה (השירות) מוכנים.\n\nהיכנס לצ'אט האישי שלך:\n${chatLink}\n\nסיסמת הכניסה שלך: ${advisorPassword}\n\nנתראה בפנים,\nSmart Advisor`
+            : `Hi!\n\nWe finished analyzing your store. Daniel (analyst), Maya (sales) and Noa (support) are ready to work.\n\nOpen your personal chat:\n${chatLink}\n\nYour password: ${advisorPassword}\n\nSee you inside,\nSmart Advisor`;
+          const html = mailer.buildHtmlEmail(bodyTxt, { cta_url: chatLink, cta_label: he ? "לצ'אט האישי שלך ←" : "Open your chat →", brand: displayName, to: ownerEmail });
+          await mailer.sendEmail({ to: ownerEmail, subject, html, text: bodyTxt }).catch(() => {});
+        }
       } catch (err) {
         backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], success: false, fatal_error: err.message };
       }
     });
 
-    // Success page for the merchant.
-    res.send(`<!DOCTYPE html><html dir="rtl" lang="he"><head><meta charset="utf-8">
+    // Success page for the merchant — bilingual, with the DIRECT chat link.
+    const hePage = isIsraeli;
+    res.send(`<!DOCTYPE html><html dir="${hePage ? 'rtl' : 'ltr'}" lang="${hePage ? 'he' : 'en'}"><head><meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>החיבור הצליח</title></head>
+      <title>${hePage ? 'החיבור הצליח' : 'Connected!'}</title></head>
       <body style="font-family:Arial,sans-serif;background:#f5f6f8;margin:0;padding:40px 20px;text-align:center;">
         <div style="max-width:460px;margin:0 auto;background:#fff;border-radius:16px;padding:40px 28px;box-shadow:0 4px 20px rgba(0,0,0,.08);">
-          <div style="font-size:48px;">✅</div>
-          <h1 style="font-size:22px;color:#111;">החנות חוברה בהצלחה!</h1>
-          <p style="color:#444;line-height:1.7;">היועץ החכם מתחיל עכשיו לטעון את הנתונים שלך (לקוחות והזמנות). זה ייקח כמה דקות.</p>
-          <p style="color:#444;line-height:1.7;">סיסמת הכניסה שלך ליועץ:</p>
+          <div style="font-size:48px;">🎉</div>
+          <h1 style="font-size:22px;color:#111;">${hePage ? `${displayName} מחוברת!` : `${displayName} is connected!`}</h1>
+          <p style="color:#444;line-height:1.7;">${hePage
+            ? 'הצוות שלך — דניאל, מאיה ונועה — מתחיל עכשiv לנתח את החנות (לקוחות והזמנות). זה ייקח כמה דקות, ונשלח לך מייל כשהכל מוכן.'
+            : 'Your team — Daniel, Maya and Noa — is now analyzing your store (customers & orders). This takes a few minutes; we will email you when everything is ready.'}</p>
+          <a href="${chatLink}" style="display:inline-block;background:#0a6fe0;color:#fff;text-decoration:none;font-weight:700;padding:14px 26px;border-radius:12px;margin:10px 0;">${hePage ? "לצ'אט האישי שלך ←" : 'Open your personal chat →'}</a>
+          <p style="color:#444;line-height:1.7;margin-top:14px;">${hePage ? 'סיסמת הכניסה שלך:' : 'Your password:'}</p>
           <div style="font-size:20px;font-weight:800;letter-spacing:1px;background:#f0f4ff;color:#0a6fe0;padding:12px;border-radius:10px;">${advisorPassword}</div>
-          <p style="color:#888;font-size:13px;margin-top:18px;">שמור את הסיסמה הזו. אפשר לשנות אותה איתנו בכל עת.</p>
+          <p style="color:#888;font-size:13px;margin-top:18px;">${hePage ? 'שמור את הסיסמה. שלחנו לך אותה גם למייל.' : 'Save this password. We also emailed it to you.'}</p>
         </div>
       </body></html>`);
   } catch (err) {
