@@ -1187,6 +1187,27 @@
     } catch (e) { window._smsConfigured = false; }
   }
 
+  // ===== i18n foundation =====
+  // The store's language comes from its settings (he for Israeli stores, en for
+  // international). Direction + <html lang> follow it. The full string dictionary
+  // plugs into this; until then, EN stores at least get correct LTR layout and
+  // the advisor itself already speaks their language (server-side).
+  window._storeLang = 'he';
+  async function loadStoreLanguage() {
+    try {
+      const res = await fetch('/api/settings?password=' + encodeURIComponent(PASSWORD));
+      const d = await res.json();
+      if (d && d.ok && d.settings && d.settings.language) {
+        window._storeLang = d.settings.language;
+        if (window._storeLang === 'en') {
+          document.documentElement.setAttribute('dir', 'ltr');
+          document.documentElement.setAttribute('lang', 'en');
+        }
+      }
+    } catch (e) { /* stays Hebrew RTL */ }
+  }
+  loadStoreLanguage();
+
   // Load and show the store's WhatsApp credit balance in the sidebar.
   async function loadCreditsBalance() {
     try {
