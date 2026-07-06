@@ -325,8 +325,8 @@ async function runCampaign(id, shop, segment, template, channels) {
           }).then(() => { c.queued++; didSomething = true; })
             .catch(e => c.log.push({ customer: cust.email, failed: e.message }));
         } else {
-          const html = mailer.buildHtmlEmail(fullBody, { brand: BRAND, to: contact.email });
-          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || ('הודעה מ-' + BRAND), html, text: fullBody });
+          const html = mailer.buildHtmlEmail(fullBody, { brand: BRAND, language: settings.language, to: contact.email });
+          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || ('הודעה מ-' + BRAND), html, text: fullBody, fromName: BRAND });
           if (sent.ok) { c.sent++; didSomething = true; }
           else { c.log.push({ customer: cust.email, failed: sent.error }); }
         }

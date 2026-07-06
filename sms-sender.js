@@ -48,12 +48,21 @@ async function sendOne(shop, { phone, message, sender }) {
     return { ok: false, error: 'opted_out', skipped: true };
   }
 
+  // SMS AS A SERVICE: the sender id is the SHOP's own name/number (from its
+  // settings, once verified with the SMS provider), falling back to the global
+  // env sender. Every shop's customers see the shop's name, not ours.
+  let shopSender = sender || null;
+  if (!shopSender) {
+    try { shopSender = (await require('./store-settings').getSettings(shop)).sms_sender; }
+    catch (e) { /* env fallback below */ }
+  }
+
   // Body per TextMe docs: everything wrapped in "sms", username under "user",
   // each phone as { "_": "05xxxxxxxx" }. Auth is via Bearer TOKEN header.
   const body = {
     sms: {
       user: { username: process.env.TEXTME_USERNAME },
-      source: (sender || process.env.TEXTME_SENDER || '770').slice(0, 11),
+      source: (shopSender || process.env.TEXTME_SENDER || '770').slice(0, 11),
       message: message,
       add_unsubscribe: 3, // TextMe appends its own one-click removal link (legal)
       destinations: { phone: [ { "_": to } ] }

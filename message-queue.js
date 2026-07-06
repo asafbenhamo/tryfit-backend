@@ -203,9 +203,10 @@ async function processDue(limit = 60) {
         const r = await smsSender.sendOne(m.shop_domain, { phone: m.phone, message: body });
         ok = r.ok; err = r.error || null;
       } else if (m.channel === 'email' && m.email) {
-        const brand = (await storeSettings.getSettings(m.shop_domain).catch(() => ({}))).brand || '770';
-        const html = mailer.buildHtmlEmail(body, { brand, to: m.email });
-        const r = await mailer.sendEmail({ to: m.email, subject: m.subject || ('הודעה מ-' + brand), html, text: body });
+        const qset = await storeSettings.getSettings(m.shop_domain).catch(() => ({}));
+        const brand = qset.brand || '770';
+        const html = mailer.buildHtmlEmail(body, { brand, language: qset.language, to: m.email });
+        const r = await mailer.sendEmail({ to: m.email, subject: m.subject || ('הודעה מ-' + brand), html, text: body, fromName: brand });
         ok = r.ok; err = r.error || null;
       } else {
         await mark(m.id, 'skipped', null, 'no_channel'); skipped++; continue;

@@ -2004,7 +2004,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       const gate = await compliance.canContactCustomer(shop, { email, phone });
       if (gate.allowed) {
         const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: storeBrand(shop), to: email, shop });
-        const sent = await mailer.sendEmail({ to: email, subject: message_subject || ("הודעה מ-" + storeBrand(shop)), html, text: finalBody });
+        const sent = await mailer.sendEmail({ to: email, subject: message_subject || ("הודעה מ-" + storeBrand(shop)), html, text: finalBody, fromName: storeBrand(shop) });
         result.steps.channels.email = { channel: "email", ok: sent.ok, error: sent.error || null, id: sent.id || null };
         if (sent.ok) {
           didSomething = true;
@@ -2131,7 +2131,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
         const html = mailer.buildHtmlEmail(message_body || "הכנו לך עגלה אישית!", {
           cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email, shop
         });
-        const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
+        const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody, fromName: storeBrand(shop) });
         result.steps.channels.email = { channel: "email", ok: sent.ok, error: sent.error || null, id: sent.id || null };
         if (sent.ok) { didSomething = true; if (!result.steps.message) result.steps.message = result.steps.channels.email; }
       } else {
@@ -2238,7 +2238,7 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
             const html = mailer.buildHtmlEmail(cart.body || "הכנו לך עגלה אישית!", {
               cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email, shop
             });
-            const sent = await mailer.sendEmail({ to: email, subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody });
+            const sent = await mailer.sendEmail({ to: email, subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody, fromName: storeBrand(shop) });
             if (sent.ok) emailsSent++; else failed++;
             // Send the owner ONE sample copy of what customers receive.
             if (sent.ok && !ownerSampleSent) {
@@ -3461,11 +3461,36 @@ app.get("/auth/callback", async (req, res) => {
   }
 });
 
-app.get("/admin/list-stores", (req, res) => {
+app.get("/admin/list-stores", async (req, res) => {
   if (!isAdmin(req)) {
     return res.status(401).json({ error: "סיסמה שגויה" });
   }
-  res.json({ ok: true, stores: shopify.listStores() });
+  // MASTER VIEW: every store with its settings (language/brand/sender), today's
+  // smart-outreach usage vs cap, and WhatsApp credit balance — one control panel.
+  const stores = shopify.listStores();
+  const enriched = [];
+  for (const s of stores) {
+    const row = { ...s };
+    delete row.access_token; // never expose tokens in the master list
+    try { row.settings = await storeSettings.getSettings(s.shop_domain); } catch (e) { row.settings = null; }
+    try { row.today = await storeSettings.remainingToday(s.shop_domain); } catch (e) { row.today = null; }
+    try { row.wa_credits = await creditsEngine.getBalance(s.shop_domain); } catch (e) { row.wa_credits = null; }
+    enriched.push(row);
+  }
+  res.json({ ok: true, stores: enriched });
+});
+
+// Master: update any store's settings (brand/language/sender/cap/autopilot).
+// POST /admin/store-settings?password=MASTER  { shop, brand?, language?, ... }
+app.post("/admin/store-settings", express.json(), async (req, res) => {
+  if (!isAdmin(req)) return res.status(401).json({ error: "סיסמה שגויה" });
+  const shop = (req.body.shop || "").toLowerCase().trim();
+  if (!shop) return res.status(400).json({ ok: false, error: "חסר shop" });
+  const patch = {};
+  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default"]) {
+    if (req.body[k] !== undefined) patch[k] = req.body[k];
+  }
+  res.json(await storeSettings.updateSettings(shop, patch));
 });
 
 // ======================

@@ -12,12 +12,21 @@ const LOGO_URL = process.env.MAIL_LOGO_URL || "";
  * Send a single email.
  * Returns { ok, id } or { ok:false, error }.
  */
-async function sendEmail({ to, subject, html, text }) {
+async function sendEmail({ to, subject, html, text, fromName, replyTo }) {
   if (!RESEND_API_KEY) {
     return { ok: false, error: "RESEND_API_KEY not configured" };
   }
   if (!to || !subject || (!html && !text)) {
     return { ok: false, error: "missing to/subject/body" };
+  }
+  // EMAIL AS A SERVICE: every shop sends through OUR infrastructure, but the
+  // customer sees the SHOP's name as the sender ("Nora Boutique <noreply@...>").
+  // The address stays ours (verified domain); only the display name is per-shop.
+  let from = FROM_EMAIL;
+  if (fromName) {
+    const addr = (FROM_EMAIL.match(/<([^>]+)>/) || [null, FROM_EMAIL])[1];
+    const cleanName = String(fromName).replace(/[<>"]/g, '').slice(0, 60);
+    from = `${cleanName} <${addr}>`;
   }
   try {
     const res = await fetch("https://api.resend.com/emails", {
@@ -27,7 +36,8 @@ async function sendEmail({ to, subject, html, text }) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        from: FROM_EMAIL,
+        from: from,
+        ...(replyTo ? { reply_to: replyTo } : {}),
         to: Array.isArray(to) ? to : [to],
         reply_to: REPLY_TO,
         subject,
@@ -56,6 +66,10 @@ async function sendEmail({ to, subject, html, text }) {
 function buildHtmlEmail(bodyText, opts = {}) {
   const brand = opts.brand || "770";
   const logoUrl = opts.logo_url || LOGO_URL;
+  // Direction follows the shop's language: Hebrew shops RTL, international LTR.
+  const isEn = (opts.language === 'en');
+  const dir = isEn ? 'ltr' : 'rtl';
+  const align = isEn ? 'left' : 'right';
 
   let safe = String(bodyText || "")
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -83,12 +97,12 @@ function buildHtmlEmail(bodyText, opts = {}) {
     : "";
 
   return '<!DOCTYPE html>\n' +
-'<html dir="rtl" lang="he">\n' +
+'<html dir="' + dir + '" lang="' + (isEn ? 'en' : 'he') + '">\n' +
 '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>\n' +
 '<body style="margin:0;padding:0;background:#f2f2f3;font-family:\'Segoe UI\',Arial,Helvetica,sans-serif;">\n' +
 '  <div style="max-width:560px;margin:0 auto;padding:28px 16px;">\n' +
 '    <div style="padding:8px 0 22px;">' + header + '</div>\n' +
-'    <div style="background:#ffffff;border-radius:18px;padding:40px 34px;direction:rtl;text-align:right;box-shadow:0 4px 24px rgba(0,0,0,0.07);">\n' +
+'    <div style="background:#ffffff;border-radius:18px;padding:40px 34px;direction:' + dir + ';text-align:' + align + ';box-shadow:0 4px 24px rgba(0,0,0,0.07);">\n' +
 '      <div style="font-size:16.5px;line-height:1.85;color:#2a2a2a;">' + safe + '</div>\n' +
 '      ' + cta + '\n' +
 '    </div>\n' +
