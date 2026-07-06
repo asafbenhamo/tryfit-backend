@@ -127,10 +127,25 @@ async function processDue(limit = 60) {
      FETCH FIRST ${parseInt(limit)} ROWS ONLY`
   ).catch(e => { console.error('[queue] fetch due:', e.message); return { rows: [] }; });
 
-  let sent = 0, skipped = 0, failed = 0;
+  let sent = 0, skipped = 0, failed = 0, deferred = 0;
+  const storeSettings = require('./store-settings');
+  const capCache = {}; // shop -> remaining today (fetched once per tick)
 
   for (const m of due.rows) {
     try {
+      // DAILY CAP: queued messages also count against the shop's daily budget.
+      // When exhausted, push the message to tomorrow morning instead of sending.
+      if (capCache[m.shop_domain] === undefined) {
+        try { capCache[m.shop_domain] = (await storeSettings.remainingToday(m.shop_domain)).remaining; }
+        catch (e) { capCache[m.shop_domain] = Infinity; }
+      }
+      if (capCache[m.shop_domain] <= 0) {
+        await db.query(`UPDATE scheduled_messages SET send_at = $2 WHERE id=$1`,
+          [m.id, computeSendAt(10, 1)]).catch(() => {});
+        deferred++;
+        continue;
+      }
+
       // 1. Opt-out gate (Flashy-synced + local) — always.
       if (await compliance.isOptedOut(m.shop_domain, { email: m.email, phone: m.phone })) {
         await mark(m.id, 'skipped', null, 'opted_out'); skipped++; continue;
@@ -188,14 +203,15 @@ async function processDue(limit = 60) {
         const r = await smsSender.sendOne(m.shop_domain, { phone: m.phone, message: body });
         ok = r.ok; err = r.error || null;
       } else if (m.channel === 'email' && m.email) {
-        const html = mailer.buildHtmlEmail(body, { brand: '770', to: m.email });
-        const r = await mailer.sendEmail({ to: m.email, subject: m.subject || 'הודעה מ-770', html, text: body });
+        const brand = (await storeSettings.getSettings(m.shop_domain).catch(() => ({}))).brand || '770';
+        const html = mailer.buildHtmlEmail(body, { brand, to: m.email });
+        const r = await mailer.sendEmail({ to: m.email, subject: m.subject || ('הודעה מ-' + brand), html, text: body });
         ok = r.ok; err = r.error || null;
       } else {
         await mark(m.id, 'skipped', null, 'no_channel'); skipped++; continue;
       }
 
-      if (ok) { await mark(m.id, 'sent', new Date(), null); sent++; }
+      if (ok) { await mark(m.id, 'sent', new Date(), null); sent++; capCache[m.shop_domain]--; }
       else { await mark(m.id, 'failed', null, err); failed++; }
 
       await new Promise(r => setTimeout(r, 400)); // pace
@@ -205,10 +221,10 @@ async function processDue(limit = 60) {
     }
   }
 
-  if (sent + skipped + failed > 0) {
-    console.log(`📬 [queue] processed: sent=${sent} skipped=${skipped} failed=${failed}`);
+  if (sent + skipped + failed + deferred > 0) {
+    console.log(`📬 [queue] processed: sent=${sent} skipped=${skipped} failed=${failed} deferred=${deferred}`);
   }
-  return { sent, skipped, failed };
+  return { sent, skipped, failed, deferred };
 }
 
 async function mark(id, status, sentAt, error) {

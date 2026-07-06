@@ -23,6 +23,7 @@ const morningBrief = require("./morning-brief");
 const smsSender = require("./sms-sender");
 const messageQueue = require("./message-queue");
 const noaEngine = require("./noa-engine");
+const storeSettings = require("./store-settings");
 const attributionEngine = require("./attribution-engine");
 const pushEngine = require("./push-engine");
 const flashySync = require("./flashy-sync");
@@ -229,6 +230,28 @@ app.get("/api/queue/status", async (req, res) => {
   if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   const shop = resolveShop(req) || DEFAULT_SHOP;
   res.json(await messageQueue.pendingStats(shop));
+});
+
+// ===== Store settings (brand / language / currency / daily cap / autopilot) =====
+app.get("/api/settings", async (req, res) => {
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+  const shop = resolveShop(req) || DEFAULT_SHOP;
+  const s = await storeSettings.getSettings(shop);
+  const cap = await storeSettings.remainingToday(shop);
+  res.json({ ok: true, settings: s, today: cap });
+});
+
+app.post("/api/settings", express.json(), async (req, res) => {
+  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+  const shop = resolveShop(req) || DEFAULT_SHOP;
+  const allowed = {};
+  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default"]) {
+    if (req.body[k] !== undefined) allowed[k] = req.body[k];
+  }
+  if (allowed.language && !["he", "en"].includes(allowed.language)) return res.status(400).json({ ok: false, error: "language must be he/en" });
+  if (allowed.daily_cap !== undefined) allowed.daily_cap = Math.max(10, Math.min(parseInt(allowed.daily_cap) || 500, 5000));
+  const r = await storeSettings.updateSettings(shop, allowed);
+  res.json(r);
 });
 
 app.get("/privacy", (req, res) => {
@@ -1172,7 +1195,7 @@ app.get("/api/daily-plan", async (req, res) => {
   try {
     if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
-    const shopName = "770";
+    const shopName = storeBrand(shop);
     const planPrompt = `בנה לי תוכנית פעולה עסקית להיום כדי להכניס כמה שיותר כסף. אתה מנהל השיווק של החנות.
 חשוב כמו חברת שיווק מובילה: נתח את המצב (עגלות נטושות, VIP שנעלמו, מוצרים חמים, דפוסי קנייה, cross-sell), ובנה תוכנית עם 2-4 מהלכים מתועדפים לפי פוטנציאל הכנסה.
 לכל מהלך: כותרת קצרה, כמה לקוחות/מה הוא מכסה, צפי הכנסה בשקלים, והמלצה איך לבצע.
@@ -1694,7 +1717,7 @@ ${tasksJson}
 {"updates":[{"id":<מזהה המהלך>,"percentage":<אחוז חדש או null>,"max_customers":<מקסימום לקוחות חדש או null>,"new_title":<כותרת חדשה או null>,"new_what":<תיאור מעודכן של "מה אעשה" או null>,"remove":<true אם להסיר את המהלך, אחרת false>}]}
 כלול רק מהלכים שצריך לשנות. אם הבקשה לא ברורה או לא רלוונטית, החזר {"updates":[]}.`;
 
-    const result = await aiBrain.askBrain(shop, "770", prompt, []);
+    const result = await aiBrain.askBrain(shop, storeBrand(shop), prompt, []);
     let updates = [];
     try {
       const clean = (result.answer || '').replace(/```json|```/g, '').trim();
@@ -1981,7 +2004,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       const gate = await compliance.canContactCustomer(shop, { email, phone });
       if (gate.allowed) {
         const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: storeBrand(shop), to: email, shop });
-        const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הודעה מ-770", html, text: finalBody });
+        const sent = await mailer.sendEmail({ to: email, subject: message_subject || ("הודעה מ-" + storeBrand(shop)), html, text: finalBody });
         result.steps.channels.email = { channel: "email", ok: sent.ok, error: sent.error || null, id: sent.id || null };
         if (sent.ok) {
           didSomething = true;
@@ -2990,13 +3013,63 @@ app.get("/api/tryon/video-proxy", async (req, res) => {
   }
 });
 
-app.post("/webhooks/compliance", verifyShopifyWebhook, (req, res) => {
-  console.log("Compliance webhook received:", JSON.stringify(req.body).substring(0, 200));
+// ===== GDPR / Privacy compliance webhooks (App Store MANDATORY) =====
+// Shopify sends three topics (x-shopify-topic header). We must ACTUALLY act:
+//   customers/data_request — merchant must supply the customer's data: we log a
+//     structured request row so the merchant can be provided the export.
+//   customers/redact — delete/anonymize everything we hold about that customer.
+//   shop/redact — sent 48h after uninstall: delete ALL data for that shop.
+app.post("/webhooks/compliance", verifyShopifyWebhook, async (req, res) => {
+  const topic = req.headers["x-shopify-topic"] || "";
+  const body = req.body || {};
+  const shop = (body.shop_domain || "").toLowerCase();
+  console.log(`🔒 [GDPR] ${topic} for ${shop}`);
+  try {
+    if (topic === "customers/redact") {
+      const email = (body.customer && body.customer.email) || null;
+      const cid = (body.customer && String(body.customer.id)) || null;
+      // Remove the customer's PII everywhere we hold it.
+      if (cid) await db.query(`DELETE FROM store_customers WHERE shop_domain=$1 AND shopify_customer_id=$2`, [shop, cid]).catch(() => {});
+      if (email) {
+        await db.query(`DELETE FROM store_customers WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]).catch(() => {});
+        await db.query(`UPDATE advisor_actions SET target_email=NULL, target_phone=NULL WHERE shop_domain=$1 AND LOWER(target_email)=LOWER($2)`, [shop, email]).catch(() => {});
+        await db.query(`UPDATE scheduled_messages SET status='cancelled' WHERE shop_domain=$1 AND LOWER(email)=LOWER($2) AND status='pending'`, [shop, email]).catch(() => {});
+        await db.query(`DELETE FROM incoming_messages WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]).catch(() => {});
+      }
+      // NOTE: message_optouts is intentionally KEPT — a suppression list is required
+      // to keep honoring the person's do-not-contact request (GDPR legitimate interest).
+    } else if (topic === "shop/redact") {
+      // Full erasure of everything for this shop.
+      const tables = ["store_customers", "store_orders", "store_order_items", "advisor_actions",
+        "scheduled_messages", "incoming_messages", "message_optouts", "store_settings",
+        "abandoned_checkouts", "campaign_results"];
+      for (const t of tables) {
+        await db.query(`DELETE FROM ${t} WHERE shop_domain=$1`, [shop]).catch(() => {});
+      }
+      console.log(`🔒 [GDPR] shop ${shop} fully redacted`);
+    } else if (topic === "customers/data_request") {
+      // Record the request so the merchant can be given the customer's data.
+      await db.query(
+        `INSERT INTO data_requests (shop_domain, payload, created_at) VALUES ($1, $2, NOW())`,
+        [shop, JSON.stringify(body)]
+      ).catch(async () => {
+        await db.query(`CREATE TABLE IF NOT EXISTS data_requests (id BIGSERIAL PRIMARY KEY, shop_domain TEXT, payload JSONB, created_at TIMESTAMPTZ DEFAULT NOW())`).catch(() => {});
+        await db.query(`INSERT INTO data_requests (shop_domain, payload, created_at) VALUES ($1, $2, NOW())`, [shop, JSON.stringify(body)]).catch(() => {});
+      });
+    }
+  } catch (e) { console.error("[GDPR] handler error:", e.message); }
   res.status(200).json({ success: true });
 });
 
-app.post("/webhooks/app/uninstalled", verifyShopifyWebhook, (req, res) => {
-  console.log("App uninstalled:", req.body?.shop_domain || "unknown");
+app.post("/webhooks/app/uninstalled", verifyShopifyWebhook, async (req, res) => {
+  const shop = (req.body && req.body.shop_domain || req.body && req.body.domain || "").toLowerCase() ||
+               (req.headers["x-shopify-shop-domain"] || "").toLowerCase();
+  console.log("App uninstalled:", shop || "unknown");
+  // CRITICAL: the moment a shop uninstalls, all outgoing messaging must stop.
+  if (shop) {
+    await db.query(`UPDATE scheduled_messages SET status='cancelled' WHERE shop_domain=$1 AND status='pending'`, [shop]).catch(() => {});
+    try { require('./shopify-client').deactivateStore && require('./shopify-client').deactivateStore(shop); } catch (e) { /* optional */ }
+  }
   res.status(200).json({ success: true });
 });
 

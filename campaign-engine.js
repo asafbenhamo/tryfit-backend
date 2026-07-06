@@ -132,6 +132,14 @@ async function runCampaign(id, shop, segment, template, channels) {
   const wantSms = chans.includes('sms');
   const smsSender = require('./sms-sender');
   const mq = require('./message-queue');
+  const storeSettings = require('./store-settings');
+  const settings = await storeSettings.getSettings(shop).catch(() => ({ brand: '770', daily_cap: 500 }));
+  const BRAND = settings.brand || '770';
+
+  // DAILY CAP: how many smart outreaches are left today. When we hit the cap,
+  // remaining customers are QUEUED for tomorrow (not dropped) — graceful pacing.
+  let capLeft = Infinity;
+  try { capLeft = (await storeSettings.remainingToday(shop)).remaining; } catch (e) { /* unlimited */ }
 
   // SMART TIMING: pre-compute each customer's personal best hour (from her own
   // order history) in ONE batched query. Sends are then queued for that hour.
@@ -177,6 +185,31 @@ async function runCampaign(id, shop, segment, template, channels) {
         c.log.push({ customer: cust.name || cust.email, skipped: gate.reason });
         continue;
       }
+
+      // DAILY CAP (default 500/day): when today's budget is exhausted, queue this
+      // customer for TOMORROW morning instead of sending now — graceful pacing,
+      // nobody is dropped, and every day stays within the smart-outreach budget.
+      if (capLeft <= 0) {
+        const capBody = (template.body || '')
+          .replace(/\{NAME\}/g, cust.name || '')
+          .replace(/\{PRODUCT_LINE\}/g, cust.last_product ? `ראינו שאהבת את ${cust.last_product} - ` : '')
+          .replace(/\{PRODUCT\}/g, cust.last_product || '');
+        const capChannel = (wantSms && hasPhone && smsSender.isConfigured()) ? 'sms'
+                         : (wantEmail && contact.email) ? 'email' : null;
+        if (capChannel) {
+          await mq.enqueue(shop, {
+            channel: capChannel, phone: contact.phone, email: contact.email, name: cust.name || null,
+            subject: template.subject || `הודעה מ-${BRAND}`,
+            message: capBody, send_at: mq.computeSendAt(10, 1), kind: 'followup', step: 1,
+            campaign_id: id, segment: c.segment_key || null,
+            coupon_pct: (!isFixed && !fixedCode && pct > 0) ? pct : null, coupon_days: 2
+          }).then(() => { c.queued++; }).catch(() => {});
+        }
+        c.done++;
+        c.log.push({ customer: cust.name || cust.email, deferred: 'daily_cap' });
+        continue;
+      }
+      capLeft--;
 
       // Coupon: if the merchant supplied their OWN existing code (fixed_code), use it
       // for everyone exactly as requested — don't create a new one. Otherwise create a
@@ -286,14 +319,14 @@ async function runCampaign(id, shop, segment, template, channels) {
           const hour = bestHours[(contact.email || '').toLowerCase()] || 11;
           await mq.enqueue(shop, {
             channel: 'email', email: contact.email, phone: contact.phone, name: cust.name || null,
-            subject: template.subject || 'הודעה מ-770',
+            subject: template.subject || ('הודעה מ-' + BRAND),
             message: fullBody, send_at: mq.computeSendAt(hour), kind: 'timed',
             campaign_id: id, segment: c.segment_key || null
           }).then(() => { c.queued++; didSomething = true; })
             .catch(e => c.log.push({ customer: cust.email, failed: e.message }));
         } else {
-          const html = mailer.buildHtmlEmail(fullBody, { brand: '770', to: contact.email });
-          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || 'הודעה מ-770', html, text: fullBody });
+          const html = mailer.buildHtmlEmail(fullBody, { brand: BRAND, to: contact.email });
+          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || ('הודעה מ-' + BRAND), html, text: fullBody });
           if (sent.ok) { c.sent++; didSomething = true; }
           else { c.log.push({ customer: cust.email, failed: sent.error }); }
         }

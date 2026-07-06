@@ -30,11 +30,28 @@ async function generateSegmentCopy(shop, { segment_key, segment_label, discount,
   let MODEL = 'claude-sonnet-5';
   try { MODEL = require('./ai-brain').MODEL || MODEL; } catch (e) { /* default */ }
 
+  // Message language follows the SHOP's configured language (he for Israeli
+  // stores, en for international ones) — same brain, right voice per market.
+  let lang = 'he';
+  try { lang = (await require('./store-settings').getSettings(shop)).language || 'he'; } catch (e) { /* he */ }
+
   const brief = SEGMENT_BRIEFS[segment_key] || 'לקוחה של חנות אופנה. טון חם ואישי.';
   const examples = sample.slice(0, 3).map(s =>
     `- ${s.name || 'לקוחה'}${s.last_product ? `, קנתה לאחרונה: ${s.last_product}` : ''}`).join('\n');
 
-  const prompt = `אתה מאיה — אשת מכירות של חנות אופנה ישראלית. כתבי הודעת SMS/וואטסאפ קצרה לפלח לקוחות.
+  const langRules = lang === 'en'
+    ? `1. Write in natural, warm ENGLISH — like a friend texting, not an ad. 3-4 lines max.
+2. You MUST include {NAME} once (customer name), {PRODUCT_LINE} once (a sentence about what she bought — replaced automatically), and {COUPON} once (the code).
+3. No shouting caps, no "HUGE SALE", at most one or two emoji.
+4. Don't invent prices or specific products.
+5. Short email subject line (up to 6 words), in English.`
+    : `1. 3-4 שורות מקסימום, עברית טבעית וחמה — כמו חברה שכותבת, לא פרסומת.
+2. חובה לכלול את הצירוף {NAME} פעם אחת (שם הלקוחה), {PRODUCT_LINE} פעם אחת (משפט על המוצר שקנתה — יוחלף אוטומטית), ו-{COUPON} פעם אחת (הקוד).
+3. בלי אותיות גדולות צועקות, בלי "מבצע ענק", מקסימום אימוג'י אחד-שניים.
+4. אל תמציאי מחירים או מוצרים ספציפיים.
+5. שורת נושא קצרה למייל (עד 6 מילים).`;
+
+  const prompt = `אתה מאיה — אשת מכירות של חנות אונליין. כתבי הודעת SMS/וואטסאפ קצרה לפלח לקוחות.
 
 הפלח: ${segment_label || segment_key}
 אפיון: ${brief}
@@ -43,11 +60,7 @@ async function generateSegmentCopy(shop, { segment_key, segment_label, discount,
 ${examples || '- (אין דוגמאות)'}
 
 חוקים מחייבים:
-1. 3-4 שורות מקסימום, עברית טבעית וחמה — כמו חברה שכותבת, לא פרסומת.
-2. חובה לכלול את הצירוף {NAME} פעם אחת (שם הלקוחה), {PRODUCT_LINE} פעם אחת (משפט על המוצר שקנתה — יוחלף אוטומטית), ו-{COUPON} פעם אחת (הקוד).
-3. בלי אותיות גדולות צועקות, בלי "מבצע ענק", מקסימום אימוג'י אחד-שניים.
-4. אל תמציאי מחירים או מוצרים ספציפיים.
-5. שורת נושא קצרה למייל (עד 6 מילים).
+${langRules}
 
 השיבי JSON בלבד, בלי הסברים ובלי גרשי קוד:
 {"subject": "...", "body": "..."}`;
