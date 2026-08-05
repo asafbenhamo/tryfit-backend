@@ -9,6 +9,24 @@ const aiTools = require("./ai-tools");
 const MODEL = "claude-sonnet-5";
 const MAX_TOOL_ROUNDS = 6; // safety cap on the tool-use loop
 
+// A single tool call may not stall the whole conversation. Tools reach out to
+// Shopify and Postgres, neither of which is guaranteed to answer; without a
+// bound, one hung call leaves the merchant staring at a spinner forever with no
+// error to react to. On timeout the model is told the tool failed and can still
+// answer from what it has.
+const TOOL_TIMEOUT_MS = 25000;
+const MODEL_TIMEOUT_MS = 90000;
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    })
+  ]);
+}
+
 // Lazy client init so the server never crashes at boot if the key is missing.
 let _client = null;
 function getClient() {
@@ -16,7 +34,7 @@ function getClient() {
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error("ANTHROPIC_API_KEY not configured");
   }
-  _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: MODEL_TIMEOUT_MS, maxRetries: 2 });
   return _client;
 }
 
@@ -564,8 +582,21 @@ async function askBrain(shopDomain, shopName, userMessage, priorMessages = [], i
       const toolResults = [];
       for (const block of response.content) {
         if (block.type === "tool_use") {
-          toolsUsed.push({ name: block.name, input: block.input });
-          const result = await runTool(shopDomain, block.name, block.input);
+          const startedAt = Date.now();
+          let result;
+          try {
+            result = await withTimeout(
+              Promise.resolve(runTool(shopDomain, block.name, block.input)),
+              TOOL_TIMEOUT_MS, `tool ${block.name}`);
+          } catch (e) {
+            // Hand the failure to the model rather than throwing: it can say
+            // something useful instead of the request dying silently.
+            result = { ok: false, error: e.message };
+            console.error(`[brain] tool ${block.name} failed:`, e.message);
+          }
+          const ms = Date.now() - startedAt;
+          if (ms > 5000) console.warn(`[brain] slow tool ${block.name}: ${ms}ms`);
+          toolsUsed.push({ name: block.name, input: block.input, ms, ok: !(result && result.ok === false) });
           toolResults.push({
             type: "tool_result",
             tool_use_id: block.id,

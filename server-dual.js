@@ -279,10 +279,36 @@ app.get("/api/health/ai", async (req, res) => {
       messages: [{ role: "user", content: "Reply with the single word: ok" }]
     });
     const text = (r.content || []).map(c => c.text || "").join("").trim();
+
+    // ?full=1 runs a real advisor question through the whole tool loop, which is
+    // what the chat actually does. A bare model call can be healthy while a tool
+    // hangs on Shopify or Postgres — this reports the time each tool took, so a
+    // stall points at a specific tool instead of "the chat doesn't answer".
+    if (req.query.full) {
+      const t0 = Date.now();
+      try {
+        const shopName = (shopify.getStore(shop) || {}).name || shop;
+        const brain = await aiBrain.askBrain(shop, shopName, "כמה לקוחות יש לי בחנות?", [], []);
+        return res.json({
+          ok: !!brain.ok, mode: "full_chat_path", model: aiBrain.MODEL,
+          ping_ms: Date.now() - started - (Date.now() - t0),
+          chat_ms: Date.now() - t0,
+          tools: (brain.toolsUsed || []).map(x => ({ name: x.name, ms: x.ms, ok: x.ok })),
+          answer_preview: String(brain.answer || "").slice(0, 200)
+        });
+      } catch (e) {
+        return res.json({
+          ok: false, mode: "full_chat_path", stage: "askBrain",
+          chat_ms: Date.now() - t0, error: e.message
+        });
+      }
+    }
+
     res.json({
       ok: true, model: aiBrain.MODEL, replied: text,
       ms: Date.now() - started,
-      usage: r.usage || null
+      usage: r.usage || null,
+      hint: "add &full=1 to run a real question through the whole tool loop"
     });
   } catch (e) {
     // Surface what the API actually said — credit exhaustion, a bad model name
