@@ -144,18 +144,24 @@ function freeze(iso) {
   ok('it ran', r.ok === true && !r.skipped, JSON.stringify(r).slice(0, 160));
   ok('it started a campaign', started.length === 1);
   ok('it contacted people', r.contacted > 0, String(r.contacted));
-  ok('it held some people back', r.held_out > 0, String(r.held_out));
   ok('contacted + held_out accounts for the segment', r.contacted + r.held_out <= 200);
 
-  console.log('\n-- the holdout group is logged as control and never messaged --');
-  const controls = logged.filter(l => l.details && l.details.control === 'true');
-  ok('every held-out customer is written down', controls.length === r.held_out, controls.length + ' vs ' + r.held_out);
-  ok('control rows carry the segment', controls.every(c => c.details.segment === 'at_risk'));
-  const recipientEmails = new Set(started[0].segment.map(x => x.email));
-  ok('nobody is both contacted and held out',
-     controls.every(c => !recipientEmails.has(c.email)));
-  const rate = r.held_out / (r.contacted + r.held_out);
-  ok('holdout is roughly the configured rate', Math.abs(rate - policy.HOLDOUT_RATE) < 0.07, rate.toFixed(3));
+  console.log('\n-- holdout is off by default: nobody is skipped for measurement --');
+  ok('HOLDOUT_RATE is 0', policy.HOLDOUT_RATE === 0, String(policy.HOLDOUT_RATE));
+  ok('nobody was held back', r.held_out === 0, String(r.held_out));
+  ok('no control rows were written', logged.filter(l => l.details && l.details.control === 'true').length === 0);
+  ok('every eligible customer was contacted', r.contacted === 200, String(r.contacted));
+
+  console.log('\n-- but the holdout mechanism still works if switched back on --');
+  {
+    const day = '2026-08-05';
+    let held = 0, N = 20000;
+    for (let i = 0; i < N; i++) if (policy.isHoldout('s', 'c' + i + '@x.com', day, 0.10)) held++;
+    ok('an explicit rate holds back roughly that share', Math.abs(held / N - 0.10) < 0.015, (held / N).toFixed(4));
+    ok('a zero rate holds back nobody', policy.isHoldout('s', 'a@b.com', day, 0) === false);
+    const a = policy.isHoldout('s', 'a@b.com', day, 0.10);
+    ok('and it stays stable for the same customer', a === policy.isHoldout('s', 'a@b.com', day, 0.10));
+  }
 
   console.log('\n-- it refuses to send messages that are not personal --');
   // Nothing specific known about these customers, so nothing personal can be

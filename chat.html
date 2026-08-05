@@ -1179,10 +1179,11 @@
       'ap.statusOn': 'פעיל',
       'ap.statusOff': 'כבוי',
       'ap.today': 'היום: {used} מתוך {cap} פניות',
-      'ap.lastRun': 'הרצה אחרונה ({date}): {contacted} פניות · {held} בקבוצת ביקורת · {rejected} נפסלו כלא-מספיק-אישיות',
+      'ap.lastRun': 'הרצה אחרונה ({date}): {contacted} פניות · {rejected} נפסלו כלא-מספיק-אישיות',
       'ap.noRuns': 'עוד לא הייתה הרצה אוטונומית.',
-      'ap.lift': 'תרומה נטו מול קבוצת ביקורת: {amount}',
-      'ap.liftPending': 'עוד אין מספיק נתונים למדידת תרומה נטו',
+      'ap.earned': 'הכנסתי לך עד היום: {amount}',
+      'ap.earnedMonth': 'מתוכם החודש: {amount}',
+      'ap.record': '{outreaches} פניות · {conversions} נסגרו במכירה',
       'ap.confirmOn': 'להפעיל מצב אוטונומי?\n\nמעכשיו הסוכן ישלח הודעות ללקוחות שלך בעצמו, בלי לבקש אישור לכל פנייה.\n\nהוא מוגבל ל-{cap} פניות ביום, שולח רק בשעות המותרות באזור הזמן של החנות, ולא פונה למי שביקש להסיר.',
       'ap.timezone': 'אזור זמן: {tz}',
       'ap.explain': 'למה זה נבחר?',
@@ -1592,10 +1593,11 @@
       'ap.statusOn': 'On',
       'ap.statusOff': 'Off',
       'ap.today': 'Today: {used} of {cap} outreaches',
-      'ap.lastRun': 'Last run ({date}): {contacted} sent · {held} in the control group · {rejected} rejected as not personal enough',
+      'ap.lastRun': 'Last run ({date}): {contacted} sent · {rejected} rejected as not personal enough',
       'ap.noRuns': 'No autonomous run yet.',
-      'ap.lift': 'Net contribution vs the control group: {amount}',
-      'ap.liftPending': 'Not enough data yet to measure net contribution',
+      'ap.earned': 'Earned for you so far: {amount}',
+      'ap.earnedMonth': 'This month: {amount}',
+      'ap.record': '{outreaches} outreaches · {conversions} closed a sale',
       'ap.confirmOn': 'Turn on autonomous mode?\n\nFrom now on the agent will message your customers by itself, without asking you to approve each one.\n\nIt is capped at {cap} outreaches a day, only sends during legal hours in your store\'s timezone, and never contacts anyone who unsubscribed.',
       'ap.timezone': 'Timezone: {tz}',
       'ap.explain': 'Why this choice?',
@@ -2559,22 +2561,20 @@
     const on = !!d.on;
     const last = (d.runs || []).find(r => r.status === 'done');
 
+    const e = d.earned || {};
     let meta = '<div class="ap-meta">';
+    // The headline: money the agent brought in, on its own record.
+    meta += '<b>' + esc(t('ap.earned', { amount: money(e.total || 0) })) + '</b><br>';
+    if (e.this_month) meta += esc(t('ap.earnedMonth', { amount: money(e.this_month) })) + '<br>';
+    if (e.outreaches) meta += esc(t('ap.record', { outreaches: e.outreaches, conversions: e.conversions || 0 })) + '<br>';
     meta += esc(t('ap.today', { used: (d.today && d.today.used) || 0, cap: (d.today && d.today.cap) || d.daily_cap })) + '<br>';
-    meta += esc(t('ap.timezone', { tz: d.timezone || '' })) + '<br>';
+    meta += esc(t('ap.timezone', { tz: d.timezone || '' }));
     if (last) {
-      meta += esc(t('ap.lastRun', {
-        date: last.local_date, contacted: last.contacted,
-        held: last.held_out, rejected: last.rejected_not_smart
-      })) + '<br>';
+      meta += '<br>' + esc(t('ap.lastRun', {
+        date: last.local_date, contacted: last.contacted, rejected: last.rejected_not_smart
+      }));
     } else if (on) {
-      meta += esc(t('ap.noRuns')) + '<br>';
-    }
-    // The honest number: what the agent added over customers it left alone.
-    if (d.lift && d.lift.ok && d.lift.usable && d.lift.incremental_revenue != null) {
-      meta += '<b>' + esc(t('ap.lift', { amount: money(d.lift.incremental_revenue) })) + '</b>';
-    } else if (on) {
-      meta += esc(t('ap.liftPending'));
+      meta += '<br>' + esc(t('ap.noRuns'));
     }
     meta += '</div>';
 

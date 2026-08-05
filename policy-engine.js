@@ -41,7 +41,16 @@ const MIN_TO_EXPLOIT = 50;     // below this an arm is never treated as "known g
 const MIN_TO_SUPPRESS = 60;    // never switch an arm off on thin evidence
 const SUPPRESS_RATIO = 0.25;   // ...and only if it earns <25% of the shop average
 const EXPLORE_RATE = 0.15;     // share of picks spent on alternatives
-const HOLDOUT_RATE = 0.10;     // share of eligible customers deliberately not contacted
+// Share of customers deliberately left uncontacted so incremental lift can be
+// measured. OFF by default (product decision): the agent contacts everyone it
+// can, and revenue is reported the way every marketing platform reports it —
+// attributed, including sales that might have happened anyway.
+//
+// Turning this off costs ONLY the "what did the agent add over doing nothing"
+// number. It does not affect learning: the policy compares arms against each
+// other (this segment vs that one, 15% vs 20%), which needs no control group.
+// Set to e.g. 0.10 to switch incremental measurement back on.
+const HOLDOUT_RATE = 0;
 const ATTRIBUTION_WINDOW_DAYS = 7; // purchase window used for holdout comparison
 
 // Offers the agent is allowed to choose between. Kept coarse on purpose: finer
@@ -245,10 +254,12 @@ function decide(stats, segment, opts = {}) {
   };
 }
 
-// Should this particular customer be held out (deliberately not contacted) so we
-// can tell what the agent is actually adding? Stable per customer+day so the
-// same person is not held out on one channel and contacted on another.
+// Should this particular customer be held out (deliberately not contacted)?
+// With HOLDOUT_RATE at 0 this is always false and every eligible customer gets
+// contacted. Stable per customer+day when enabled, so the same person is not
+// held out on one channel and contacted on another.
 function isHoldout(shop, customerKey, dayKey, rate = HOLDOUT_RATE) {
+  if (!rate || rate <= 0) return false;
   if (!customerKey) return false;
   const s = `${shop}|${customerKey}|${dayKey}`;
   let h = 2166136261;

@@ -268,11 +268,24 @@ app.get("/api/autopilot", async (req, res) => {
   if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
   try {
     const s = await storeSettings.getSettings(shop);
-    const [runs, cap, lift] = await Promise.all([
+    const [runs, cap, earned] = await Promise.all([
       autopilot.recentRuns(shop, 7),
       storeSettings.remainingToday(shop),
-      policyEngine.measureLift(shop, { days: 30 })
+      // What the agent has brought in, reported the way every marketing
+      // platform reports it: attributed revenue on actions that converted.
+      db.query(
+        `SELECT COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome='converted'),0)::numeric AS total,
+                COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome='converted'
+                  AND closed_at >= date_trunc('month', NOW())),0)::numeric AS this_month,
+                COUNT(*) FILTER (WHERE outcome='converted')::int AS conversions,
+                COUNT(*)::int AS outreaches,
+                COUNT(*) FILTER (WHERE outcome='pending')::int AS pending
+           FROM advisor_actions
+          WHERE shop_domain=$1 AND action_type <> 'holdout'`,
+        [shop]
+      ).catch(() => ({ rows: [{}] }))
     ]);
+    const e = (earned.rows && earned.rows[0]) || {};
     res.json({
       ok: true,
       mode: s.autopilot,
@@ -283,7 +296,13 @@ app.get("/api/autopilot", async (req, res) => {
       daily_cap: s.daily_cap,
       today: cap,
       runs: runs.runs || [],
-      lift
+      earned: {
+        total: Math.round(parseFloat(e.total || 0)),
+        this_month: Math.round(parseFloat(e.this_month || 0)),
+        conversions: e.conversions || 0,
+        outreaches: e.outreaches || 0,
+        pending: e.pending || 0
+      }
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
