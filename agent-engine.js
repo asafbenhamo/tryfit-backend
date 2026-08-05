@@ -175,13 +175,13 @@ async function runTask(shop, task, opts = {}) {
 // have a phone, else email (free). Safety: respects working hours and opt-outs,
 // creates the personal coupon only AFTER a successful send (no orphan coupons).
 async function runTaskAuto(shop, task, segment, templateName) {
-  // #3 Working hours: never auto-send outside the allowed window.
-  if (!compliance.isWithinWorkingHours()) {
-    const st = compliance.workingHoursStatus();
+  // #3 Send window: never auto-send outside it, in the STORE's local time.
+  if (!(await compliance.isWithinWorkingHours(shop))) {
+    const st = await compliance.workingHoursStatus(shop);
     return {
       auto: true, sent: 0, sent_whatsapp: 0, sent_email: 0, failed: 0, prepared: 0,
       skipped_hours: segment.length, stopped_no_credits: false, whatsapp: [],
-      note: `מחוץ לשעות השליחה (${st.window}, עכשיו ${st.israel_hour}:00). הסוכן לא שלח.`
+      note: `מחוץ לשעות השליחה (${st.window} ${st.timezone}, עכשיו ${st.local_hour}:00). הסוכן לא שלח.`
     };
   }
 

@@ -22,7 +22,12 @@ const DEFAULTS = {
   sms_sender: null,       // per-shop sender id (falls back to env TEXTME_SENDER)
   daily_cap: 500,         // smart outreaches per DAY per shop
   autopilot: 'approve',   // 'off' | 'approve' (morning plan needs a click) | 'full'
-  followup_default: true  // sequences on by default
+  followup_default: true, // sequences on by default
+  // IANA zone, captured from Shopify at install. EVERY wall-clock decision
+  // (send window, personal best hour, morning report, daily counters) is made
+  // in this zone. Existing shops default to the original pilot's zone so their
+  // behaviour is unchanged.
+  timezone: 'Asia/Jerusalem'
 };
 
 let tableReady = false;
@@ -36,11 +41,22 @@ async function ensureTable() {
       followup_default BOOLEAN,
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )`).catch(e => console.error('[settings] table:', e.message));
+  // Added after the table shipped — existing deployments need the column.
+  await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS timezone TEXT`)
+    .catch(e => console.error('[settings] timezone column:', e.message));
   tableReady = true;
 }
 
 const cache = new Map(); // shop -> { at, settings }
 const TTL = 60 * 1000;
+
+// A stored timezone is only usable if the platform's ICU data knows it —
+// otherwise every Intl call downstream would throw at send time.
+function validTz(tz) {
+  if (!tz || typeof tz !== 'string') return null;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return tz; }
+  catch (e) { return null; }
+}
 
 function legacyBrand(shop) {
   if (shop === DEFAULT_SHOP) return '770';
@@ -72,7 +88,8 @@ async function getSettings(shop) {
     sms_sender: (row && row.sms_sender) || process.env.TEXTME_SENDER || null,
     daily_cap: (row && row.daily_cap != null) ? row.daily_cap : DEFAULTS.daily_cap,
     autopilot: (row && row.autopilot) || DEFAULTS.autopilot,
-    followup_default: (row && row.followup_default != null) ? row.followup_default : DEFAULTS.followup_default
+    followup_default: (row && row.followup_default != null) ? row.followup_default : DEFAULTS.followup_default,
+    timezone: validTz(row && row.timezone) || DEFAULTS.timezone
   };
   cache.set(shop, { at: Date.now(), settings: s });
   return s;
@@ -82,17 +99,19 @@ async function updateSettings(shop, patch = {}) {
   shop = (shop || '').toLowerCase().trim();
   if (!shop) return { ok: false, error: 'no_shop' };
   await ensureTable();
-  const allowed = ['brand', 'language', 'currency', 'sms_sender', 'daily_cap', 'autopilot', 'followup_default'];
+  const allowed = ['brand', 'language', 'currency', 'sms_sender', 'daily_cap', 'autopilot', 'followup_default', 'timezone'];
   const cur = await getSettings(shop);
   const next = { ...cur };
   for (const k of allowed) if (patch[k] !== undefined) next[k] = patch[k];
+  // Never persist a timezone Intl cannot resolve — it would break every send.
+  next.timezone = validTz(next.timezone) || DEFAULTS.timezone;
   try {
     await db.query(
-      `INSERT INTO store_settings (shop_domain, brand, language, currency, sms_sender, daily_cap, autopilot, followup_default, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+      `INSERT INTO store_settings (shop_domain, brand, language, currency, sms_sender, daily_cap, autopilot, followup_default, timezone, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
        ON CONFLICT (shop_domain) DO UPDATE SET
-         brand=$2, language=$3, currency=$4, sms_sender=$5, daily_cap=$6, autopilot=$7, followup_default=$8, updated_at=NOW()`,
-      [shop, next.brand, next.language, next.currency, next.sms_sender, next.daily_cap, next.autopilot, next.followup_default]
+         brand=$2, language=$3, currency=$4, sms_sender=$5, daily_cap=$6, autopilot=$7, followup_default=$8, timezone=$9, updated_at=NOW()`,
+      [shop, next.brand, next.language, next.currency, next.sms_sender, next.daily_cap, next.autopilot, next.followup_default, next.timezone]
     );
     cache.delete(shop);
     return { ok: true, settings: await getSettings(shop) };
@@ -101,16 +120,19 @@ async function updateSettings(shop, patch = {}) {
 
 // ---------------------------------------------------------------------------
 // DAILY SMART-OUTREACH CAP (500/day default).
-// Counts today's outreaches (advisor_actions rows created today, Israel/shop tz
-// approximated as UTC day for simplicity) and answers how many are left.
+// Counts today's outreaches and answers how many are left. "Today" is the
+// STORE's local day, not UTC — otherwise a shop in Los Angeles gets its budget
+// reset at 5 PM local, mid-afternoon, and can send 1000 in one working day.
 // Both the campaign engine and the message queue must consult this.
 // ---------------------------------------------------------------------------
 async function outreachesToday(shop) {
   try {
+    const s = await getSettings(shop);
     const r = await db.query(
       `SELECT COUNT(*)::int AS n FROM advisor_actions
-       WHERE shop_domain=$1 AND created_at >= date_trunc('day', NOW())`,
-      [shop]);
+       WHERE shop_domain=$1
+         AND created_at >= date_trunc('day', NOW() AT TIME ZONE $2) AT TIME ZONE $2`,
+      [shop, s.timezone]);
     return (r.rows[0] && r.rows[0].n) || 0;
   } catch (e) { return 0; }
 }

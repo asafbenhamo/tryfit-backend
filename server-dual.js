@@ -24,6 +24,9 @@ const smsSender = require("./sms-sender");
 const messageQueue = require("./message-queue");
 const noaEngine = require("./noa-engine");
 const storeSettings = require("./store-settings");
+const storeTime = require("./store-time");
+const policyEngine = require("./policy-engine");
+const autopilot = require("./autopilot-engine");
 const attributionEngine = require("./attribution-engine");
 const pushEngine = require("./push-engine");
 const flashySync = require("./flashy-sync");
@@ -245,13 +248,79 @@ app.post("/api/settings", express.json(), async (req, res) => {
   if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   const shop = resolveShop(req) || DEFAULT_SHOP;
   const allowed = {};
-  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default"]) {
+  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default", "timezone"]) {
     if (req.body[k] !== undefined) allowed[k] = req.body[k];
   }
   if (allowed.language && !["he", "en"].includes(allowed.language)) return res.status(400).json({ ok: false, error: "language must be he/en" });
   if (allowed.daily_cap !== undefined) allowed.daily_cap = Math.max(10, Math.min(parseInt(allowed.daily_cap) || 500, 5000));
+  if (allowed.timezone !== undefined && !storeTime.isValidTz(allowed.timezone)) {
+    return res.status(400).json({ ok: false, error: "timezone must be a valid IANA zone, e.g. America/New_York" });
+  }
   const r = await storeSettings.updateSettings(shop, allowed);
   res.json(r);
+});
+
+// ===== Autopilot: is the agent allowed to act on its own? =====
+// GET  -> current mode + what it has been doing + measured lift
+// POST -> { on: true|false } flips between 'full' (acts alone) and 'approve'
+app.get("/api/autopilot", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const s = await storeSettings.getSettings(shop);
+    const [runs, cap, lift] = await Promise.all([
+      autopilot.recentRuns(shop, 7),
+      storeSettings.remainingToday(shop),
+      policyEngine.measureLift(shop, { days: 30 })
+    ]);
+    res.json({
+      ok: true,
+      mode: s.autopilot,
+      on: s.autopilot === "full",
+      timezone: s.timezone,
+      local_hour: storeTime.hourIn(s.timezone),
+      run_hour: autopilot.RUN_HOUR,
+      daily_cap: s.daily_cap,
+      today: cap,
+      runs: runs.runs || [],
+      lift
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/autopilot", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  const on = req.body && (req.body.on === true || req.body.on === "true");
+  const r = await storeSettings.updateSettings(shop, { autopilot: on ? "full" : "approve" });
+  if (!r.ok) return res.status(500).json(r);
+  console.log(`🤖 [autopilot] ${shop} -> ${on ? "FULL (acts alone)" : "approve (asks first)"}`);
+  res.json({ ok: true, on, mode: r.settings.autopilot });
+});
+
+// What the agent learned: per-segment / offer / channel performance, so the
+// merchant can see WHY it is choosing what it chooses.
+app.get("/api/autopilot/policy", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    res.json({ ok: true, ...(await policyEngine.learn(shop)) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Manual kick, for testing a store without waiting for its local morning.
+app.post("/api/autopilot/run-now", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    res.json(await autopilot.runForShop(shop, { force: true }));
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.get("/privacy", (req, res) => {
@@ -745,10 +814,10 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
     const tpl = await waTemplates.getTemplate(shop, templateName);
     if (!tpl) return res.status(400).json({ ok: false, error: "תבנית לא נמצאה" });
 
-    // Working hours: automatic sends only inside the allowed window.
-    if (!compliance.isWithinWorkingHours()) {
-      const st = compliance.workingHoursStatus();
-      return res.json({ ok: false, error: `מחוץ לשעות השליחה (${st.window}, עכשיו ${st.israel_hour}:00). נסה שוב בתוך החלון.` });
+    // Send window: automatic sends only inside it, in the store's local time.
+    if (!(await compliance.isWithinWorkingHours(shop))) {
+      const st = await compliance.workingHoursStatus(shop);
+      return res.json({ ok: false, error: `מחוץ לשעות השליחה (${st.window} ${st.timezone}, עכשיו ${st.local_hour}:00). נסה שוב בתוך החלון.` });
     }
 
     const percentage = b.percentage ? parseInt(b.percentage) : null;
@@ -1434,9 +1503,10 @@ app.get("/go/:token", async (req, res) => {
   }
 });
 
-app.get("/api/working-hours", (req, res) => {
-  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
-  res.json(compliance.workingHoursStatus());
+app.get("/api/working-hours", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  res.json(await compliance.workingHoursStatus(shop));
 });
 
 const campaignEngine = require("./campaign-engine");
@@ -3384,13 +3454,22 @@ app.get("/auth/callback", async (req, res) => {
 
     // Per-shop defaults: brand from the real shop name, language by country,
     // currency accordingly, daily smart-outreach cap 500.
+    //
+    // The timezone matters more than it looks: every send decision is made in
+    // it. Shopify gives us the IANA zone (`iana_timezone`) alongside a display
+    // string (`timezone`) that Intl cannot parse — only the former is usable.
+    // Without it a US shop would inherit Israel time and message its customers
+    // in the middle of the night.
+    const shopTz = storeTime.fromShopifyShop(shopInfo);
     try {
       await storeSettings.updateSettings(shopDomain, {
         brand: displayName,
         language: isIsraeli ? "he" : "en",
         currency: isIsraeli ? "₪" : "$",
-        daily_cap: 500
+        daily_cap: 500,
+        timezone: shopTz || storeTime.DEFAULT_TZ
       });
+      console.log(`[OAuth] ${shopDomain} timezone = ${shopTz || storeTime.DEFAULT_TZ + " (fallback)"}`);
     } catch (e) { console.error("[OAuth] settings init:", e.message); }
 
     // Register webhooks (checkouts + orders + uninstalled) for this shop.
@@ -3487,7 +3566,7 @@ app.post("/admin/store-settings", express.json(), async (req, res) => {
   const shop = (req.body.shop || "").toLowerCase().trim();
   if (!shop) return res.status(400).json({ ok: false, error: "חסר shop" });
   const patch = {};
-  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default"]) {
+  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default", "timezone"]) {
     if (req.body[k] !== undefined) patch[k] = req.body[k];
   }
   res.json(await storeSettings.updateSettings(shop, patch));
@@ -3814,45 +3893,54 @@ app.listen(PORT, async () => {
     console.log("🔄 Orders + customers sync scheduled (every 3h, all stores)");
   }
 
-  let lastReport09 = null, lastReport21 = null;
+  // Reports fire at 09:00 and 21:00 in EACH STORE'S OWN local time. Previously
+  // both fired at Israel's clock, so a US merchant's "what happened overnight"
+  // brief was generated at 2 AM their time and their end-of-day report at 2 PM.
+  // Fired-once bookkeeping is therefore per shop, keyed on the shop's local date.
+  const lastReport = new Map(); // `${shop}|${slot}` -> local date string
+  async function runReportSlot(shop, slot, actionType, kind) {
+    const tz = await storeTime.tzForShop(shop);
+    const hour = storeTime.hourIn(tz);
+    if (hour !== slot) return false;
+    const localDate = storeTime.dateKeyIn(tz);
+    const key = `${shop}|${slot}`;
+    if (lastReport.get(key) === localDate) return false;
+    lastReport.set(key, localDate);
+    const summary = await dailySummary.getDailySummary(shop);
+    await db.query(
+      `INSERT INTO advisor_actions (shop_domain, action_type, details)
+       VALUES ($1, $2, $3)`,
+      [shop, actionType, JSON.stringify({ report: summary, date: localDate, kind, timezone: tz })]
+    ).catch(e => console.error(`${actionType} log:`, e.message));
+    console.log(`${slot === 9 ? "🌅" : "📋"} [${actionType}] ${shop} for ${localDate} (${slot}:00 ${tz})`);
+    return true;
+  }
+
   setInterval(async () => {
-    try {
-      const israelNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Jerusalem" }));
-      const hour = israelNow.getHours();
-      const dateStr = israelNow.toISOString().slice(0, 10);
-
-      if (hour === 9 && lastReport09 !== dateStr) {
-        lastReport09 = dateStr;
-        for (const shop of allActiveShops()) {
-          if (!shopify.hasTokenForShop(shop)) continue;
-          const summary = await dailySummary.getDailySummary(shop);
-          await db.query(
-            `INSERT INTO advisor_actions (shop_domain, action_type, details)
-             VALUES ($1, 'morning_report', $2)`,
-            [shop, JSON.stringify({ report: summary, date: dateStr, kind: 'overnight' })]
-          ).catch(e => console.error("morning report log:", e.message));
-        }
-        console.log(`🌅 [Morning report] generated for ${dateStr} (09:00 Israel)`);
+    for (const shop of allActiveShops()) {
+      if (!shopify.hasTokenForShop(shop)) continue;
+      try {
+        await runReportSlot(shop, 9, "morning_report", "overnight");
+        await runReportSlot(shop, 21, "daily_report", "end_of_day");
+      } catch (e) {
+        console.error(`report scheduler (${shop}):`, e.message);
       }
-
-      if (hour === 21 && lastReport21 !== dateStr) {
-        lastReport21 = dateStr;
-        for (const shop of allActiveShops()) {
-          if (!shopify.hasTokenForShop(shop)) continue;
-          const summary = await dailySummary.getDailySummary(shop);
-          await db.query(
-            `INSERT INTO advisor_actions (shop_domain, action_type, details)
-             VALUES ($1, 'daily_report', $2)`,
-            [shop, JSON.stringify({ report: summary, date: dateStr, kind: 'end_of_day' })]
-          ).catch(e => console.error("daily report log:", e.message));
-        }
-        console.log(`📋 [Daily report] generated for ${dateStr} (21:00 Israel)`);
-      }
-    } catch (e) {
-      console.error("report scheduler:", e.message);
     }
   }, 60 * 1000);
-  console.log("📋 Reports scheduled (09:00 overnight + 21:00 end-of-day, Israel time)");
+  console.log("📋 Reports scheduled (09:00 overnight + 21:00 end-of-day, each store's local time)");
+
+  // AUTOPILOT. Ticks every minute but does nothing for almost all of them: each
+  // shop acts only when its OWN local clock hits the run hour, and only if its
+  // owner turned autopilot on. Shops left on 'approve' are untouched.
+  autopilot.ensureTable().catch(() => {});
+  setInterval(async () => {
+    try {
+      await autopilot.tick(allActiveShops().filter(s => shopify.hasTokenForShop(s)));
+    } catch (e) {
+      console.error("autopilot tick:", e.message);
+    }
+  }, 60 * 1000);
+  console.log(`🤖 Autopilot scheduled (${autopilot.RUN_HOUR}:00 each store's local time, only where enabled)`);
 
   // ========== Attribution scan (every 5 minutes) ==========
   // Pulls recent orders from Shopify and closes advisor actions. Independent of

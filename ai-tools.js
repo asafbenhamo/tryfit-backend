@@ -855,10 +855,19 @@ async function getCustomerSizes(shopDomain, options = {}) {
 }
 
 // ---------- 18. getTodayActivity ----------
-// What the advisor did TODAY (since midnight Israel time) - for mid-day "what
-// have you done so far?" reports and the end-of-day summary.
+// What the advisor did TODAY (since midnight in the STORE's timezone) - for
+// mid-day "what have you done so far?" reports and the end-of-day summary.
+//
+// The day boundary must round-trip through the zone twice:
+//   date_trunc('day', NOW() AT TIME ZONE $tz) AT TIME ZONE $tz
+// The inner conversion gives the store's local wall clock, date_trunc finds its
+// local midnight, and the outer conversion turns that back into a real instant.
+// Without the outer one Postgres reinterprets the naive timestamp in the SERVER's
+// zone, which silently shifts the day boundary.
 async function getTodayActivity(shopDomain, options = {}) {
   return safe('getTodayActivity', async () => {
+    const storeTime = require('./store-time');
+    const tz = await storeTime.tzForShop(shopDomain);
     const r = await db.query(
       `SELECT action_type,
               COUNT(*)::int AS count,
@@ -866,10 +875,10 @@ async function getTodayActivity(shopDomain, options = {}) {
               COALESCE(SUM(attributed_revenue) FILTER (WHERE outcome='converted'),0)::numeric(12,2) AS revenue
        FROM advisor_actions
        WHERE shop_domain = $1
-         AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Asia/Jerusalem')
+         AND created_at >= date_trunc('day', NOW() AT TIME ZONE $2) AT TIME ZONE $2
        GROUP BY action_type
        ORDER BY count DESC`,
-      [shopDomain]
+      [shopDomain, tz]
     );
     const totals = await db.query(
       `SELECT COUNT(*)::int AS total_actions,
@@ -879,8 +888,8 @@ async function getTodayActivity(shopDomain, options = {}) {
               COUNT(*) FILTER (WHERE coupon_code IS NOT NULL)::int AS coupons_created
        FROM advisor_actions
        WHERE shop_domain = $1
-         AND created_at >= date_trunc('day', NOW() AT TIME ZONE 'Asia/Jerusalem')`,
-      [shopDomain]
+         AND created_at >= date_trunc('day', NOW() AT TIME ZONE $2) AT TIME ZONE $2`,
+      [shopDomain, tz]
     );
     const t = totals.rows[0] || {};
     return {

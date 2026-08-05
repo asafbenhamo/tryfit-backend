@@ -200,7 +200,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           await mq.enqueue(shop, {
             channel: capChannel, phone: contact.phone, email: contact.email, name: cust.name || null,
             subject: template.subject || `הודעה מ-${BRAND}`,
-            message: capBody, send_at: mq.computeSendAt(10, 1), kind: 'followup', step: 1,
+            message: capBody, send_at: await mq.computeSendAt(shop, 10, 1), kind: 'followup', step: 1,
             campaign_id: id, segment: c.segment_key || null,
             coupon_pct: (!isFixed && !fixedCode && pct > 0) ? pct : null, coupon_days: 2
           }).then(() => { c.queued++; }).catch(() => {});
@@ -300,7 +300,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           const hour = bestHours[(contact.email || '').toLowerCase()] || 11;
           await mq.enqueue(shop, {
             channel: 'sms', phone: contact.phone, email: contact.email, name: cust.name || null,
-            message: fullBody, send_at: mq.computeSendAt(hour), kind: 'timed',
+            message: fullBody, send_at: await mq.computeSendAt(shop, hour), kind: 'timed',
             campaign_id: id, segment: c.segment_key || null
           }).then(() => { c.queued++; didSomething = true; })
             .catch(e => c.log.push({ customer: cust.name, sms_failed: e.message }));
@@ -320,7 +320,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           await mq.enqueue(shop, {
             channel: 'email', email: contact.email, phone: contact.phone, name: cust.name || null,
             subject: template.subject || ('הודעה מ-' + BRAND),
-            message: fullBody, send_at: mq.computeSendAt(hour), kind: 'timed',
+            message: fullBody, send_at: await mq.computeSendAt(shop, hour), kind: 'timed',
             campaign_id: id, segment: c.segment_key || null
           }).then(() => { c.queued++; didSomething = true; })
             .catch(e => c.log.push({ customer: cust.email, failed: e.message }));
@@ -348,7 +348,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           await mq.enqueue(shop, {
             channel: fuChannel, phone: contact.phone, email: contact.email, name: cust.name || null,
             subject: 'שמרנו לך את זה 💜',
-            message: fuBody, send_at: mq.computeSendAt(11, 3), kind: 'followup', step: 2,
+            message: fuBody, send_at: await mq.computeSendAt(shop, 11, 3), kind: 'followup', step: 2,
             campaign_id: id, segment: c.segment_key || null,
             coupon_pct: fuPct, coupon_days: 2
           }).then(() => { c.followups_queued++; })

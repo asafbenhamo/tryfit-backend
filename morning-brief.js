@@ -11,6 +11,7 @@
 
 const db = require('./database');
 const rfmEngine = require('./rfm-engine');
+const storeTime = require('./store-time');
 
 async function safe(label, fn, fallback) {
   try { return await fn(); } catch (e) { console.error(`[morning-brief] ${label}:`, e.message); return fallback; }
@@ -101,13 +102,17 @@ async function getMorningBrief(shop) {
     return { moves: moves.slice(0, 4), total_customers: totalCustomers, projected, segments: summary };
   }, { moves: [], total_customers: 0, projected: 0 });
 
-  // 3. A warm, human greeting line.
-  const hour = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' })).getHours();
+  // 3. A warm, human greeting line — in the STORE's local time, so a New York
+  //    merchant opening the app at 9am is not greeted with "good evening".
+  const tz = await storeTime.tzForShop(shop);
+  const hour = storeTime.hourIn(tz);
   const greeting = hour < 12 ? 'בוקר טוב' : hour < 18 ? 'צהריים טובים' : 'ערב טוב';
 
   return {
     ok: true,
     greeting,
+    timezone: tz,
+    local_hour: hour,
     overnight,
     plan,
     generated_at: new Date().toISOString()

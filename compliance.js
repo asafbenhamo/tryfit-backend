@@ -1,41 +1,41 @@
 // compliance.js - Safety & legal guardrails for outbound customer actions.
 // Enforces:
-//   1. Working hours (no messages outside 11:00-21:00 Israel time)
+//   1. Send window, in THE STORE'S OWN timezone (see store-time.js)
 //   2. Opt-out list (never contact customers who asked to stop - legal requirement)
 //   3. Cooldown - a SOFT warning (not a block) if we contacted her in the last few days
 // Every outbound send MUST pass through canContactCustomer() first.
+//
+// The window used to be 11:00-21:00 Israel time, hardcoded, while the message
+// queue independently used 09:00-20:30 Israel. Both are now the single window
+// defined in store-time.js, evaluated in the store's zone — so a New York shop
+// is checked against New York hours instead of Tel Aviv's.
 
 const db = require('./database');
+const storeTime = require('./store-time');
 
+// Israel local hour. Kept for callers that still ask for it by name.
 function israelHour() {
-  try {
-    const fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'Asia/Jerusalem',
-      hour: 'numeric',
-      hour12: false
-    });
-    const parts = fmt.formatToParts(new Date());
-    const h = parts.find(p => p.type === 'hour');
-    return h ? parseInt(h.value, 10) : new Date().getUTCHours() + 2;
-  } catch (e) {
-    return (new Date().getUTCHours() + 2) % 24;
-  }
+  return storeTime.hourIn(storeTime.DEFAULT_TZ);
 }
 
-const WORK_START = 11; // 11:00
-const WORK_END = 21;   // 21:00
-
-function isWithinWorkingHours() {
-  const h = israelHour();
-  return h >= WORK_START && h < WORK_END;
+// Hour right now in a given shop's zone.
+async function shopHour(shop) {
+  return storeTime.hourIn(await storeTime.tzForShop(shop));
 }
 
-function workingHoursStatus() {
-  const h = israelHour();
+// Is it a legal time to message this shop's customers right now?
+async function isWithinWorkingHours(shop) {
+  return storeTime.isWithinSendWindow(await storeTime.tzForShop(shop));
+}
+
+async function workingHoursStatus(shop) {
+  const tz = await storeTime.tzForShop(shop);
   return {
-    israel_hour: h,
-    within_hours: h >= WORK_START && h < WORK_END,
-    window: `${WORK_START}:00-${WORK_END}:00`
+    timezone: tz,
+    local_hour: storeTime.hourIn(tz),
+    israel_hour: storeTime.hourIn(storeTime.DEFAULT_TZ),
+    within_hours: storeTime.isWithinSendWindow(tz),
+    window: storeTime.sendWindowLabel()
   };
 }
 
@@ -101,14 +101,19 @@ async function isInCooldown(shop, { email, phone } = {}, days = COOLDOWN_DAYS) {
 // HARD blocks (allowed:false): outside working hours, opted-out (legal).
 // SOFT warning (allowed:true + warning): recently contacted - merchant may override.
 async function canContactCustomer(shop, { email, phone } = {}, opts = {}) {
-  // 1. Working hours - hard block (unless overridden for a manual send)
-  if (!opts.ignoreHours && !isWithinWorkingHours()) {
-    const h = israelHour();
-    return {
-      allowed: false,
-      reason: 'outside_working_hours',
-      detail: `השעה בישראל ${h}:00 - מחוץ לחלון השליחה (${WORK_START}:00-${WORK_END}:00). ההודעה לא נשלחה.`
-    };
+  // 1. Send window - hard block (unless overridden for a manual send).
+  //    Evaluated in the STORE's timezone, not the server's and not Israel's.
+  if (!opts.ignoreHours) {
+    const tz = await storeTime.tzForShop(shop);
+    if (!storeTime.isWithinSendWindow(tz)) {
+      const h = storeTime.hourIn(tz);
+      return {
+        allowed: false,
+        reason: 'outside_working_hours',
+        timezone: tz,
+        detail: `השעה המקומית בחנות ${h}:00 (${tz}) - מחוץ לחלון השליחה (${storeTime.sendWindowLabel()}). ההודעה לא נשלחה.`
+      };
+    }
   }
   // 2. Opt-out - hard block (legal requirement, never overridable)
   if (await isOptedOut(shop, { email, phone })) {
@@ -132,6 +137,7 @@ async function canContactCustomer(shop, { email, phone } = {}, opts = {}) {
 
 module.exports = {
   israelHour,
+  shopHour,
   isWithinWorkingHours,
   workingHoursStatus,
   isOptedOut,

@@ -10,13 +10,16 @@
 // Safety at SEND time (not enqueue time):
 //   - Skip if opted out (covers Flashy sync + local removals).
 //   - Skip follow-ups if the customer CONVERTED since (no nagging buyers).
-//   - Quiet hours: only send 09:00–20:30 Israel time (spam law: 08:00–21:00).
+//   - Quiet hours: only send inside the shop's local send window. Enforced at
+//     SEND time as well as enqueue time — a backlog (server down overnight,
+//     deferred by the daily cap, clock drift) must never flush out at 3 AM.
 // ============================================================================
 
 const db = require('./database');
 const compliance = require('./compliance');
 const smsSender = require('./sms-sender');
 const mailer = require('./mailer');
+const storeTime = require('./store-time');
 
 let tableReady = false;
 async function ensureTable() {
@@ -42,45 +45,33 @@ async function ensureTable() {
   tableReady = true;
 }
 
-// Israel local hour right now (handles DST via tz database).
-function israelNow() {
-  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' }));
+// Compute a legal send time for THIS SHOP: the next occurrence of `hour` in the
+// shop's own timezone, at least 10 minutes out, clamped into the send window.
+// Returns a real UTC instant. See store-time.js for why the zone matters.
+async function computeSendAt(shop, hour, daysFromNow = 0) {
+  const tz = await storeTime.tzForShop(shop);
+  return storeTime.nextSendAt(tz, hour, daysFromNow);
 }
 
-// Compute a legal send time: the next occurrence of `hour` (Israel time) that is
-// at least 10 minutes from now, clamped into 09:00–20:30. Returns a JS Date (UTC).
-function computeSendAt(hour, daysFromNow = 0) {
-  const ilNow = israelNow();
-  let h = parseInt(hour);
-  if (isNaN(h) || h < 9) h = 10;
-  if (h > 20) h = 19;
-  const target = new Date(ilNow);
-  target.setDate(target.getDate() + daysFromNow);
-  target.setHours(h, Math.floor(Math.random() * 30), 0, 0); // spread within half hour
-  if (target.getTime() - ilNow.getTime() < 10 * 60 * 1000) {
-    target.setDate(target.getDate() + 1); // too soon -> tomorrow same hour
-  }
-  // Convert "Israel wall clock" back to real UTC instant.
-  const diff = new Date().getTime() - ilNow.getTime();
-  return new Date(target.getTime() + diff);
-}
-
-// Best hour per customer, from their own order history (mode of order hour).
+// Best hour per customer, from their own order history (mode of order hour),
+// read in the SHOP's timezone — an order placed at 20:00 in New York must not
+// be learned as "03:00" because the server read it in Israel time.
 // One batched query; returns { emailLower -> hour }.
 async function preferredHours(shop, emails) {
   const map = {};
   const clean = (emails || []).filter(Boolean).map(e => String(e).toLowerCase());
   if (clean.length === 0) return map;
+  const tz = await storeTime.tzForShop(shop);
   try {
     const r = await db.query(
       `SELECT LOWER(c.email) AS email,
-              MODE() WITHIN GROUP (ORDER BY EXTRACT(HOUR FROM o.ordered_at AT TIME ZONE 'Asia/Jerusalem'))::int AS hour
+              MODE() WITHIN GROUP (ORDER BY EXTRACT(HOUR FROM o.ordered_at AT TIME ZONE $3))::int AS hour
        FROM store_customers c
        JOIN store_orders o ON o.shop_domain = c.shop_domain
         AND o.shopify_customer_id = c.shopify_customer_id
        WHERE c.shop_domain = $1 AND LOWER(c.email) = ANY($2) AND o.ordered_at IS NOT NULL
        GROUP BY LOWER(c.email)`,
-      [shop, clean]
+      [shop, clean, tz]
     );
     for (const row of r.rows) map[row.email] = row.hour;
   } catch (e) { console.error('[queue] preferredHours:', e.message); }
@@ -127,12 +118,30 @@ async function processDue(limit = 60) {
      FETCH FIRST ${parseInt(limit)} ROWS ONLY`
   ).catch(e => { console.error('[queue] fetch due:', e.message); return { rows: [] }; });
 
-  let sent = 0, skipped = 0, failed = 0, deferred = 0;
+  let sent = 0, skipped = 0, failed = 0, deferred = 0, outOfHours = 0;
   const storeSettings = require('./store-settings');
   const capCache = {}; // shop -> remaining today (fetched once per tick)
+  const tzCache = {};  // shop -> IANA zone (fetched once per tick)
 
   for (const m of due.rows) {
     try {
+      // SEND WINDOW — checked here, not only at enqueue time. A message can fall
+      // due outside the window for reasons enqueue could not foresee: the server
+      // was down overnight, the daily cap deferred it, the shop changed its
+      // timezone. Sending a marketing message at 3 AM local is a TCPA violation
+      // in the US ($500-$1,500 per message) and the merchant is the sender of
+      // record — so this defers instead of sending, every time.
+      if (tzCache[m.shop_domain] === undefined) {
+        tzCache[m.shop_domain] = await storeTime.tzForShop(m.shop_domain);
+      }
+      const tz = tzCache[m.shop_domain];
+      if (!storeTime.isWithinSendWindow(tz)) {
+        await db.query(`UPDATE scheduled_messages SET send_at = $2 WHERE id=$1`,
+          [m.id, storeTime.nextSendAt(tz, storeTime.SEND_START_HOUR + 1, 0)]).catch(() => {});
+        outOfHours++;
+        continue;
+      }
+
       // DAILY CAP: queued messages also count against the shop's daily budget.
       // When exhausted, push the message to tomorrow morning instead of sending.
       if (capCache[m.shop_domain] === undefined) {
@@ -141,7 +150,7 @@ async function processDue(limit = 60) {
       }
       if (capCache[m.shop_domain] <= 0) {
         await db.query(`UPDATE scheduled_messages SET send_at = $2 WHERE id=$1`,
-          [m.id, computeSendAt(10, 1)]).catch(() => {});
+          [m.id, storeTime.nextSendAt(tz, 10, 1)]).catch(() => {});
         deferred++;
         continue;
       }
@@ -222,10 +231,10 @@ async function processDue(limit = 60) {
     }
   }
 
-  if (sent + skipped + failed + deferred > 0) {
-    console.log(`📬 [queue] processed: sent=${sent} skipped=${skipped} failed=${failed} deferred=${deferred}`);
+  if (sent + skipped + failed + deferred + outOfHours > 0) {
+    console.log(`📬 [queue] processed: sent=${sent} skipped=${skipped} failed=${failed} deferred=${deferred} out_of_hours=${outOfHours}`);
   }
-  return { sent, skipped, failed, deferred };
+  return { sent, skipped, failed, deferred, out_of_hours: outOfHours };
 }
 
 async function mark(id, status, sentAt, error) {
