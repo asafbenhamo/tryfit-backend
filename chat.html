@@ -2519,9 +2519,10 @@
   }
 
   function clearHomeScreen() {
-    ['homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
+    ['homeAutopilotSlot', 'homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
       const el = document.getElementById(id); if (el) el.remove();
     });
+    const ap = document.querySelector('.ap-card'); if (ap) ap.remove();
     const w = $('welcome'); if (w) w.remove();
     const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
     const sc = document.querySelector('.summary-card'); if (sc) sc.remove();
@@ -2678,8 +2679,11 @@
       const res = await fetch('/api/morning-brief?password=' + encodeURIComponent(PASSWORD));
       const d = await res.json();
       if (!d.ok || !d.plan || !d.plan.moves || d.plan.moves.length === 0) return;
-      const slot = document.getElementById('homeSummarySlot') || ($('welcome') && $('welcome').parentNode);
+      // Its OWN slot, not the summary's: they used to share one, so clearing
+      // either wiped the other, and re-rendering stacked a duplicate pair.
+      const slot = document.getElementById('homePlanSlot') || ($('welcome') && $('welcome').parentNode);
       if (!slot) return;
+      slot.innerHTML = '';
       const card = document.createElement('div');
       card.className = 'summary-card';
       let html = '<div class="summary-greeting">' + esc(t('plan.title')) + '</div>';
@@ -2733,7 +2737,9 @@
     }
     card.innerHTML = html;
     const slot = document.getElementById('homeSummarySlot');
-    if (slot) slot.appendChild(card);
+    // Replace, never append: this runs again whenever the language resolves or
+    // the merchant flips it, and appending produced a second identical card.
+    if (slot) { slot.innerHTML = ''; slot.appendChild(card); }
     else w.parentNode.insertBefore(card, w);
   }
 
