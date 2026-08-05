@@ -12,12 +12,16 @@
 const db = require('./database');
 const rfmEngine = require('./rfm-engine');
 const storeTime = require('./store-time');
+const { st } = require('./server-i18n');
 
 async function safe(label, fn, fallback) {
   try { return await fn(); } catch (e) { console.error(`[morning-brief] ${label}:`, e.message); return fallback; }
 }
 
 async function getMorningBrief(shop) {
+  // Everything the merchant reads here follows the shop's language.
+  let lang = 'he';
+  try { lang = (await require('./store-settings').getSettings(shop)).language || 'he'; } catch (e) {}
   // 1. What happened overnight: conversions + revenue closed since yesterday 9am.
   const overnight = await safe('overnight', async () => {
     const r = await db.query(
@@ -38,7 +42,7 @@ async function getMorningBrief(shop) {
 
   // 2. Today's opportunity: RFM analysis of the whole base, top priority segments.
   const plan = await safe('plan', async () => {
-    const scored = await rfmEngine.computeRFM(shop, { limit: 2000 });
+    const scored = await rfmEngine.computeRFM(shop, { limit: 2000, lang });
     if (scored.length === 0) return { moves: [], total_customers: 0, projected: 0 };
     const summary = rfmEngine.summarize(scored);
 
@@ -79,11 +83,11 @@ async function getMorningBrief(shop) {
       if (hist && hist.contacts >= 10) {
         // Real data: what a contact in this segment actually produced historically.
         projected = Math.round(hist.rev_per_contact * seg.count);
-        basis = `מבוסס ביצועים אמיתיים: ${hist.conversions}/${hist.contacts} המרות ב-90 הימים האחרונים`;
+        basis = st(lang, 'brief.basisReal', { conversions: hist.conversions, contacts: hist.contacts });
       } else {
         // Not enough history yet — conservative estimate.
         projected = Math.round(seg.value * 0.12);
-        basis = 'הערכה ראשונית (עוד אין מספיק היסטוריה לפלח הזה)';
+        basis = st(lang, 'brief.basisEstimate');
       }
       moves.push({
         segment: seg.key,
@@ -106,7 +110,7 @@ async function getMorningBrief(shop) {
   //    merchant opening the app at 9am is not greeted with "good evening".
   const tz = await storeTime.tzForShop(shop);
   const hour = storeTime.hourIn(tz);
-  const greeting = hour < 12 ? 'בוקר טוב' : hour < 18 ? 'צהריים טובים' : 'ערב טוב';
+  const greeting = st(lang, hour < 12 ? 'brief.morning' : hour < 18 ? 'brief.noon' : 'brief.evening');
 
   return {
     ok: true,

@@ -152,13 +152,13 @@ async function runForShop(shop, opts = {}) {
 
     // ---- what worked, and what the base looks like now -----------------------
     const stats = await policy.learn(shop);
-    const scored = await rfmEngine.computeRFM(shop, { limit: 2000 });
+    const scored = await rfmEngine.computeRFM(shop, { limit: 2000, lang: settings.language });
     if (!scored || scored.length === 0) {
       await finishRun(runId, { status: 'skipped', details: { reason: 'no_customers' } });
       return { ok: true, skipped: 'no_customers' };
     }
     const rfmSummary = rfmEngine.summarize(scored);
-    const ranked = policy.rankSegments(stats, rfmSummary).slice(0, MAX_SEGMENTS_PER_RUN);
+    const ranked = policy.rankSegments(stats, rfmSummary, settings.language).slice(0, MAX_SEGMENTS_PER_RUN);
     if (ranked.length === 0) {
       await finishRun(runId, { status: 'skipped', details: { reason: 'all_segments_suppressed' } });
       return { ok: true, skipped: 'all_segments_suppressed' };

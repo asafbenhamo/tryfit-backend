@@ -260,6 +260,43 @@ app.post("/api/settings", express.json(), async (req, res) => {
   res.json(r);
 });
 
+// Is the AI actually reachable? A GET so it can be opened straight from a
+// browser when the chat "just doesn't answer" — it distinguishes a missing key
+// from an exhausted balance from a slow model, instead of leaving you guessing.
+app.get("/api/health/ai", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  const started = Date.now();
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.json({ ok: false, stage: "config", error: "ANTHROPIC_API_KEY is not set in Railway" });
+  }
+  try {
+    const Anthropic = require("@anthropic-ai/sdk");
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const r = await client.messages.create({
+      model: aiBrain.MODEL,
+      max_tokens: 16,
+      messages: [{ role: "user", content: "Reply with the single word: ok" }]
+    });
+    const text = (r.content || []).map(c => c.text || "").join("").trim();
+    res.json({
+      ok: true, model: aiBrain.MODEL, replied: text,
+      ms: Date.now() - started,
+      usage: r.usage || null
+    });
+  } catch (e) {
+    // Surface what the API actually said — credit exhaustion, a bad model name
+    // and a rate limit all look identical from the chat window.
+    res.json({
+      ok: false, stage: "api", model: aiBrain.MODEL,
+      ms: Date.now() - started,
+      status: e.status || null,
+      type: (e.error && e.error.error && e.error.error.type) || e.name || null,
+      error: (e.error && e.error.error && e.error.error.message) || e.message
+    });
+  }
+});
+
 // ===== Autopilot: is the agent allowed to act on its own? =====
 // GET  -> current mode + what it has been doing + measured lift
 // POST -> { on: true|false } flips between 'full' (acts alone) and 'approve'

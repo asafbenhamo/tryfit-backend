@@ -17,8 +17,8 @@ const DEFAULT_SHOP = 'seven770.myshopify.com';
 
 const DEFAULTS = {
   brand: null,            // resolved below
-  language: 'he',         // 'he' | 'en' — existing shops stay Hebrew (Asaf: keep IL version sellable)
-  currency: '₪',          // '₪' | '$'
+  language: 'en',         // 'he' | 'en' — English is the default; Israeli installs are switched to 'he' at onboarding
+  currency: '$',          // '₪' | '$' — matches the default language
   sms_sender: null,       // per-shop sender id (falls back to env TEXTME_SENDER)
   daily_cap: 500,         // smart outreaches per DAY per shop
   autopilot: 'approve',   // 'off' | 'approve' (morning plan needs a click) | 'full'

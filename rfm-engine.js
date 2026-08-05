@@ -16,11 +16,18 @@
 // ============================================================================
 
 const db = require('./database');
+const { st } = require('./server-i18n');
 
 // Score helper: NTILE-style quintiles (1..5) computed in SQL.
 // We compute R, F, M per customer, then derive the 11-segment label in JS.
 
-async function computeRFM(shop, { limit = 2000 } = {}) {
+// Segment names and the reasoning behind them are shown to the merchant, so
+// they follow the shop's language rather than being hardcoded Hebrew.
+async function computeRFM(shop, { limit = 2000, lang } = {}) {
+  if (!lang) {
+    try { lang = (await require('./store-settings').getSettings(shop)).language; }
+    catch (e) { lang = 'he'; }
+  }
   // Pull per-customer R/F/M plus their last product and top category.
   const r = await db.query(
     `WITH cust AS (
@@ -84,7 +91,7 @@ async function computeRFM(shop, { limit = 2000 } = {}) {
 
   return rows.map(c => {
     const name = ((c.first_name || '') + ' ' + (c.last_name || '')).trim();
-    const seg = classifySegment(c.r_score, c.f_score, c.m_score, c.recency_days);
+    const seg = classifySegment(c.r_score, c.f_score, c.m_score, c.recency_days, lang);
     return {
       cid: c.cid,
       name, email: c.email, phone: c.phone,
@@ -106,65 +113,65 @@ async function computeRFM(shop, { limit = 2000 } = {}) {
 //  - "Can't Lose Them" and "At Risk" (high value, gone quiet) = top priority.
 //  - One-time buyers get a strong incentive to earn the 2nd purchase.
 //  - Champions/Loyal get recognition, not deep discounts (protect margin).
-function classifySegment(r, f, m, recencyDays) {
+function classifySegment(r, f, m, recencyDays, lang) {
   // Champions: bought recently, often, high value.
   if (r >= 4 && f >= 4 && m >= 4)
-    return { key: 'champions', label: 'מובילות (Champions)', priority: 3,
+    return { key: 'champions', label: st(lang, 'seg.champions.label'), priority: 3,
       offer: { type: 'early_access', percentage: 10 },
-      reason: 'לקוחה מצוינת — קונה לאחרונה, הרבה, ובסכומים גבוהים. שווה לפנק בגישה מוקדמת ולא בהנחה עמוקה (לשמור על מרווח).' };
+      reason: st(lang, 'seg.champions.reason') };
 
   // Loyal: buy consistently, good value.
   if (f >= 4 && m >= 3)
-    return { key: 'loyal', label: 'נאמנות', priority: 4,
+    return { key: 'loyal', label: st(lang, 'seg.loyal.label'), priority: 4,
       offer: { type: 'percentage', percentage: 10 },
-      reason: 'לקוחה נאמנה שקונה בקביעות. הטבה קטנה + הכרה שומרות עליה.' };
+      reason: st(lang, 'seg.loyal.reason') };
 
   // Can't Lose Them: were high value/frequent, now fully dormant. HIGHEST ROI.
   if (m >= 4 && r <= 2)
-    return { key: 'cant_lose', label: 'אסור לאבד (Can\'t Lose Them)', priority: 1,
+    return { key: 'cant_lose', label: st(lang, 'seg.cant_lose.label'), priority: 1,
       offer: { type: 'percentage', percentage: 20 },
-      reason: 'לקוחה שהייתה בעלת ערך גבוה ונעלמה לגמרי — כאן ה-ROI הכי אסימטרי. הצעה נדיבה מוצדקת כי שוויה גבוה והסיכון לאבד אותה אמיתי.' };
+      reason: st(lang, 'seg.cant_lose.reason') };
 
   // At Risk: above-average value, slipping away (recency low, was frequent).
   if (m >= 3 && f >= 3 && r <= 2)
-    return { key: 'at_risk', label: 'בסיכון', priority: 1,
+    return { key: 'at_risk', label: st(lang, 'seg.at_risk.label'), priority: 1,
       offer: { type: 'percentage', percentage: 15 },
-      reason: 'לקוחה ששווה כסף ומתחילה להיעלם — בדיוק החלון לתפוס אותה לפני שתעבור למתחרים.' };
+      reason: st(lang, 'seg.at_risk.reason') };
 
   // About to Sleep: was okay, recency dropping.
   if (r <= 2 && f <= 2 && m <= 3 && recencyDays <= 120)
-    return { key: 'about_to_sleep', label: 'עומדת להירדם', priority: 2,
+    return { key: 'about_to_sleep', label: st(lang, 'seg.about_to_sleep.label'), priority: 2,
       offer: { type: 'percentage', percentage: 12 },
-      reason: 'לקוחה שמתחילה להתרחק. תזכורת חמה בזמן הנכון מחזירה חלק טוב מהן.' };
+      reason: st(lang, 'seg.about_to_sleep.reason') };
 
   // New customers: very recent, low frequency. Push the crucial 2nd purchase.
   if (r >= 4 && f <= 2)
-    return { key: 'new', label: 'חדשות', priority: 2,
+    return { key: 'new', label: st(lang, 'seg.new.label'), priority: 2,
       offer: { type: 'percentage', percentage: 15 },
-      reason: 'לקוחה חדשה. המעבר לקנייה שנייה הוא הרגע הקריטי בנאמנות — דחיפה עכשיו מכפילה את הסיכוי שתישאר.' };
+      reason: st(lang, 'seg.new.reason') };
 
   // Promising: recent-ish, low frequency, decent value.
   if (r >= 3 && f <= 2 && m >= 3)
-    return { key: 'promising', label: 'מבטיחות', priority: 3,
+    return { key: 'promising', label: st(lang, 'seg.promising.label'), priority: 3,
       offer: { type: 'percentage', percentage: 12 },
-      reason: 'קנתה לאחרונה והראתה פוטנציאל. הטבה ממוקדת יכולה להפוך אותה ללקוחה חוזרת.' };
+      reason: st(lang, 'seg.promising.reason') };
 
   // One-time (hibernating low freq): single purchase, getting old. Strong incentive.
   if (f <= 1 && r <= 3)
-    return { key: 'one_time', label: 'חד-פעמיות', priority: 2,
+    return { key: 'one_time', label: st(lang, 'seg.one_time.label'), priority: 2,
       offer: { type: 'percentage', percentage: 25 },
-      reason: 'קנתה פעם אחת בלבד. תמריץ חזק (25%) + הוכחה חברתית הם הדרך המוכחת להשיג את הקנייה השנייה.' };
+      reason: st(lang, 'seg.one_time.reason') };
 
   // Lost: very old, low everything. Worth a low-cost final attempt.
   if (r <= 1 && f <= 2)
-    return { key: 'lost', label: 'אבודות', priority: 5,
+    return { key: 'lost', label: st(lang, 'seg.lost.label'), priority: 5,
       offer: { type: 'percentage', percentage: 20 },
-      reason: 'לקוחה שלא קנתה מזמן. ניסיון אחרון בעלות נמוכה — חלק יחזרו, השאר אפשר להפסיק לפנות אליהן.' };
+      reason: st(lang, 'seg.lost.reason') };
 
   // Default / needs attention.
-  return { key: 'needs_attention', label: 'דורשות תשומת לב', priority: 3,
+  return { key: 'needs_attention', label: st(lang, 'seg.needs_attention.label'), priority: 3,
     offer: { type: 'percentage', percentage: 12 },
-    reason: 'לקוחה עם פוטנציאל שלא נכנסת לפלח ברור — פנייה אישית עם הטבה מתונה.' };
+    reason: st(lang, 'seg.needs_attention.reason') };
 }
 
 // Summary view: how the whole base splits across segments (for Daniel's overview).

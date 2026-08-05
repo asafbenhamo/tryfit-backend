@@ -33,6 +33,7 @@
 // ============================================================================
 
 const db = require('./database');
+const { st } = require('./server-i18n');
 
 // --- tuning ---------------------------------------------------------------
 const LOOKBACK_DAYS = 90;      // how far back performance is read
@@ -209,25 +210,29 @@ function chooseArm(stats, candidates, rng = Math.random) {
 
 // Rank segments worth contacting today, best expected value first.
 // `available` = [{ key, count, value, discount }] from the RFM summary.
-function rankSegments(stats, available) {
+// `lang` decides the language of the human-readable `basis` line. Note the
+// per-segment stats are held in `segStat`, never `st` — that name belongs to the
+// translator imported at the top, and shadowing it here would break every
+// lookup inside this function.
+function rankSegments(stats, available, lang) {
   return (available || [])
     .filter(s => s && s.key && s.count > 0)
     .map(s => {
-      const st = stats.segments[s.key];
+      const segStat = stats.segments[s.key];
       // Expected value = what one contact in this segment is worth * how many
       // customers are in it. With no history the shop prior stands in.
-      const perContact = st ? st.score : stats.prior;
+      const perContact = segStat ? segStat.score : stats.prior;
       return {
         ...s,
         per_contact: perContact,
         expected: Math.round(perContact * s.count),
-        contacts_seen: st ? st.contacts : 0,
-        suppressed: !!(st && st.suppressed),
-        basis: st
-          ? (st.confident
-              ? `נמדד: ${st.conversions}/${st.contacts} המרות ב-${stats.days} יום`
-              : `מדגם קטן (${st.contacts} פניות) — משוקלל מול ממוצע החנות`)
-          : 'אין עדיין היסטוריה לפלח הזה'
+        contacts_seen: segStat ? segStat.contacts : 0,
+        suppressed: !!(segStat && segStat.suppressed),
+        basis: segStat
+          ? (segStat.confident
+              ? st(lang, 'policy.measured', { conversions: segStat.conversions, contacts: segStat.contacts, days: stats.days })
+              : st(lang, 'policy.smallSample', { contacts: segStat.contacts }))
+          : st(lang, 'policy.noHistory')
       };
     })
     .filter(s => !s.suppressed)
@@ -278,6 +283,7 @@ function isHoldout(shop, customerKey, dayKey, rate = HOLDOUT_RATE) {
 async function measureLift(shop, opts = {}) {
   const days = opts.days || 30;
   const win = opts.window || ATTRIBUTION_WINDOW_DAYS;
+  const lang = opts.lang || 'he';
 
   return safe('measureLift', async () => {
     const r = await db.query(
@@ -351,8 +357,8 @@ async function measureLift(shop, opts = {}) {
       // What the agent plausibly ADDED, as opposed to what it got credit for.
       incremental_revenue: usable ? Math.round(liftPerPerson * contacted.people) : null,
       note: usable
-        ? 'מבוסס על השוואה לקבוצת ביקורת שלא קיבלה פנייה'
-        : 'עוד אין מספיק נתונים בקבוצת הביקורת כדי למדוד תרומה אמיתית'
+        ? st(lang, 'policy.liftOk')
+        : st(lang, 'policy.liftPending')
     };
   }, { ok: false });
 }

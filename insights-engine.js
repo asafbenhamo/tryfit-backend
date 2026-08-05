@@ -10,6 +10,27 @@
 
 const db = require('./database');
 const crypto = require('crypto');
+const { st } = require('./server-i18n');
+
+// Opportunity text is read by the merchant, so it follows the shop's language
+// and currency instead of being hardcoded Hebrew shekels. Resolved once per
+// detector run; store-settings caches underneath so this is cheap.
+const CURRENCY_SIGN = { ILS: '₪', USD: '$', EUR: '€', GBP: '£', AUD: 'A$', CAD: 'C$' };
+async function shopCtx(shop) {
+  let lang = 'he', cur = '₪';
+  try {
+    const s = await require('./store-settings').getSettings(shop);
+    lang = s.language || 'he';
+    cur = s.currency || '₪';
+  } catch (e) { /* defaults */ }
+  const sign = CURRENCY_SIGN[String(cur).toUpperCase()] ||
+               (/^[A-Za-z]{3}$/.test(cur) ? String(cur).toUpperCase() + ' ' : cur);
+  return {
+    lang,
+    t: (key, vars) => st(lang, key, vars),
+    money: (n) => sign + Math.round(Number(n) || 0).toLocaleString(lang === 'en' ? 'en-US' : 'he-IL')
+  };
+}
 
 // How many days to rest a customer after we've contacted them (created a coupon /
 // reached out), so the insights don't keep surfacing the same people every day.
@@ -175,6 +196,7 @@ async function runDetector(label, fn) {
 // their last order, within a sensible window). This is the sharpest signal: we
 // reach a customer exactly when their own habit says they're ready to buy again.
 async function detectDueToReorder(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('dueToReorder', async () => {
     const r = await db.query(
       `WITH per_customer AS (
@@ -214,8 +236,8 @@ async function detectDueToReorder(shop) {
       return {
         type: 'due_to_reorder',
         priority: 1,
-        title: `הרגע המושלם לפנות ל${name || 'לקוחה'}`,
-        detail: `היא קונה בערך כל ${c.gap} ימים, ועברו כבר ${c.days_since} ימים מההזמנה האחרונה - בדיוק החלון שבו היא נוטה לחזור. פנייה אישית עכשיו, עם המלצה מתאימה והטבה קטנה, צפויה להמיר במיוחד.`,
+        title: t('ins.perfectMoment.title', { name: name || t('ins.customer') }),
+        detail: t('ins.perfectMoment.detail', { gap: c.gap, since: c.days_since }),
         action_hint: 'send_winback',
         data: {
           name, email: c.email, phone: c.phone,
@@ -232,6 +254,7 @@ async function detectDueToReorder(shop) {
 // A VIP (high lifetime spend) whose last order is far past their usual rhythm.
 // We approximate "usual rhythm": if they have many orders but haven't bought in 45+ days.
 async function detectDormantVIPs(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('dormantVIPs', async () => {
     const stats = await storeStats(shop);
     const r = await db.query(
@@ -253,8 +276,8 @@ async function detectDormantVIPs(shop) {
     return r.rows.map(c => ({
       type: 'dormant_vip',
       priority: 1,
-      title: `לקוחה VIP שנעלמה: ${(c.first_name || '') + ' ' + (c.last_name || '')}`.trim(),
-      detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ב-${c.orders_count} הזמנות (מהלקוחות המובילים בחנות), אבל לא קנתה כבר ${c.days_since} ימים. שווה לפנות אליה אישית עם עגלה מותאמת והטבה לפני שתלך למתחרים.`,
+      title: t('ins.dormantVip.title', { name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim() }),
+      detail: t('ins.dormantVip.detail', { spent: money(c.total_spent), orders: c.orders_count, since: c.days_since }),
       action_hint: 'send_winback',
       data: {
         name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
@@ -270,6 +293,7 @@ async function detectDormantVIPs(shop) {
 // ---------- 2. Fast-selling product running low on stock ----------
 // Sold well in the last 30 days but inventory is now low -> reorder before stockout.
 async function detectLowStockBestsellers(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('lowStockBestsellers', async () => {
     const r = await db.query(
       `WITH recent_sales AS (
@@ -301,8 +325,8 @@ async function detectLowStockBestsellers(shop) {
     return r.rows.map(p => ({
       type: 'low_stock_bestseller',
       priority: 3,
-      title: `מוכר חזק ועומד להיגמר: ${p.title}`,
-      detail: `נמכרו ${p.units_sold} יחידות ב-30 יום (קצב מהיר), נשארו רק ${p.total_inventory}. כל יום שאזל = מכירות שאתה מפסיד. שווה לחדש מלאי עכשיו.`,
+      title: t('ins.reorder.title', { product: p.title }),
+      detail: t('ins.reorder.detail', { sold: p.units_sold, left: p.total_inventory }),
       action_hint: 'reorder',
       data: {
         title: p.title, units_sold: p.units_sold,
@@ -314,6 +338,7 @@ async function detectLowStockBestsellers(shop) {
 
 // ---------- 3. High-value abandoned carts from recent days ----------
 async function detectHighValueAbandoned(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('highValueAbandoned', async () => {
     const r = await db.query(
       `SELECT email, phone, total_price, item_count,
@@ -334,8 +359,8 @@ async function detectHighValueAbandoned(shop) {
     return r.rows.map(c => ({
       type: 'high_value_abandoned',
       priority: 3,
-      title: `עגלה נטושה בערך גבוה: ${Math.round(c.total_price).toLocaleString()}₪`,
-      detail: `לקוחה השאירה ${c.item_count} פריטים בשווי ${Math.round(c.total_price).toLocaleString()}₪ לפני ${c.days_ago} ימים. יש אימייל - אפשר לפנות.`,
+      title: t('ins.cart.title', { amount: money(c.total_price) }),
+      detail: t('ins.cart.detail', { items: c.item_count, amount: money(c.total_price), days: c.days_ago }),
       action_hint: 'recover_cart',
       data: {
         email: c.email, phone: c.phone,
@@ -350,6 +375,7 @@ async function detectHighValueAbandoned(shop) {
 
 // ---------- 4. Sharp sales change vs previous week ----------
 async function detectSalesShift(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('salesShift', async () => {
     const r = await db.query(
       `SELECT
@@ -375,10 +401,10 @@ async function detectSalesShift(shop) {
     return [{
       type: 'sales_shift',
       priority: 4,
-      title: up ? `המכירות עלו ${pctChange}% השבוע 📈` : `המכירות ירדו ${Math.abs(pctChange)}% השבוע 📉`,
+      title: up ? t('ins.trendUp.title', { pct: pctChange }) : t('ins.trendDown.title', { pct: Math.abs(pctChange) }),
       detail: up
-        ? `השבוע ${Math.round(thisWeek).toLocaleString()}₪ מול ${Math.round(lastWeek).toLocaleString()}₪ בשבוע שעבר. שווה להבין מה עבד ולחזק.`
-        : `השבוע ${Math.round(thisWeek).toLocaleString()}₪ מול ${Math.round(lastWeek).toLocaleString()}₪ בשבוע שעבר. שווה לבדוק מה השתנה.`,
+        ? t('ins.trendUp.detail', { thisWeek: money(thisWeek), lastWeek: money(lastWeek) })
+        : t('ins.trendDown.detail', { thisWeek: money(thisWeek), lastWeek: money(lastWeek) }),
       action_hint: up ? 'investigate_growth' : 'investigate_drop',
       data: { this_week: Math.round(thisWeek), last_week: Math.round(lastWeek), pct_change: pctChange }
     }];
@@ -389,6 +415,7 @@ async function detectSalesShift(shop) {
 // A customer whose FIRST order happened in the last 7 days and was large.
 // Personal touch: welcome + nudge toward a second purchase.
 async function detectNewBigCustomers(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('newBigCustomers', async () => {
     const r = await db.query(
       `SELECT first_name, last_name, email, phone, total_spent, orders_count,
@@ -407,8 +434,8 @@ async function detectNewBigCustomers(shop) {
     return r.rows.map(c => ({
       type: 'new_big_customer',
       priority: 2,
-      title: `לקוחה חדשה ושווה: ${((c.first_name || '') + ' ' + (c.last_name || '')).trim()}`,
-      detail: `קנתה בפעם הראשונה ב-${Math.round(c.total_spent).toLocaleString()}₪ בימים האחרונים. פנייה אישית עכשיו (תודה + הטבה לקנייה הבאה) הופכת קונה חד-פעמית ללקוחה קבועה.`,
+      title: t('ins.newValuable.title', { name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim() }),
+      detail: t('ins.newValuable.detail', { spent: money(c.total_spent) }),
       action_hint: 'welcome_second_purchase',
       data: {
         name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
@@ -423,6 +450,7 @@ async function detectNewBigCustomers(shop) {
 // recently contacted / opted out), widen thresholds so the merchant still gets
 // actionable per-customer opportunities instead of an empty list.
 async function detectDormantRelaxed(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('dormantRelaxed', async () => {
     const r = await db.query(
       `SELECT first_name, last_name, email, phone,
@@ -443,8 +471,8 @@ async function detectDormantRelaxed(shop) {
     return r.rows.map(c => ({
       type: 'dormant_customer',
       priority: 2,
-      title: `לקוחה ששווה להחזיר: ${((c.first_name || '') + ' ' + (c.last_name || '')).trim()}`,
-      detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ולא קנתה כבר ${c.days_since} ימים. פנייה אישית עם הטבה יכולה להחזיר אותה.`,
+      title: t('ins.winback.title', { name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim() }),
+      detail: t('ins.winback.detail', { spent: money(c.total_spent), since: c.days_since }),
       action_hint: 'send_winback',
       data: {
         name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),
@@ -460,6 +488,7 @@ async function detectDormantRelaxed(shop) {
 // Surfaces the best-performing action type (by conversion rate) over the last
 // 60 days, so the merchant sees what works and the system reinforces it.
 async function detectWhatWorks(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('whatWorks', async () => {
     const r = await db.query(
       `SELECT action_type,
@@ -480,17 +509,15 @@ async function detectWhatWorks(shop) {
     const w = r.rows[0];
     const rate = Math.round((w.converted / w.total) * 100);
     if (rate < 1) return []; // nothing meaningful learned yet
-    const LABELS = {
-      abandoned_cart: 'שחזור עגלות נטושות', dormant_vip: 'החזרת לקוחות VIP',
-      one_time: 'דחיפה לקנייה שנייה', personalized_cart: 'עגלה מותאמת אישית',
-      winback: 'win-back', campaign: 'קמפיין', agent: 'פעולות הסוכן'
-    };
-    const label = LABELS[w.action_type] || w.action_type;
+    const KNOWN_MOVES = ['abandoned_cart', 'dormant_vip', 'one_time', 'personalized_cart', 'winback', 'campaign', 'agent'];
+    const label = KNOWN_MOVES.includes(w.action_type)
+      ? t('ins.move.' + w.action_type)
+      : w.action_type;
     return [{
       type: 'what_works',
       priority: 3,
-      title: `📈 מה הכי עובד אצלך: ${label}`,
-      detail: `מהלך מסוג "${label}" ממיר אצלך ${rate}% (${w.converted} מתוך ${w.total}) והכניס ${Math.round(w.revenue).toLocaleString()}₪ ב-60 הימים האחרונים. זה המהלך הכי רווחי שלך - שווה לעשות ממנו עוד.`,
+      title: t('ins.best.title', { label }),
+      detail: t('ins.best.detail', { label, rate, converted: w.converted, total: w.total, revenue: money(w.revenue) }),
       action_hint: 'do_more_of_best',
       data: { action_type: w.action_type, action_label: label, rate, converted: w.converted, total: w.total }
     }];
@@ -502,6 +529,7 @@ async function detectWhatWorks(shop) {
 // ~10 days, and suggests a follow-up. Approach: present the count + a suggestion,
 // the merchant decides whether to act.
 async function detectFollowUp(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('followUp', async () => {
     const r = await db.query(
       `SELECT COUNT(*)::int AS n
@@ -521,8 +549,8 @@ async function detectFollowUp(shop) {
     return [{
       type: 'follow_up',
       priority: 3,
-      title: `${n} לקוחות לא הגיבו לפנייה האחרונה`,
-      detail: `פנינו אליהן לפני יותר מ-3 ימים והן עוד לא קנו. שווה לנסות שוב - הצעה: גישה אחרת מהפעם הקודמת (הודעה אחרת, אולי הטבה מעט גדולה יותר, או תזכורת עדינה). אתה מחליט אם ואיך לפנות.`,
+      title: t('ins.followup.title', { n }),
+      detail: t('ins.followup.detail'),
       action_hint: 'follow_up_campaign',
       data: { pool_size: n }
     }];
@@ -534,6 +562,7 @@ async function detectFollowUp(shop) {
 // many customers bought X but NOT Y. Those are prime, data-backed cross-sell
 // targets: "47 customers bought X — offer them Y, which X-buyers usually add."
 async function detectCrossSell(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('crossSell', async () => {
     // 1. Strongest co-purchase pair in the last 60 days.
     const pair = await db.query(
@@ -575,8 +604,8 @@ async function detectCrossSell(shop) {
     return [{
       type: 'cross_sell',
       priority: 3,
-      title: `הזדמנות צולבת: מי שקנה "${product_a}" שווה להציע לו "${product_b}"`,
-      detail: `${together} לקוחות קנו את שניהם יחד. יש ${n} לקוחות שקנו את "${product_a}" אבל עדיין לא את "${product_b}" - הצעה ממוקדת אליהם צפויה להמיר היטב.`,
+      title: t('ins.crossSell.title', { a: product_a, b: product_b }),
+      detail: t('ins.crossSell.detail', { together, n, a: product_a, b: product_b }),
       action_hint: 'cross_sell_campaign',
       data: { product_a, product_b, together, pool_size: n }
     }];
@@ -692,6 +721,7 @@ function dedupPersonal(list) {
 // (not just the top spenders) and randomly samples, so over time the merchant can
 // reach every customer worth reaching — not the same few hundred.
 async function detectPersonalLastResort(shop) {
+  const { t, money } = await shopCtx(shop);
   return runDetector('personalLastResort', async () => {
     // Pull every customer who has bought at least once and isn't opted out. We keep
     // a low spend floor just to drop near-zero/junk rows, not to exclude real buyers.
@@ -717,12 +747,12 @@ async function detectPersonalLastResort(shop) {
     const pool = r.rows;
     return pool.slice(0, 120).map(c => {
       const days = c.days_since;
-      const sinceTxt = (days != null && days > 0) ? `לא קנתה כבר ${days} ימים. ` : '';
+      const sinceTxt = (days != null && days > 0) ? t('ins.notBoughtSince', { days }) : '';
       return {
         type: 'dormant_customer',
         priority: 2,
-        title: `לקוחה ששווה לפנות אליה: ${((c.first_name || '') + ' ' + (c.last_name || '')).trim()}`,
-        detail: `הוציאה ${Math.round(c.total_spent).toLocaleString()}₪ ב-${c.orders_count} הזמנות. ${sinceTxt}פנייה אישית עם הטבה יכולה להחזיר אותה לקנייה.`,
+        title: t('ins.worthReaching.title', { name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim() }),
+        detail: t('ins.worthReaching.detail', { spent: money(c.total_spent), orders: c.orders_count, since: sinceTxt }),
         action_hint: 'send_winback',
         data: {
           name: ((c.first_name || '') + ' ' + (c.last_name || '')).trim(),

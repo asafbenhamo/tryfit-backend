@@ -1621,16 +1621,10 @@
   // login, in enterAdvisor, because /api/settings needs an authenticated password.
   let LANG = 'he';
 
-  function guessLang() {
-    const nav = (navigator.language || '').toLowerCase();
-    if (nav.indexOf('he') === 0 || nav.indexOf('iw') === 0) return 'he';
-    // An Israeli owner on an English-locale machine should still land on Hebrew.
-    try {
-      const tz = (Intl.DateTimeFormat().resolvedOptions().timeZone || '');
-      if (tz === 'Asia/Jerusalem' || tz === 'Asia/Tel_Aviv') return 'he';
-    } catch (e) {}
-    return 'en';
-  }
+  // English is the product default. This only decides what to paint BEFORE we
+  // know which store we are looking at — the store's own setting takes over at
+  // login (loadStoreLanguage), and an explicit choice outranks both.
+  function guessLang() { return 'en'; }
 
   function lsGet(k) { try { const v = localStorage.getItem(k); return (v === 'he' || v === 'en') ? v : null; } catch (e) { return null; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
