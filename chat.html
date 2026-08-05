@@ -1663,10 +1663,15 @@
   function isRtl() { return LANG === 'he'; }
 
   // Money is shown in the store's own currency (set at install), not in shekels.
-  let CURRENCY = 'ILS';
+  let CURRENCY = '₪';
   const CURRENCY_SIGN = { ILS: '₪', USD: '$', EUR: '€', GBP: '£', AUD: 'A$', CAD: 'C$' };
   function money(n) {
-    const sign = CURRENCY_SIGN[CURRENCY] || (CURRENCY + ' ');
+    // store_settings stores the currency as a SYMBOL ('₪', '$'), but an ISO code
+    // ('ILS') can arrive too. Map codes to symbols; pass a symbol straight
+    // through. Only an unrecognised 3-letter code gets a separating space —
+    // otherwise we would render "₪ 21,797".
+    const cur = String(CURRENCY || '₪');
+    const sign = CURRENCY_SIGN[cur.toUpperCase()] || (/^[A-Za-z]{3}$/.test(cur) ? cur.toUpperCase() + ' ' : cur);
     return sign + (Number(n) || 0).toLocaleString(loc());
   }
 
@@ -2458,9 +2463,9 @@
     // Master can switch stores: show a small button in the sidebar.
     if (IS_MASTER) addSwitchStoreButton();
     loadStoreLanguage();
-    loadAutopilot();
     loadConvoList();
-    setupHomeSections();
+    setupHomeSections();     // must run first — it creates the slot the card renders into
+    loadAutopilot();
     loadDailySummary();
     loadInsights();
     loadMoneyCounter();
@@ -2538,14 +2543,18 @@
       slot.className = 'home-slot';
       w.parentNode.insertBefore(slot, w);
     });
+    // The home screen is rebuilt on every new chat, so repaint the agent card
+    // from whatever we already fetched instead of leaving a blank slot.
+    if (window._autopilot) renderAutopilot(window._autopilot);
   }
 
   /* ===== AUTOPILOT — the switch that lets the agent act on its own ===== */
   window._autopilot = null;
 
   async function loadAutopilot() {
-    const slot = document.getElementById('homeAutopilotSlot');
-    if (!slot) return;
+    // Deliberately does NOT bail when the slot is missing: the fetch is cheap and
+    // the result is cached, so whoever builds the home screen next can render it.
+    // (An earlier version returned here and the card silently never appeared.)
     try {
       const res = await fetch('/api/autopilot?password=' + encodeURIComponent(PASSWORD));
       const d = await res.json();
