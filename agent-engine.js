@@ -376,14 +376,22 @@ function startPlan(shop, planId) {
 }
 
 // Stop a running plan.
-async function stopPlan(planId) {
-  await db.query(`UPDATE agent_plans SET status='stopped', finished_at=NOW() WHERE id=$1`, [planId]).catch(()=>{});
+// `shop` scopes the write. Plan ids are sequential integers, so without it any
+// merchant could stop another merchant's plan just by counting upward.
+async function stopPlan(planId, shop) {
+  const r = shop
+    ? await db.query(`UPDATE agent_plans SET status='stopped', finished_at=NOW() WHERE id=$1 AND shop_domain=$2`, [planId, shop]).catch(() => ({ rowCount: 0 }))
+    : await db.query(`UPDATE agent_plans SET status='stopped', finished_at=NOW() WHERE id=$1`, [planId]).catch(() => ({ rowCount: 0 }));
+  if (shop && !r.rowCount) return { ok: false, error: 'not found' };
   return { ok: true };
 }
 
 // Get plan + tasks status (for live UI).
-async function getPlanStatus(planId) {
-  const plan = await db.query(`SELECT * FROM agent_plans WHERE id=$1`, [planId]);
+// Reading a plan exposes the customers it targets, so it is scoped by shop too.
+async function getPlanStatus(planId, shop) {
+  const plan = shop
+    ? await db.query(`SELECT * FROM agent_plans WHERE id=$1 AND shop_domain=$2`, [planId, shop])
+    : await db.query(`SELECT * FROM agent_plans WHERE id=$1`, [planId]);
   if (plan.rows.length === 0) return null;
   const tasks = await db.query(`SELECT id, priority, move_type, title, status, result, est_customers, projected_revenue, params FROM agent_tasks WHERE plan_id=$1 ORDER BY priority ASC`, [planId]);
   return { plan: plan.rows[0], tasks: tasks.rows };

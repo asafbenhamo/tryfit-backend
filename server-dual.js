@@ -25,6 +25,8 @@ const messageQueue = require("./message-queue");
 const noaEngine = require("./noa-engine");
 const storeSettings = require("./store-settings");
 const storeTime = require("./store-time");
+const sessionAuth = require("./session-auth");
+const billing = require("./billing-engine");
 const policyEngine = require("./policy-engine");
 const autopilot = require("./autopilot-engine");
 const attributionEngine = require("./attribution-engine");
@@ -37,18 +39,39 @@ app.set("trust proxy", 1);
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning", "x-advisor-password"]
+  allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning", "x-advisor-password", "x-advisor-token"]
 }));
 app.use((req, res, next) => {
-  if (req.path === "/webhooks/checkouts/create" || req.path === "/webhooks/checkouts/update" || req.path === "/webhooks/orders/create") {
+  // Every one of these verifies an HMAC over the RAW request bytes, so they must
+  // not be JSON-parsed here — express.raw is mounted on each route instead.
+  // Parsing and re-serializing changes the bytes and the signature never matches.
+  if (req.path === "/webhooks/checkouts/create" || req.path === "/webhooks/checkouts/update" ||
+      req.path === "/webhooks/orders/create" || req.path === "/webhooks/compliance" ||
+      req.path === "/webhooks/app/uninstalled" || req.path === "/webhooks/app/scopes_update") {
     return next();
   }
   return express.json({ limit: '20mb' })(req, res, next);
 });
 
+// SESSION RESOLUTION — must sit above EVERY route, because resolveShop() is
+// called synchronously from dozens of handlers and cannot await a lookup itself.
+// Placed after the body parser so a request is fully formed by the time we look.
+app.use(async (req, res, next) => {
+  try {
+    const token = sessionAuth.extractToken(req);
+    if (token) {
+      const s = await sessionAuth.resolve(token);
+      if (s) req._session = s;
+    }
+  } catch (e) { /* fall through to the legacy password path */ }
+  next();
+});
+
 const BACKEND_MODE = process.env.BACKEND_MODE || "fashn";
 
-const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY || "rpa_94NQI07B7J69J3A25963D9RH0R0FSILF9DFEPEAEwc2qnz";
+// Was a live key committed to source. Rotate it: anything ever pushed to git
+// must be treated as public, even after the line is deleted.
+const RUNPOD_API_KEY = process.env.RUNPOD_API_KEY || null;
 const RUNPOD_ENDPOINT_ID = process.env.RUNPOD_ENDPOINT_ID || "4nxbizcdhfxobd";
 const RUNPOD_BASE_URL = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
 
@@ -170,16 +193,59 @@ function getShopFromRequest(req) {
   return "";
 }
 
+// Verify a webhook really came from Shopify.
+//
+// Three things were wrong here and all three matter:
+//
+//  1. The digest was computed over JSON.stringify(req.body) — a RE-SERIALIZATION
+//     of the parsed object. Shopify signs the raw bytes it sent. Re-serializing
+//     changes key order, spacing and unicode escaping, so the hash essentially
+//     never matched: the mandatory GDPR webhooks rejected every genuine Shopify
+//     call. That alone fails App Store review.
+//  2. The secret fell back to "" when SHOPIFY_API_SECRET was unset. With an
+//     empty key an attacker signs their own payload correctly — including a
+//     forged shop/redact, which deletes a merchant's data. Auth must fail
+//     CLOSED, never open.
+//  3. The comparison used !==, which returns as soon as two bytes differ and
+//     leaks the expected digest to anyone who can measure response times.
+//
+// Routes using this must be mounted with express.raw so req.body is a Buffer.
+// Shopify signs webhooks with the APP's client secret. OAuth here reads it from
+// ADVISOR_SHOPIFY_SECRET while webhook code read SHOPIFY_API_SECRET — one app,
+// two names, and if only the first was configured every webhook silently failed
+// verification. (That is the "checkout HMAC mismatch" in the logs.) Resolve once,
+// accept either name.
+function shopifyAppSecret() {
+  return process.env.SHOPIFY_API_SECRET || process.env.ADVISOR_SHOPIFY_SECRET || null;
+}
+
 function verifyShopifyWebhook(req, res, next) {
   const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-  if (!hmacHeader) {
-    return res.status(401).json({ error: "Unauthorized - No HMAC" });
+  const secret = shopifyAppSecret();
+  if (!secret) {
+    console.error("[webhook] SHOPIFY_API_SECRET is not set — rejecting webhook");
+    return res.status(500).json({ error: "Webhook verification not configured" });
   }
-  const secret = process.env.SHOPIFY_API_SECRET || "";
-  const rawBody = JSON.stringify(req.body);
-  const hash = crypto.createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
-  if (hash !== hmacHeader) {
+  if (!hmacHeader) return res.status(401).json({ error: "Unauthorized - No HMAC" });
+
+  // Buffer when mounted with express.raw (correct); string/object otherwise.
+  const rawBody = Buffer.isBuffer(req.body)
+    ? req.body
+    : Buffer.from(typeof req.body === "string" ? req.body : JSON.stringify(req.body || {}), "utf8");
+
+  const digest = crypto.createHmac("sha256", secret).update(rawBody).digest();
+  let given;
+  try { given = Buffer.from(String(hmacHeader), "base64"); }
+  catch (e) { return res.status(401).json({ error: "Unauthorized - Invalid HMAC" }); }
+
+  if (given.length !== digest.length || !crypto.timingSafeEqual(digest, given)) {
     return res.status(401).json({ error: "Unauthorized - Invalid HMAC" });
+  }
+
+  // Hand the handlers a parsed body, since they were written expecting one.
+  if (Buffer.isBuffer(req.body)) {
+    try { req.body = JSON.parse(rawBody.toString("utf8") || "{}"); }
+    catch (e) { return res.status(400).json({ error: "Invalid JSON" }); }
   }
   next();
 }
@@ -323,6 +389,71 @@ app.get("/api/health/ai", async (req, res) => {
   }
 });
 
+// End a session. The token is revoked server-side, so a copy someone else holds
+// (a shared screenshot, a synced browser history) stops working immediately.
+app.post("/api/auth/logout", express.json(), async (req, res) => {
+  const token = sessionAuth.extractToken(req);
+  await sessionAuth.revoke(token);
+  res.json({ ok: true });
+});
+
+// ===== Billing (Shopify usage-based) =====
+// Charging a Shopify merchant outside Shopify's billing API is grounds for
+// removal from the App Store, so every cent goes through these.
+app.get("/api/billing", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const [sub, hist] = await Promise.all([
+      billing.getSubscription(shop),
+      billing.charges(shop, 25)
+    ]);
+    res.json({
+      ok: true,
+      commission_rate: billing.COMMISSION_RATE,
+      trial_days: billing.TRIAL_DAYS,
+      subscription: sub,
+      charges: hist.charges,
+      totals: hist.totals
+    });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// Start the approval flow. Returns the Shopify-hosted confirmation URL the
+// merchant must visit — we never take payment details ourselves.
+app.post("/api/billing/subscribe", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const settings = await storeSettings.getSettings(shop);
+    const r = await billing.startSubscription(shop, {
+      cappedAmount: req.body && req.body.capped_amount,
+      currency: (req.body && req.body.currency) || (settings.currency === "₪" ? "ILS" : "USD"),
+      // Development stores cannot be charged for real; a test charge exercises
+      // the whole flow without money moving.
+      test: req.body && req.body.test === true
+    });
+    res.json(r);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// Where Shopify sends the merchant back after they approve or decline.
+app.get("/billing/confirmed", async (req, res) => {
+  const shop = String(req.query.shop || "").toLowerCase().trim();
+  let status = "unknown";
+  try { status = (await billing.getSubscription(shop)).status; } catch (e) {}
+  res.set("Content-Type", "text/html; charset=utf-8").send(`<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Advisor</title>
+<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:12vh auto;padding:0 24px;text-align:center;color:#1a1d24}
+h1{font-size:22px}p{color:#5b6472;line-height:1.6}a{display:inline-block;margin-top:18px;padding:12px 22px;background:#0a6fe0;color:#fff;border-radius:10px;text-decoration:none}</style>
+<h1>${status === "ACTIVE" ? "You're all set ✅" : "Billing not active"}</h1>
+<p>${status === "ACTIVE"
+  ? `Smart Advisor will charge ${Math.round(billing.COMMISSION_RATE * 100)}% of sales it can prove it generated — nothing else. You can see every charge in the app.`
+  : "The subscription was not approved. The agent will keep working, but it cannot bill for results until you approve."}</p>
+<a href="/chat">Back to the advisor</a>`);
+});
+
 // Which channels can this shop actually send on right now, and why not the
 // others? Answers "why did she get an email instead of a text?" without having
 // to read logs. Also reports the WhatsApp credit balance, since that is what
@@ -429,35 +560,88 @@ app.post("/api/autopilot/run-now", express.json(), async (req, res) => {
   }
 });
 
+// PRIVACY POLICY.
+//
+// The previous text was written for a different product (virtual try-on) and
+// stated: "We do not access customer personal information, order data, or
+// payment information." This app reads a merchant's entire customer list and
+// order history, stores names, emails and phone numbers, and sends some of that
+// to a third-party model provider. Publishing the opposite is an automatic
+// App Store review failure and a straightforward misrepresentation to consumers
+// under GDPR/CCPA. This describes what the code actually does.
+//
+// Still needs a lawyer's review before launch — the disclosures are accurate,
+// but accuracy is not the same as sufficiency in every jurisdiction.
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@smartadvisor.app";
+
 app.get("/privacy", (req, res) => {
-  res.send(`<!DOCTYPE html>
+  res.set("Content-Type", "text/html; charset=utf-8").send(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TryFit - Privacy Policy</title>
+<title>Smart Advisor — Privacy Policy</title>
 <style>
-body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:40px 20px;color:#333;line-height:1.6}
-h1{color:#E94560}h2{color:#2D3436;margin-top:30px}
+body{font-family:system-ui,-apple-system,Arial,sans-serif;max-width:820px;margin:0 auto;padding:40px 22px;color:#23272f;line-height:1.65}
+h1{color:#0a6fe0;font-size:26px}h2{color:#2D3436;margin-top:32px;font-size:18px}
+code{background:#f3f5f9;padding:1px 5px;border-radius:4px;font-size:13px}
+table{border-collapse:collapse;width:100%;margin-top:8px}td,th{border:1px solid #e3e8f3;padding:8px 10px;text-align:left;font-size:14px;vertical-align:top}
 </style>
 </head>
 <body>
-<h1>TryFit Privacy Policy</h1>
-<p>Last updated: March 2026</p>
-<h2>What We Collect</h2>
-<p>TryFit processes photos that customers voluntarily upload to use the virtual try-on feature. These photos are sent to our processing servers solely to generate the try-on result.</p>
-<h2>How We Use Your Data</h2>
-<p>Uploaded photos are used only to generate virtual try-on images. Photos are not stored permanently and are automatically deleted after processing is complete.</p>
-<h2>Data Sharing</h2>
-<p>We do not sell, rent, or share customer photos or personal data with third parties. Photos are processed by our AI servers and deleted immediately after the result is generated.</p>
-<h2>Data Retention</h2>
-<p>Customer photos are temporarily processed and not retained after the try-on result is delivered. No personal data is stored on our servers.</p>
-<h2>Cookies</h2>
-<p>TryFit does not use cookies or tracking technologies.</p>
-<h2>Merchant Data</h2>
-<p>We access product images and product information from your Shopify store solely to provide the virtual try-on feature. We do not access customer personal information, order data, or payment information.</p>
+<h1>Smart Advisor — Privacy Policy</h1>
+<p>Last updated: August 2026</p>
+
+<p>Smart Advisor is a marketing tool installed by a Shopify merchant on their own store.
+The merchant is the <strong>data controller</strong> for their customers' personal data;
+we act as a <strong>data processor</strong> on their instructions.</p>
+
+<h2>What we access from the merchant's store</h2>
+<p>With the merchant's authorization through Shopify OAuth, we read:</p>
+<table>
+<tr><th>Data</th><th>Why</th></tr>
+<tr><td>Customer name, email address, phone number</td><td>To identify who to contact and to deliver the message</td></tr>
+<tr><td>Order history: dates, amounts, products purchased</td><td>To segment customers by recency, frequency and value, and to reference what someone actually bought</td></tr>
+<tr><td>Abandoned checkouts</td><td>To offer to recover the cart</td></tr>
+<tr><td>Product catalogue and inventory</td><td>To recommend products and flag stock issues</td></tr>
+<tr><td>Marketing consent status</td><td>To avoid contacting anyone who has not consented or who opted out</td></tr>
+</table>
+<p>We do <strong>not</strong> receive or store payment card details. Shopify never exposes them to apps.</p>
+
+<h2>Where it goes</h2>
+<ul>
+<li><strong>Our database</strong> (PostgreSQL, hosted on Railway) — customer records, order summaries, message history and outcomes.</li>
+<li><strong>Anthropic</strong> — customer data relevant to a request (for example a name and recent purchases) is sent to Claude to analyse the store and draft messages. Anthropic does not train on this data.</li>
+<li><strong>Message delivery providers</strong> — Resend for email, TextMe for SMS, 360dialog for WhatsApp. Each receives only the recipient address and the message.</li>
+<li><strong>Flashy</strong> — where a merchant uses it, unsubscribe status is synchronised in both directions.</li>
+</ul>
+<p>We do not sell personal data, and we do not share it with anyone other than the processors above.</p>
+
+<h2>Retention and deletion</h2>
+<ul>
+<li>Data is retained while the app is installed and for up to 30 days after uninstall.</li>
+<li><code>customers/redact</code> from Shopify deletes that customer's records from our systems.</li>
+<li><code>shop/redact</code> (sent 48 hours after uninstall) deletes all of that merchant's data.</li>
+<li>Unsubscribe records are kept after deletion of other data, because we must remember not to contact someone who opted out.</li>
+</ul>
+
+<h2>Marketing messages and consent</h2>
+<p>Messages are sent in the merchant's name, and the merchant is the sender of record.
+The merchant is responsible for having obtained consent on the channel used. We enforce
+opt-outs, restrict sending to legal hours in the store's own timezone, and cap the number
+of messages per store per day.</p>
+
+<h2>Rights of the merchant's customers</h2>
+<p>Requests to access, correct or delete personal data should go to the store you purchased
+from — they control the data. They can action it through Shopify, which relays the request
+to us automatically. You can also contact us at ${SUPPORT_EMAIL} and we will assist the merchant.</p>
+
+<h2>Security</h2>
+<p>Data is transmitted over TLS. Access credentials are encrypted at rest. Access to
+production data is limited to those who need it to operate the service.</p>
+
 <h2>Contact</h2>
-<p>For privacy questions, contact us at support@tryfit.app</p>
+<p>${SUPPORT_EMAIL}</p>
 </body>
 </html>`);
 });
@@ -465,7 +649,15 @@ h1{color:#E94560}h2{color:#2D3436;margin-top:30px}
 app.use("/admin", adminRouter);
 
 app.get("/api/credits/:shop", (req, res) => {
-  res.json(creditsSystem.getStoreCredits(req.params.shop));
+  // Was unauthenticated: anyone could read any shop's plan and balance just by
+  // guessing a myshopify domain. Callers may only read their own.
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  const target = String(req.params.shop || "").toLowerCase().trim();
+  if (target && target !== shop && !(req._session && req._session.is_master) && !isAdmin(req)) {
+    return res.status(403).json({ error: "גישה נדחתה" });
+  }
+  res.json(creditsSystem.getStoreCredits(target || shop));
 });
 
 app.post("/api/consent", express.json(), async (req, res) => {
@@ -501,10 +693,34 @@ app.post("/api/consent", express.json(), async (req, res) => {
   }
 });
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "tryfit2026";
+// No hardcoded fallback. A default baked into a git-tracked file is not a
+// secret: anyone who reads the repo (or a fork, or a leaked archive) holds the
+// platform credential. Missing config must break loudly, not silently open.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || null;
 // Master password lets Asaf (super-admin) act on ANY store. With the master
 // password, the target store is taken from the request's `shop` field.
 const MASTER_PASSWORD = process.env.MASTER_PASSWORD || null;
+
+// Fail loudly on missing credentials rather than running wide open.
+// Previously every one of these had a hardcoded fallback, so an unconfigured
+// deploy looked healthy while accepting a password that is published in the
+// repository. A boot that cannot be secured should not boot.
+(function assertSecrets() {
+  const missing = [];
+  if (!ADMIN_PASSWORD) missing.push("ADMIN_PASSWORD");
+  if (!process.env.SHOPIFY_API_SECRET && !process.env.ADVISOR_SHOPIFY_SECRET) missing.push("SHOPIFY_API_SECRET or ADVISOR_SHOPIFY_SECRET (webhook verification)");
+  if (missing.length) {
+    console.error("FATAL: missing required secrets: " + missing.join(", "));
+    console.error("Set them in the environment. There are no defaults by design.");
+    process.exit(1);
+  }
+  if (!MASTER_PASSWORD) {
+    console.warn("[boot] MASTER_PASSWORD is not set — platform admin routes are disabled.");
+  }
+  for (const [name, val] of [["ADMIN_PASSWORD", ADMIN_PASSWORD], ["MASTER_PASSWORD", MASTER_PASSWORD]]) {
+    if (val && val.length < 12) console.warn(`[boot] ${name} is shorter than 12 characters.`);
+  }
+})();
 const DEFAULT_SHOP = "seven770.myshopify.com";
 
 // Display name of a shop for emails/branding (falls back to the domain prefix).
@@ -545,26 +761,38 @@ function extractPassword(req) {
       || null;
 }
 
-// Resolve which shop a request is authorized for, based on its password.
-//  - 770's existing ADMIN_PASSWORD  -> seven770 (unchanged, full backward compat)
+// Resolve which shop a request is authorized for.
+//  - a valid session token          -> that token's shop (preferred)
+//  - 770's existing ADMIN_PASSWORD  -> seven770 (backward compat)
 //  - a store's own advisor_password -> that store
 //  - MASTER_PASSWORD                -> the store named in req.query/body.shop
-// Returns the shop_domain string, or null if the password is not recognized.
+// Returns the shop_domain string, or null if nothing authorizes the request.
+//
+// Password auth is kept as a fallback so existing installs keep working while
+// clients migrate to tokens. Comparisons are timing-safe: a plain === leaks the
+// secret one character at a time to anyone who can measure response times.
 function resolveShop(req) {
+  // 1. Session token (what the PWA uses after logging in).
+  if (req._session) {
+    if (req._session.is_master) {
+      const target = (req.query && req.query.shop) || (req.body && req.body.shop) || null;
+      return target ? String(target).toLowerCase().trim() : null;
+    }
+    return req._session.shop || null;
+  }
+
+  // 2. Legacy password.
   const pw = extractPassword(req);
   if (!pw) return null;
-  // 770 keeps its existing password.
-  if (pw === ADMIN_PASSWORD) return DEFAULT_SHOP;
-  // Master: act on the requested shop.
-  if (MASTER_PASSWORD && pw === MASTER_PASSWORD) {
+  if (ADMIN_PASSWORD && sessionAuth.safeEqual(pw, ADMIN_PASSWORD)) return DEFAULT_SHOP;
+  if (MASTER_PASSWORD && sessionAuth.safeEqual(pw, MASTER_PASSWORD)) {
     const target = (req.query && req.query.shop) || (req.body && req.body.shop) || null;
-    return target ? target.toLowerCase().trim() : null;
+    return target ? String(target).toLowerCase().trim() : null;
   }
-  // Per-store password: find the store whose advisor_password matches.
   try {
     for (const s of shopify.listStores()) {
       const cfg = shopify.getStore(s.shop_domain);
-      if (cfg && cfg.password && cfg.password === pw) return s.shop_domain;
+      if (cfg && cfg.password && sessionAuth.safeEqual(pw, cfg.password)) return s.shop_domain;
     }
   } catch (e) { /* ignore */ }
   return null;
@@ -588,12 +816,17 @@ function checkAuth(req, res) {
 
 // Admin gate: only 770's password or the master password (super-admin actions
 // like onboarding stores, backfills, syncs). Regular store passwords are rejected.
+// Platform super-admin. ADMIN_PASSWORD is deliberately NOT accepted here any
+// more: it is also the advisor login for the seven770 tenant, so treating it as
+// an admin credential handed one ordinary merchant the ability to reset every
+// other store's password, read their customer lists, and point their WhatsApp
+// sending at an attacker's account. Only MASTER_PASSWORD, which belongs to no
+// tenant, grants this.
 function isAdmin(req) {
+  if (req._session && req._session.is_master) return true;
   const pw = extractPassword(req);
-  if (!pw) return false;
-  if (pw === ADMIN_PASSWORD) return true;
-  if (MASTER_PASSWORD && pw === MASTER_PASSWORD) return true;
-  return false;
+  if (!pw || !MASTER_PASSWORD) return false;
+  return sessionAuth.safeEqual(pw, MASTER_PASSWORD);
 }
 
 const backfillStatus = {};
@@ -798,7 +1031,7 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
-app.post("/api/auth/login", express.json(), (req, res) => {
+app.post("/api/auth/login", express.json(), async (req, res) => {
   const ip = (req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();
   const gate = loginRateCheck(ip);
   if (!gate.allowed) {
@@ -822,13 +1055,16 @@ app.post("/api/auth/login", express.json(), (req, res) => {
       } catch (e) {
         stores = [{ shop_domain: DEFAULT_SHOP, name: "770" }];
       }
-      return res.json({ ok: true, mode: "master", stores });
+      const sess = await sessionAuth.create(null, { isMaster: true, ip, userAgent: req.headers["user-agent"] });
+      return res.json({ ok: true, mode: "master", stores, token: sess.token, expires_at: sess.expires_at });
     }
 
     // 770's existing password
-    if (pw === ADMIN_PASSWORD) {
+    if (ADMIN_PASSWORD && sessionAuth.safeEqual(pw, ADMIN_PASSWORD)) {
       loginRecordSuccess(ip);
-      return res.json({ ok: true, mode: "store", shop: DEFAULT_SHOP, name: "770", terms_accepted: true });
+      const sess = await sessionAuth.create(DEFAULT_SHOP, { ip, userAgent: req.headers["user-agent"] });
+      return res.json({ ok: true, mode: "store", shop: DEFAULT_SHOP, name: "770", terms_accepted: true,
+        token: sess.token, expires_at: sess.expires_at });
     }
 
     // Per-store password
@@ -836,17 +1072,19 @@ app.post("/api/auth/login", express.json(), (req, res) => {
     if (shop) {
       loginRecordSuccess(ip);
       const cfg = shopify.getStore(shop);
+      const sess = await sessionAuth.create(shop, { ip, userAgent: req.headers["user-agent"] });
       return res.json({
         ok: true, mode: "store", shop,
         name: (cfg && cfg.name) || shop.replace(".myshopify.com", ""),
-        terms_accepted: shopify.hasAcceptedTerms(shop)
+        terms_accepted: shopify.hasAcceptedTerms(shop),
+        token: sess.token, expires_at: sess.expires_at
       });
     }
 
     loginRecordFail(ip);
     return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
   } catch (err) {
-    console.error("auth/login error:", err);
+    console.error("auth/login error:", err.message);
     return res.status(500).json({ ok: false, error: "שגיאת שרת בהתחברות" });
   }
 });
@@ -1637,10 +1875,15 @@ app.post("/api/campaign/start", express.json(), async (req, res) => {
 });
 
 app.get("/api/campaign/status", (req, res) => {
-  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
   const id = req.query.id;
   if (id) {
     const s = campaignEngine.getCampaignStatus(id);
+    // Having *a* valid password is not authorization to read *this* campaign.
+    // The response carries recipient names, phone numbers, coupon codes and the
+    // message bodies, so it must belong to the caller's shop.
+    if (s && s.shop !== shop) return res.json({ ok: false, error: "not found" });
     if (!s) return res.json({ ok: false, error: "not found" });
     return res.json({ ok: true, campaign: { id, ...{
       status: s.status, total: s.total, done: s.done, sent: s.sent,
@@ -1654,8 +1897,9 @@ app.get("/api/campaign/status", (req, res) => {
 });
 
 app.post("/api/campaign/stop", express.json(), (req, res) => {
-  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
-  const result = campaignEngine.stopCampaign(req.body.id);
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  const result = campaignEngine.stopCampaign(req.body.id, shop);
   res.json(result);
 });
 
@@ -1783,9 +2027,11 @@ app.post("/api/agent/preview-plan", express.json(), async (req, res) => {
     if (!plan_id || !Array.isArray(selected_task_ids) || selected_task_ids.length === 0) {
       return res.status(400).json({ ok: false, error: "חסר plan_id או מהלכים" });
     }
+    // Scoped by shop: plan and task ids are sequential, so without this any
+    // merchant could preview another merchant's plan and see its recipients.
     const tasksR = await db.query(
-      `SELECT * FROM agent_tasks WHERE plan_id=$1 AND id = ANY($2) ORDER BY priority ASC`,
-      [plan_id, selected_task_ids]
+      `SELECT * FROM agent_tasks WHERE plan_id=$1 AND id = ANY($2) AND shop_domain=$3 ORDER BY priority ASC`,
+      [plan_id, selected_task_ids, shop]
     );
     let recipients = [];
     let sample = null;
@@ -1851,15 +2097,17 @@ app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
 });
 
 app.get("/api/agent/plan-status", async (req, res) => {
-  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
-  const status = await agentEngine.getPlanStatus(req.query.plan_id);
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  const status = await agentEngine.getPlanStatus(req.query.plan_id, shop);
   if (!status) return res.json({ ok: false, error: "not found" });
   res.json({ ok: true, ...status });
 });
 
 app.post("/api/agent/stop-plan", express.json(), async (req, res) => {
-  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
-  const result = await agentEngine.stopPlan(req.body.plan_id);
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  const result = await agentEngine.stopPlan(req.body.plan_id, shop);
   res.json(result);
 });
 
@@ -1872,7 +2120,7 @@ app.post("/api/agent/revise-plan", express.json(), async (req, res) => {
 
     const cur = await db.query(
       `SELECT id, priority, move_type, title, percentage, est_customers, projected_revenue
-       FROM agent_tasks WHERE plan_id=$1 ORDER BY priority ASC`, [plan_id]);
+       FROM agent_tasks WHERE plan_id=$1 AND shop_domain=$2 ORDER BY priority ASC`, [plan_id, shop]);
     if (cur.rows.length === 0) return res.json({ ok: false, error: "התוכנית לא נמצאה" });
 
     const tasksJson = JSON.stringify(cur.rows.map(t => ({
@@ -2624,7 +2872,7 @@ app.delete("/api/chat/delete/:id", async (req, res) => {
 app.get("/admin/sync-products", async (req, res) => {
   const password = req.query.password;
   if (!isAdmin(req)) {
-    return res.status(401).json({ error: "סיסמה שגויה - הוסף ?password=tryfit2026 ל-URL" });
+    return res.status(401).json({ error: "גישה נדחתה" });
   }
   try {
     const result = await shopify.syncProducts(resolveShop(req) || DEFAULT_SHOP);
@@ -3174,18 +3422,43 @@ app.get("/api/tryon/video-status/:id", async (req, res) => {
   }
 });
 
+// Was an unauthenticated open proxy: `?url=` was fetched verbatim and the body
+// returned. That is server-side request forgery — anyone could point it at
+// internal Railway services, at cloud metadata endpoints, or use our IP and
+// bandwidth to fetch arbitrary content. It now only proxies the media hosts the
+// try-on pipeline actually returns, over https, and never follows redirects
+// (which would let an allowed host bounce the request somewhere internal).
+const VIDEO_PROXY_HOSTS = new Set([
+  "rundiffusion-fal.s3.amazonaws.com",
+  "v3.fal.media",
+  "fal.media",
+  "storage.googleapis.com",
+  "replicate.delivery",
+  "api.runpod.ai"
+]);
+
 app.get("/api/tryon/video-proxy", async (req, res) => {
   try {
-    const url = req.query.url;
-    if (!url) return res.status(400).json({ error: "Missing url" });
-    const videoRes = await fetch(url);
+    const raw = req.query.url;
+    if (!raw) return res.status(400).json({ error: "Missing url" });
+    let target;
+    try { target = new URL(String(raw)); }
+    catch (e) { return res.status(400).json({ error: "Invalid url" }); }
+
+    if (target.protocol !== "https:") return res.status(400).json({ error: "https only" });
+    const host = target.hostname.toLowerCase();
+    const allowed = VIDEO_PROXY_HOSTS.has(host) ||
+      [...VIDEO_PROXY_HOSTS].some(h => host.endsWith("." + h));
+    if (!allowed) return res.status(403).json({ error: "Host not allowed" });
+
+    const videoRes = await fetch(target.toString(), { redirect: "error" });
     if (!videoRes.ok) return res.status(502).json({ error: "Failed to fetch video" });
     res.setHeader("Content-Type", "video/mp4");
-    res.setHeader("Access-Control-Allow-Origin", "*");
     const buffer = await videoRes.arrayBuffer();
     res.send(Buffer.from(buffer));
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error("video-proxy:", e.message);
+    res.status(500).json({ error: "proxy_failed" });
   }
 });
 
@@ -3195,7 +3468,7 @@ app.get("/api/tryon/video-proxy", async (req, res) => {
 //     structured request row so the merchant can be provided the export.
 //   customers/redact — delete/anonymize everything we hold about that customer.
 //   shop/redact — sent 48h after uninstall: delete ALL data for that shop.
-app.post("/webhooks/compliance", verifyShopifyWebhook, async (req, res) => {
+app.post("/webhooks/compliance", express.raw({ type: "*/*" }), verifyShopifyWebhook, async (req, res) => {
   const topic = req.headers["x-shopify-topic"] || "";
   const body = req.body || {};
   const shop = (body.shop_domain || "").toLowerCase();
@@ -3237,7 +3510,7 @@ app.post("/webhooks/compliance", verifyShopifyWebhook, async (req, res) => {
   res.status(200).json({ success: true });
 });
 
-app.post("/webhooks/app/uninstalled", verifyShopifyWebhook, async (req, res) => {
+app.post("/webhooks/app/uninstalled", express.raw({ type: "*/*" }), verifyShopifyWebhook, async (req, res) => {
   const shop = (req.body && req.body.shop_domain || req.body && req.body.domain || "").toLowerCase() ||
                (req.headers["x-shopify-shop-domain"] || "").toLowerCase();
   console.log("App uninstalled:", shop || "unknown");
@@ -3249,7 +3522,7 @@ app.post("/webhooks/app/uninstalled", verifyShopifyWebhook, async (req, res) => 
   res.status(200).json({ success: true });
 });
 
-app.post("/webhooks/app/scopes_update", verifyShopifyWebhook, (req, res) => {
+app.post("/webhooks/app/scopes_update", express.raw({ type: "*/*" }), verifyShopifyWebhook, (req, res) => {
   console.log("Scopes update:", req.body?.shop_domain || "unknown");
   res.status(200).json({ success: true });
 });
@@ -3257,7 +3530,7 @@ app.post("/webhooks/app/scopes_update", verifyShopifyWebhook, (req, res) => {
 function handleCheckoutWebhook(req, res) {
   try {
     const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-    const secret = process.env.SHOPIFY_API_SECRET || "";
+    const secret = shopifyAppSecret();
     const rawBody = req.body;
 
     if (!hmacHeader || !secret) {
@@ -3302,7 +3575,7 @@ app.post("/webhooks/checkouts/update", express.raw({ type: "application/json" })
 function handleOrderWebhook(req, res) {
   try {
     const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-    const secret = process.env.SHOPIFY_API_SECRET || "";
+    const secret = shopifyAppSecret();
     const rawBody = req.body;
     if (!hmacHeader || !secret) return res.status(401).json({ error: "Unauthorized" });
     const hash = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");

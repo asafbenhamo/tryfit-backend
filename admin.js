@@ -3,7 +3,8 @@ const router = express.Router();
 const path = require("path");
 const credits = require("./credits");
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "tryfit2026";
+// No hardcoded fallback — see server-dual.js.
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || null;
 
 function adminAuth(req, res, next) {
   const auth = req.headers.authorization;

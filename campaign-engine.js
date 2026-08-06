@@ -28,17 +28,24 @@ const CAMPAIGN_COOLDOWN_DAYS = 4;
 // In-memory registry of running/finished campaigns.
 const campaigns = {};
 
+// Ids must not be guessable. The old form was a millisecond timestamp plus one
+// of 1000 values, so a few hundred thousand requests over the last hour's window
+// enumerated every campaign on the platform — and campaign status returns
+// customer names, phone numbers, coupon codes and message bodies.
 function newCampaignId() {
-  return 'camp_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+  return 'camp_' + require('crypto').randomBytes(16).toString('hex');
 }
 
 function getCampaignStatus(id) {
   return campaigns[id] || null;
 }
 
-function stopCampaign(id) {
+// `shop` is required by callers that serve merchants: without it any tenant can
+// halt another tenant's running campaign by id.
+function stopCampaign(id, shop) {
   const c = campaigns[id];
   if (!c) return { ok: false, error: 'not found' };
+  if (shop && c.shop !== shop) return { ok: false, error: 'not found' };
   if (c.status === 'running') {
     c.stopRequested = true;
     c.status = 'stopping';
