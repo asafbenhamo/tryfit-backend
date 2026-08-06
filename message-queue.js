@@ -207,18 +207,48 @@ async function processDue(limit = 60) {
       }
 
       // 4. Send on the right channel.
-      let ok = false, err = null;
-      if (m.channel === 'sms' && m.phone && smsSender.isConfigured()) {
-        const r = await smsSender.sendOne(m.shop_domain, { phone: m.phone, message: body });
-        ok = r.ok; err = r.error || null;
-      } else if (m.channel === 'email' && m.email) {
-        const qset = await storeSettings.getSettings(m.shop_domain).catch(() => ({}));
-        const brand = qset.brand || '770';
-        const html = mailer.buildHtmlEmail(body, { brand, language: qset.language, to: m.email });
-        const r = await mailer.sendEmail({ to: m.email, subject: m.subject || ('הודעה מ-' + brand), html, text: body, fromName: brand });
-        ok = r.ok; err = r.error || null;
-      } else {
-        await mark(m.id, 'skipped', null, 'no_channel'); skipped++; continue;
+      let ok = false, err = null, handled = false;
+
+      if (m.channel === 'whatsapp' && m.phone) {
+        // WhatsApp spends a credit the merchant bought up front. sendTemplate
+        // deducts on success and reports 'no_credits' when the balance is gone.
+        // Running out is not a failure: the message drops to the next-best
+        // channel so the customer still hears from us. Any OTHER error is a
+        // real failure and must be recorded as one, not silently downgraded.
+        const wa = require('./whatsapp-sender');
+        const r = await wa.sendTemplate(m.shop_domain, m.phone,
+          (m.meta && m.meta.template) || 'advisor_generic',
+          (m.meta && m.meta.params) || [m.name || '', body],
+          { urlSuffix: (m.meta && m.meta.url_suffix) || undefined });
+
+        if (r.ok) {
+          ok = true; handled = true;
+        } else if (r.reason === 'no_credits' || r.reason === 'not_configured') {
+          const fallback = (m.phone && smsSender.isConfigured()) ? 'sms' : (m.email ? 'email' : null);
+          if (!fallback) {
+            await mark(m.id, 'skipped', null, 'wa_' + r.reason + '_no_fallback'); skipped++; continue;
+          }
+          await db.query(`UPDATE scheduled_messages SET channel=$2 WHERE id=$1`, [m.id, fallback]).catch(() => {});
+          console.log(`[queue] #${m.id} whatsapp -> ${fallback} (${r.reason})`);
+          m.channel = fallback;             // retry below on the cheaper channel
+        } else {
+          ok = false; err = r.error || r.reason || 'whatsapp_failed'; handled = true;
+        }
+      }
+
+      if (!handled) {
+        if (m.channel === 'sms' && m.phone && smsSender.isConfigured()) {
+          const r = await smsSender.sendOne(m.shop_domain, { phone: m.phone, message: body });
+          ok = r.ok; err = r.error || null;
+        } else if (m.channel === 'email' && m.email) {
+          const qset = await storeSettings.getSettings(m.shop_domain).catch(() => ({}));
+          const brand = qset.brand || '770';
+          const html = mailer.buildHtmlEmail(body, { brand, language: qset.language, to: m.email });
+          const r = await mailer.sendEmail({ to: m.email, subject: m.subject || ('הודעה מ-' + brand), html, text: body, fromName: brand });
+          ok = r.ok; err = r.error || null;
+        } else {
+          await mark(m.id, 'skipped', null, 'no_channel'); skipped++; continue;
+        }
       }
 
       if (ok) { await mark(m.id, 'sent', new Date(), null); sent++; capCache[m.shop_domain]--; }

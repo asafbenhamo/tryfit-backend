@@ -22,6 +22,7 @@ const ok = (n, c, x) => { if (c) { pass++; console.log('  ok   ' + n); } else { 
 // ---- stubs ---------------------------------------------------------------
 let SETTINGS = {};
 let CUSTOMERS = [];
+let SMS_ON = true, EMAIL_ON = true, WA_CONFIGURED = false, WA_CREDITS = 0;
 let started = [];          // campaigns campaign-engine was asked to start
 let logged = [];           // rows written to advisor_actions
 let claimed = new Set();   // (shop|date) already claimed today
@@ -80,7 +81,10 @@ Module._load = function (request) {
       const m = {}; (emails || []).forEach((e, i) => { if (e) m[String(e).toLowerCase()] = 14 + (i % 3); });
       return m;
     } };
-    case 'sms-sender': return { isConfigured: () => false };
+    case 'sms-sender': return { isConfigured: () => SMS_ON, sendOne: async () => ({ ok: true }) };
+    case 'mailer': return { isConfigured: () => EMAIL_ON, sendEmail: async () => ({ ok: true }), buildHtmlEmail: () => '<p>x</p>' };
+    case 'whatsapp-sender': return { isConfigured: () => WA_CONFIGURED, sendTemplate: async () => ({ ok: true }) };
+    case 'credits-engine': return { getBalance: async () => WA_CREDITS };
     default: return origLoad.apply(this, arguments);
   }
 };
@@ -90,11 +94,13 @@ const policy = require('./policy-engine.js');
 const autopilot = require('./autopilot-engine.js');
 
 // ---- fixtures ------------------------------------------------------------
-function makeCustomers(n, segment, withProduct) {
+// `phoneRate` = share of customers who have a phone number on file.
+function makeCustomers(n, segment, withProduct, phoneRate = 0) {
   const out = [];
   for (let i = 0; i < n; i++) {
     out.push({
-      name: 'Customer ' + i, email: 'c' + i + '@example.com', phone: '',
+      name: 'Customer ' + i, email: 'c' + i + '@example.com',
+      phone: (i / n) < phoneRate ? '+1212555' + String(1000 + i) : '',
       monetary: 400 + i, segment, segment_label: segment,
       last_product: withProduct ? 'Linen Dress' : null, priority: 1
     });
@@ -104,11 +110,20 @@ function makeCustomers(n, segment, withProduct) {
 function reset(over = {}) {
   SETTINGS = Object.assign({
     shop: 's.myshopify.com', autopilot: 'full', timezone: 'America/New_York',
-    daily_cap: 500, language: 'en', brand: 'Willow', followup_default: true, sms_sender: null
+    daily_cap: 500, language: 'en', brand: 'Willow', followup_default: true,
+    sms_sender: 'WILLOW', whatsapp_enabled: false
   }, over);
   CUSTOMERS = makeCustomers(200, 'at_risk', true);
   started = []; logged = []; claimed = new Set(); capRemaining = 500;
+  SMS_ON = true; EMAIL_ON = true; WA_CONFIGURED = false; WA_CREDITS = 0;
 }
+// Total recipients handed to campaign-engine across every channel group.
+const totalSent = () => started.reduce((n, c) => n + c.segment.length, 0);
+const byChannel = () => {
+  const m = {};
+  for (const c of started) m[c.channels[0]] = (m[c.channels[0]] || 0) + c.segment.length;
+  return m;
+};
 
 const RealDate = Date;
 function freeze(iso) {
@@ -215,7 +230,7 @@ function freeze(iso) {
   ok('the first run happens', !first.skipped);
   ok('the second is refused', second.skipped === 'already_ran_today', JSON.stringify(second));
   ok('the third is refused', third.skipped === 'already_ran_today');
-  ok('only one campaign was started', started.length === 1, String(started.length));
+  ok('nothing was sent twice', totalSent() === first.contacted, totalSent() + ' vs ' + first.contacted);
 
   console.log('\n-- what it hands the campaign engine --');
   reset();
@@ -224,11 +239,55 @@ function freeze(iso) {
   ok('smart timing is on', c.smart_timing === true);
   ok('the segment key is tagged for learning', c.segment_key === 'at_risk');
   ok('a discount from the allowed arms', policy.DISCOUNT_ARMS.includes(c.template.percentage), String(c.template.percentage));
-  ok('exactly one channel', Array.isArray(c.channels) && c.channels.length === 1, JSON.stringify(c.channels));
-  ok('email only when SMS is not configured', c.channels[0] === 'email', c.channels[0]);
+  ok('exactly one channel per campaign', started.every(x => Array.isArray(x.channels) && x.channels.length === 1));
   ok('the body names the product', /Linen Dress/.test(c.template.body), c.template.body.slice(0, 80));
   ok('the body carries a coupon placeholder', /\{COUPON\}/.test(c.template.body));
-  ok('every recipient has a contact method', c.segment.every(x => x.email || x.phone));
+  ok('every recipient has a contact method', started.every(x => x.segment.every(y => y.email || y.phone)));
+
+  console.log('\n-- channel precedence: SMS beats email when there is a phone --');
+  reset();
+  CUSTOMERS = makeCustomers(100, 'at_risk', true, 0.6);   // 60% have a phone
+  r = await autopilot.runForShop('s.myshopify.com');
+  let chans = byChannel();
+  ok('customers with a phone got SMS', (chans.sms || 0) === 60, JSON.stringify(chans));
+  ok('customers without a phone got email', (chans.email || 0) === 40, JSON.stringify(chans));
+  ok('nobody got WhatsApp (not enabled)', !chans.whatsapp, JSON.stringify(chans));
+
+  console.log('\n-- email carries everyone when SMS is unavailable --');
+  reset(); SMS_ON = false;
+  CUSTOMERS = makeCustomers(100, 'at_risk', true, 0.6);
+  r = await autopilot.runForShop('s.myshopify.com');
+  chans = byChannel();
+  ok('all 100 fall back to email', (chans.email || 0) === 100, JSON.stringify(chans));
+
+  console.log('\n-- WhatsApp only when enabled AND funded --');
+  reset(); SETTINGS.whatsapp_enabled = true; WA_CONFIGURED = true; WA_CREDITS = 0;
+  CUSTOMERS = makeCustomers(100, 'at_risk', true, 1.0);
+  r = await autopilot.runForShop('s.myshopify.com');
+  chans = byChannel();
+  ok('enabled but zero credits -> no WhatsApp at all', !chans.whatsapp, JSON.stringify(chans));
+  ok('those customers still got SMS', (chans.sms || 0) === 100, JSON.stringify(chans));
+
+  reset(); SETTINGS.whatsapp_enabled = true; WA_CONFIGURED = true; WA_CREDITS = 25;
+  CUSTOMERS = makeCustomers(100, 'at_risk', true, 1.0);
+  r = await autopilot.runForShop('s.myshopify.com');
+  chans = byChannel();
+  ok('WhatsApp is capped by the credit balance', (chans.whatsapp || 0) === 25, JSON.stringify(chans));
+  ok('the rest drop to SMS, nobody is dropped', (chans.sms || 0) === 75, JSON.stringify(chans));
+  ok('everyone was still reached', (chans.whatsapp || 0) + (chans.sms || 0) === 100);
+
+  reset(); SETTINGS.whatsapp_enabled = false; WA_CONFIGURED = true; WA_CREDITS = 500;
+  CUSTOMERS = makeCustomers(50, 'at_risk', true, 1.0);
+  r = await autopilot.runForShop('s.myshopify.com');
+  chans = byChannel();
+  ok('funded but NOT enabled -> credits are never spent', !chans.whatsapp, JSON.stringify(chans));
+
+  console.log('\n-- unreachable customers are counted, not silently dropped --');
+  reset(); SMS_ON = false; EMAIL_ON = false;
+  CUSTOMERS = makeCustomers(40, 'at_risk', true, 0.5);
+  r = await autopilot.runForShop('s.myshopify.com');
+  ok('no channel available -> nothing sent', totalSent() === 0, String(totalSent()));
+  ok('and they are reported as unreachable', (r.unreachable || 0) === 40, JSON.stringify(r.unreachable));
 
   console.log('\n-- the tick only wakes stores at their own local run hour --');
   reset();

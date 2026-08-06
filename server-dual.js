@@ -248,7 +248,7 @@ app.post("/api/settings", express.json(), async (req, res) => {
   if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   const shop = resolveShop(req) || DEFAULT_SHOP;
   const allowed = {};
-  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default", "timezone"]) {
+  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default", "timezone", "whatsapp_enabled"]) {
     if (req.body[k] !== undefined) allowed[k] = req.body[k];
   }
   if (allowed.language && !["he", "en"].includes(allowed.language)) return res.status(400).json({ ok: false, error: "language must be he/en" });
@@ -320,6 +320,30 @@ app.get("/api/health/ai", async (req, res) => {
       type: (e.error && e.error.error && e.error.error.type) || e.name || null,
       error: (e.error && e.error.error && e.error.error.message) || e.message
     });
+  }
+});
+
+// Which channels can this shop actually send on right now, and why not the
+// others? Answers "why did she get an email instead of a text?" without having
+// to read logs. Also reports the WhatsApp credit balance, since that is what
+// gates the expensive channel.
+app.get("/api/channels", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const settings = await storeSettings.getSettings(shop);
+    const router = require("./channel-router");
+    const available = await router.shopChannels(shop, settings);
+    res.json({
+      ok: true,
+      priority: ["whatsapp (funded)", "sms", "email"],
+      available,
+      whatsapp_enabled: settings.whatsapp_enabled === true,
+      credits: available.credits != null ? available.credits : await creditsEngine.getBalance(shop).catch(() => 0),
+      sms_sender: settings.sms_sender || null
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -3648,7 +3672,7 @@ app.post("/admin/store-settings", express.json(), async (req, res) => {
   const shop = (req.body.shop || "").toLowerCase().trim();
   if (!shop) return res.status(400).json({ ok: false, error: "חסר shop" });
   const patch = {};
-  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default", "timezone"]) {
+  for (const k of ["brand", "language", "currency", "sms_sender", "daily_cap", "autopilot", "followup_default", "timezone", "whatsapp_enabled"]) {
     if (req.body[k] !== undefined) patch[k] = req.body[k];
   }
   res.json(await storeSettings.updateSettings(shop, patch));

@@ -23,6 +23,10 @@ const DEFAULTS = {
   daily_cap: 500,         // smart outreaches per DAY per shop
   autopilot: 'approve',   // 'off' | 'approve' (morning plan needs a click) | 'full'
   followup_default: true, // sequences on by default
+  // WhatsApp costs real money per message and is billed against credits the
+  // merchant buys up front, so it is OFF until they deliberately turn it on.
+  // Email and SMS are always available and need no opt-in.
+  whatsapp_enabled: false,
   // IANA zone, captured from Shopify at install. EVERY wall-clock decision
   // (send window, personal best hour, morning report, daily counters) is made
   // in this zone. Existing shops default to the original pilot's zone so their
@@ -44,6 +48,8 @@ async function ensureTable() {
   // Added after the table shipped — existing deployments need the column.
   await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS timezone TEXT`)
     .catch(e => console.error('[settings] timezone column:', e.message));
+  await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS whatsapp_enabled BOOLEAN DEFAULT FALSE`)
+    .catch(e => console.error('[settings] whatsapp_enabled column:', e.message));
   tableReady = true;
 }
 
@@ -89,7 +95,8 @@ async function getSettings(shop) {
     daily_cap: (row && row.daily_cap != null) ? row.daily_cap : DEFAULTS.daily_cap,
     autopilot: (row && row.autopilot) || DEFAULTS.autopilot,
     followup_default: (row && row.followup_default != null) ? row.followup_default : DEFAULTS.followup_default,
-    timezone: validTz(row && row.timezone) || DEFAULTS.timezone
+    timezone: validTz(row && row.timezone) || DEFAULTS.timezone,
+    whatsapp_enabled: (row && row.whatsapp_enabled != null) ? row.whatsapp_enabled : DEFAULTS.whatsapp_enabled
   };
   cache.set(shop, { at: Date.now(), settings: s });
   return s;
@@ -99,7 +106,7 @@ async function updateSettings(shop, patch = {}) {
   shop = (shop || '').toLowerCase().trim();
   if (!shop) return { ok: false, error: 'no_shop' };
   await ensureTable();
-  const allowed = ['brand', 'language', 'currency', 'sms_sender', 'daily_cap', 'autopilot', 'followup_default', 'timezone'];
+  const allowed = ['brand', 'language', 'currency', 'sms_sender', 'daily_cap', 'autopilot', 'followup_default', 'timezone', 'whatsapp_enabled'];
   const cur = await getSettings(shop);
   const next = { ...cur };
   for (const k of allowed) if (patch[k] !== undefined) next[k] = patch[k];
@@ -107,11 +114,11 @@ async function updateSettings(shop, patch = {}) {
   next.timezone = validTz(next.timezone) || DEFAULTS.timezone;
   try {
     await db.query(
-      `INSERT INTO store_settings (shop_domain, brand, language, currency, sms_sender, daily_cap, autopilot, followup_default, timezone, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+      `INSERT INTO store_settings (shop_domain, brand, language, currency, sms_sender, daily_cap, autopilot, followup_default, timezone, whatsapp_enabled, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
        ON CONFLICT (shop_domain) DO UPDATE SET
-         brand=$2, language=$3, currency=$4, sms_sender=$5, daily_cap=$6, autopilot=$7, followup_default=$8, timezone=$9, updated_at=NOW()`,
-      [shop, next.brand, next.language, next.currency, next.sms_sender, next.daily_cap, next.autopilot, next.followup_default, next.timezone]
+         brand=$2, language=$3, currency=$4, sms_sender=$5, daily_cap=$6, autopilot=$7, followup_default=$8, timezone=$9, whatsapp_enabled=$10, updated_at=NOW()`,
+      [shop, next.brand, next.language, next.currency, next.sms_sender, next.daily_cap, next.autopilot, next.followup_default, next.timezone, (next.whatsapp_enabled === true || next.whatsapp_enabled === 'true')]
     );
     cache.delete(shop);
     return { ok: true, settings: await getSettings(shop) };

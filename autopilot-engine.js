@@ -165,9 +165,12 @@ async function runForShop(shop, opts = {}) {
     }
 
     // ---- which channels this shop can actually use --------------------------
-    const smsSender = require('./sms-sender');
-    const allowedChannels = ['email'];
-    if (smsSender.isConfigured() && settings.sms_sender) allowedChannels.push('sms');
+    // Channel precedence is a business rule, not something to learn: WhatsApp
+    // only when the merchant funded it, then SMS, then email. The policy still
+    // chooses the OFFER, but it may not spend credits the merchant did not buy.
+    const channelRouter = require('./channel-router');
+    const available = await channelRouter.shopChannels(shop, settings);
+    summary.channels_available = available;
 
     let spent = 0;
 
@@ -175,7 +178,7 @@ async function runForShop(shop, opts = {}) {
       if (spent >= budget) break;
 
       const move = policy.decide(stats, seg.key, {
-        allowedChannels,
+        allowedChannels: ['email'],   // offer only; the router assigns the channel
         defaultDiscount: seg.discount || 15
       });
       if (move.exploring) summary.exploring++;
@@ -239,37 +242,57 @@ async function runForShop(shop, opts = {}) {
         continue;
       }
 
-      const sample = buildMessage(recipients[0], move, settings, settings.language);
-      const started = campaignEngine.startCampaign(shop, {
-        campaign_type: 'autopilot_' + seg.key,
-        segment: recipients,
-        template: {
-          percentage: move.discount,
-          days_valid: 3,
-          subject: sample.subject,
-          body: sample.body
-        },
-        channels: [move.channel],
-        smart_timing: true,        // each customer at her own hour
-        segment_key: seg.key,
-        followup: settings.followup_default !== false
-      });
+      // Route per customer, then run one campaign per channel group. A woman
+      // with a phone gets a text; one with only an address gets an email; the
+      // whole segment no longer has to share a single channel.
+      const routed = await channelRouter.route(shop, recipients, settings, { credits: available.credits });
+      const byChannel = { whatsapp: [], sms: [], email: [] };
+      let unreachable = 0;
+      for (const a of routed.assignments) {
+        if (!a.channel) { unreachable++; continue; }
+        byChannel[a.channel].push(a.customer);
+      }
 
-      spent += recipients.length;
-      summary.contacted += recipients.length;
+      const campaigns = [];
+      let segContacted = 0;
+      for (const ch of ['whatsapp', 'sms', 'email']) {
+        const group = byChannel[ch];
+        if (group.length === 0) continue;
+        const sample = buildMessage(group[0], move, settings, settings.language);
+        const started = campaignEngine.startCampaign(shop, {
+          campaign_type: 'autopilot_' + seg.key,
+          segment: group,
+          template: {
+            percentage: move.discount,
+            days_valid: 3,
+            subject: sample.subject,
+            body: sample.body
+          },
+          channels: [ch],
+          smart_timing: true,        // each customer at her own hour
+          segment_key: seg.key,
+          followup: settings.followup_default !== false
+        });
+        campaigns.push({ channel: ch, count: group.length, campaign_id: started.id });
+        segContacted += group.length;
+      }
+
+      spent += segContacted;
+      summary.contacted += segContacted;
+      summary.unreachable = (summary.unreachable || 0) + unreachable;
       summary.segments.push({
         segment: seg.key,
         label: seg.label,
-        contacted: recipients.length,
+        contacted: segContacted,
         held_out: heldOut,
         rejected,
+        unreachable,
         discount: move.discount,
-        channel: move.channel,
         why_discount: move.discount_why,
-        why_channel: move.channel_why,
+        by_channel: routed.counts,
+        campaigns,
         expected: seg.expected,
-        basis: seg.basis,
-        campaign_id: started.id
+        basis: seg.basis
       });
     }
 
