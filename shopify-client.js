@@ -3,6 +3,7 @@
 // Only operates for shops that have a configured token (currently only seven770).
 
 const db = require('./database');
+const vault = require('./crypto-vault');
 
 const SHOPIFY_API_VERSION = '2026-01';
 
@@ -55,13 +56,16 @@ async function loadStores() {
     storeCache.clear();
     for (const row of r.rows) {
       storeCache.set(row.shop_domain.toLowerCase().trim(), {
-        token: row.access_token,
-        password: row.advisor_password,
+        // Decrypted here, at the single place the cache is filled, so every
+        // caller downstream keeps working unchanged. Rows written before
+        // encryption was enabled pass through untouched.
+        token: vault.decrypt(row.access_token),
+        password: vault.decrypt(row.advisor_password),
         name: row.display_name,
         public_domain: row.public_domain,
         active: row.active,
         terms_accepted_at: row.terms_accepted_at,
-        d360_api_key: row.d360_api_key,
+        d360_api_key: vault.decrypt(row.d360_api_key),
         wa_language: row.wa_language || 'he',
         logo_url: row.logo_url || null,
         owner_email: row.owner_email || null
@@ -72,6 +76,81 @@ async function loadStores() {
   } catch (err) {
     console.error('⚠️  [stores] loadStores failed:', err.message);
     return 0;
+  }
+}
+
+// Seal any credential still sitting in plaintext. Runs once at boot and is a
+// no-op afterwards, so enabling encryption on a live deployment needs no
+// downtime and no flag day: reads already tolerate both forms.
+async function migrateSecretsToVault() {
+  if (!vault.isEnabled()) return { ok: false, skipped: 'no_key' };
+  await ensureStoreTable();
+  let sealed = 0;
+  try {
+    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, d360_api_key FROM advisor_stores`);
+    for (const row of r.rows) {
+      const patch = {};
+      if (row.access_token && !vault.isEncrypted(row.access_token)) patch.access_token = vault.encrypt(row.access_token);
+      if (row.advisor_password && !vault.isEncrypted(row.advisor_password)) patch.advisor_password = vault.encrypt(row.advisor_password);
+      if (row.d360_api_key && !vault.isEncrypted(row.d360_api_key)) patch.d360_api_key = vault.encrypt(row.d360_api_key);
+      if (!Object.keys(patch).length) continue;
+      await db.query(
+        `UPDATE advisor_stores
+            SET access_token = COALESCE($2, access_token),
+                advisor_password = COALESCE($3, advisor_password),
+                d360_api_key = COALESCE($4, d360_api_key)
+          WHERE shop_domain = $1`,
+        [row.shop_domain, patch.access_token || null, patch.advisor_password || null, patch.d360_api_key || null]
+      );
+      sealed++;
+    }
+    if (sealed) console.log(`🔐 [vault] encrypted credentials for ${sealed} store(s)`);
+    return { ok: true, sealed };
+  } catch (e) {
+    console.error('[vault] migration failed:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Called when Shopify tells us the app was uninstalled.
+//
+// The uninstall handler used to invoke this through an `&&` guard, and the
+// function did not exist — so it silently did nothing and the store's access
+// token stayed valid and cached indefinitely. Shopify revokes the token at
+// their end, but holding a credential for a merchant who has removed the app
+// is exactly what "delete data on uninstall" is meant to prevent, and the
+// scheduler kept treating the shop as live.
+//
+// The row is kept (marked inactive, token cleared) so that shop/redact, which
+// arrives 48 hours later, can still find the shop and finish the deletion.
+async function deactivateStore(shopDomain) {
+  const domain = (shopDomain || '').toLowerCase().trim();
+  if (!domain) return { ok: false, error: 'no_shop' };
+  await ensureStoreTable();
+  try {
+    await db.query(
+      `UPDATE advisor_stores
+          SET active = FALSE, access_token = '', d360_api_key = NULL
+        WHERE shop_domain = $1`, [domain]);
+    storeCache.delete(domain);
+    console.log(`🔌 [stores] ${domain} deactivated, token cleared`);
+    return { ok: true };
+  } catch (e) {
+    console.error('[stores] deactivateStore:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Remove every trace of a shop. Called by the shop/redact GDPR webhook.
+async function purgeStore(shopDomain) {
+  const domain = (shopDomain || '').toLowerCase().trim();
+  if (!domain) return { ok: false, error: 'no_shop' };
+  try {
+    await db.query(`DELETE FROM advisor_stores WHERE shop_domain = $1`, [domain]);
+    storeCache.delete(domain);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }
 
@@ -88,7 +167,7 @@ async function upsertStore({ shop_domain, access_token, advisor_password, displa
        display_name = COALESCE(EXCLUDED.display_name, advisor_stores.display_name),
        public_domain = COALESCE(EXCLUDED.public_domain, advisor_stores.public_domain),
        active = TRUE`,
-    [domain, access_token, advisor_password || null, display_name || null, public_domain || null]
+    [domain, vault.encrypt(access_token), vault.encrypt(advisor_password || null), display_name || null, public_domain || null]
   );
   await loadStores();
   return { ok: true, shop_domain: domain };
@@ -103,7 +182,7 @@ async function setWhatsAppConfig(shopDomain, { d360_api_key, wa_language }) {
      SET d360_api_key = COALESCE($2, d360_api_key),
          wa_language  = COALESCE($3, wa_language)
      WHERE shop_domain = $1`,
-    [domain, d360_api_key || null, wa_language || null]
+    [domain, vault.encrypt(d360_api_key || null), wa_language || null]
   );
   await loadStores();
   return { ok: true };
@@ -140,7 +219,7 @@ async function setAdvisorPassword(shopDomain, newPassword) {
   await ensureStoreTable();
   const r = await db.query(
     `UPDATE advisor_stores SET advisor_password = $2 WHERE shop_domain = $1`,
-    [domain, newPassword]
+    [domain, vault.encrypt(newPassword)]
   );
   await loadStores();
   return { ok: r.rowCount > 0, updated: r.rowCount };
@@ -1450,6 +1529,9 @@ module.exports = {
   setOwnerEmail,
   getWhatsAppConfig,
   ensureStoreTable,
+  deactivateStore,
+  purgeStore,
+  migrateSecretsToVault,
   findCustomerByEmail,
   findCustomerByPhone,
   getCustomerById,

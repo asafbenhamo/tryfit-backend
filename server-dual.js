@@ -3476,26 +3476,74 @@ app.post("/webhooks/compliance", express.raw({ type: "*/*" }), verifyShopifyWebh
   try {
     if (topic === "customers/redact") {
       const email = (body.customer && body.customer.email) || null;
+      const phone = (body.customer && body.customer.phone) || null;
       const cid = (body.customer && String(body.customer.id)) || null;
-      // Remove the customer's PII everywhere we hold it.
-      if (cid) await db.query(`DELETE FROM store_customers WHERE shop_domain=$1 AND shopify_customer_id=$2`, [shop, cid]).catch(() => {});
+      let removed = 0;
+      const run = async (sql, params) => {
+        const r = await db.query(sql, params).catch(e => { console.error("[GDPR] redact:", e.message); return { rowCount: 0 }; });
+        removed += r.rowCount || 0;
+      };
+
+      if (cid) {
+        await run(`DELETE FROM store_customers WHERE shop_domain=$1 AND shopify_customer_id=$2`, [shop, cid]);
+        // Order rows carry the customer inside raw_data — the full Shopify order
+        // JSON, with name, email and shipping address. Deleting the customer row
+        // while leaving that behind is not erasure. Orders themselves are the
+        // merchant's financial record, so the PII is stripped and the row kept.
+        await run(`UPDATE store_orders SET raw_data = NULL WHERE shop_domain=$1 AND shopify_customer_id=$2`, [shop, cid]);
+        await run(`DELETE FROM customer_profiles WHERE shop_domain=$1 AND store_customer_id=$2`, [shop, cid]);
+      }
       if (email) {
-        await db.query(`DELETE FROM store_customers WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]).catch(() => {});
-        await db.query(`UPDATE advisor_actions SET target_email=NULL, target_phone=NULL WHERE shop_domain=$1 AND LOWER(target_email)=LOWER($2)`, [shop, email]).catch(() => {});
-        await db.query(`UPDATE scheduled_messages SET status='cancelled' WHERE shop_domain=$1 AND LOWER(email)=LOWER($2) AND status='pending'`, [shop, email]).catch(() => {});
-        await db.query(`DELETE FROM incoming_messages WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]).catch(() => {});
+        await run(`DELETE FROM store_customers WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]);
+        await run(`UPDATE advisor_actions SET target_email=NULL, target_phone=NULL, details = details - 'name' WHERE shop_domain=$1 AND LOWER(target_email)=LOWER($2)`, [shop, email]);
+        // Cancelling a queued message leaves its body, name and address in the
+        // row. Clear those too.
+        await run(`UPDATE scheduled_messages SET status='cancelled', message='', subject=NULL, name=NULL, email=NULL, phone=NULL
+                    WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]);
+        await run(`DELETE FROM incoming_messages WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]);
+        await run(`DELETE FROM abandoned_checkouts WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]);
+        await run(`DELETE FROM message_clicks WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]);
+        await run(`DELETE FROM tryfit_consenting_customers WHERE shop_domain=$1 AND LOWER(email)=LOWER($2)`, [shop, email]);
+        // Chat transcripts quote customer names and addresses back to the
+        // merchant, so a conversation mentioning this person still holds their
+        // data. Drop any conversation that references the address.
+        await run(`DELETE FROM chat_conversations WHERE shop_domain=$1 AND messages::text ILIKE '%' || $2 || '%'`, [shop, email]);
       }
-      // NOTE: message_optouts is intentionally KEPT — a suppression list is required
-      // to keep honoring the person's do-not-contact request (GDPR legitimate interest).
+      if (phone) {
+        const digits = String(phone).replace(/[^0-9]/g, "");
+        if (digits.length >= 7) {
+          await run(`UPDATE advisor_actions SET target_phone=NULL WHERE shop_domain=$1 AND regexp_replace(COALESCE(target_phone,''),'[^0-9]','','g') = $2`, [shop, digits]);
+          await run(`UPDATE scheduled_messages SET status='cancelled', message='', name=NULL, phone=NULL
+                      WHERE shop_domain=$1 AND regexp_replace(COALESCE(phone,''),'[^0-9]','','g') = $2`, [shop, digits]);
+          await run(`DELETE FROM incoming_messages WHERE shop_domain=$1 AND regexp_replace(COALESCE(phone,''),'[^0-9]','','g') = $2`, [shop, digits]);
+        }
+      }
+      // message_optouts is intentionally KEPT: we must go on remembering that
+      // this person asked not to be contacted. Forgetting a suppression entry
+      // would mean messaging them again, which is the harm the law is about.
+      console.log(`🔒 [GDPR] customers/redact for ${shop}: ${removed} row(s) affected`);
+
     } else if (topic === "shop/redact") {
-      // Full erasure of everything for this shop.
-      const tables = ["store_customers", "store_orders", "store_order_items", "advisor_actions",
-        "scheduled_messages", "incoming_messages", "message_optouts", "store_settings",
-        "abandoned_checkouts", "campaign_results"];
+      // Full erasure. The previous list covered 10 tables out of 33 and left
+      // behind the store row itself — including the Shopify ACCESS TOKEN.
+      const tables = [
+        "store_customers", "store_orders", "store_order_items", "store_products",
+        "advisor_actions", "scheduled_messages", "incoming_messages", "message_optouts",
+        "message_clicks", "store_settings", "abandoned_checkouts", "campaign_results",
+        "agent_plans", "agent_tasks", "autopilot_runs", "advisor_memory",
+        "advisor_credits", "advisor_credit_ledger", "app_subscriptions", "app_usage_charges",
+        "dismissed_opportunities", "chat_conversations", "push_subscriptions",
+        "data_requests", "data_access_log", "customer_profiles", "consent_records",
+        "tryfit_consenting_customers", "tryon_events", "wa_templates", "shops"
+      ];
       for (const t of tables) {
-        await db.query(`DELETE FROM ${t} WHERE shop_domain=$1`, [shop]).catch(() => {});
+        await db.query(`DELETE FROM ${t} WHERE shop_domain=$1`, [shop]).catch(() => { /* table may not exist */ });
       }
-      console.log(`🔒 [GDPR] shop ${shop} fully redacted`);
+      try { await sessionAuth.revokeAllForShop(shop); } catch (e) {}
+      // Last: the credential itself.
+      try { await shopify.purgeStore(shop); } catch (e) { console.error("[GDPR] purgeStore:", e.message); }
+      console.log(`🔒 [GDPR] shop ${shop} fully redacted (${tables.length} tables + credentials)`);
+
     } else if (topic === "customers/data_request") {
       // Record the request so the merchant can be given the customer's data.
       await db.query(
@@ -3517,7 +3565,16 @@ app.post("/webhooks/app/uninstalled", express.raw({ type: "*/*" }), verifyShopif
   // CRITICAL: the moment a shop uninstalls, all outgoing messaging must stop.
   if (shop) {
     await db.query(`UPDATE scheduled_messages SET status='cancelled' WHERE shop_domain=$1 AND status='pending'`, [shop]).catch(() => {});
-    try { require('./shopify-client').deactivateStore && require('./shopify-client').deactivateStore(shop); } catch (e) { /* optional */ }
+    // Was guarded with `&&` against a function that did not exist, so this
+    // silently did nothing: the access token stayed in our database and the
+    // shop stayed "active" to every scheduler. Awaited and unguarded now, so a
+    // failure is visible instead of invisible.
+    try { await shopify.deactivateStore(shop); }
+    catch (e) { console.error("[uninstall] deactivateStore:", e.message); }
+    // Autopilot must not resume for a shop that removed the app.
+    try { await storeSettings.updateSettings(shop, { autopilot: "off" }); } catch (e) {}
+    // Any session held for this shop stops working immediately.
+    try { await sessionAuth.revokeAllForShop(shop); } catch (e) {}
   }
   res.status(200).json({ success: true });
 });
@@ -4171,6 +4228,9 @@ app.listen(PORT, async () => {
       console.log("Data platform: READY");
       // Load any DB-backed advisor stores into the in-memory token cache.
       // (770 stays env-based; this just adds support for new shops.)
+      // Seal any credential still stored in plaintext, then load. Order matters:
+      // migrate first so the cache is filled from the encrypted rows.
+      await shopify.migrateSecretsToVault().catch(e => console.error("[vault]", e.message));
       await shopify.loadStores();
       // WhatsApp credits tables (balance + ledger per shop).
       await creditsEngine.ensureCreditsTables();
