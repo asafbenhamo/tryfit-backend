@@ -2879,8 +2879,11 @@
     const btn = document.getElementById('apStopBtn');
     if (btn) btn.disabled = true;
     try {
-      const res = await fetch('/api/autopilot/stop', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      // Same shape as every other call: patchFetch swaps the password for the
+      // bearer token when there is one, and leaves it in place when there is not.
+      const res = await fetch('/api/autopilot/stop?password=' + encodeURIComponent(PASSWORD), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD })
       });
       const r = await res.json();
       if (!r.ok) { alert(r.error || t('ap.error')); if (btn) btn.disabled = false; return; }
