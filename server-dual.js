@@ -4556,6 +4556,17 @@ app.listen(PORT, async () => {
   // AUTOPILOT. Ticks every minute but does nothing for almost all of them: each
   // shop acts only when its OWN local clock hits the run hour, and only if its
   // owner turned autopilot on. Shops left on 'approve' are untouched.
+  // Expired sessions are dead rows that only grow. Nothing was ever removing
+  // them, so the table would keep every login any merchant ever made.
+  const purgeSessions = async () => {
+    try {
+      const n = await sessionAuth.purgeExpired();
+      if (n) console.log(`🧹 [sessions] purged ${n} expired`);
+    } catch (e) { console.error("[sessions] purge:", e.message); }
+  };
+  setTimeout(purgeSessions, 60000);
+  setInterval(purgeSessions, 6 * 60 * 60 * 1000);
+
   autopilot.ensureTable().catch(() => {});
   setInterval(async () => {
     try {

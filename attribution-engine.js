@@ -6,10 +6,17 @@
 //
 // For each recent order it tries, in order, to mark exactly ONE pending advisor
 // action as converted (no double-counting — stops at the first tier that matches):
-//   1. by coupon code   (certain - the customer used a code the advisor created)
-//   2. by draft order    (personalized cart the advisor built)
-//   3. by phone/email within 3 days of being contacted
-//   4. by customer NAME within 3 days (last resort; name is not unique)
+//   1. by coupon code  — she redeemed a code this agent created for her
+//   2. by draft order  — the order came from a cart this agent built
+//   3. by link click   — she clicked our tracked link, then bought within 3 days
+//                        OF THAT CLICK
+//
+// There is deliberately no time-window tier ("bought within N days of any
+// message") and no name matching. Both were removed: they credit the agent for
+// sales it had nothing to do with, and this number is what the merchant is
+// billed 5% of. An unprovable sale is worth less to us than a merchant who
+// stops believing the dashboard. Keep this list and the code in step — the
+// header once described two tiers that no longer existed.
 //
 // Idempotent: only acts on actions still in outcome='pending', so the same order
 // is never counted twice across runs.
@@ -175,7 +182,12 @@ async function attributeOrder(shopDomain, order) {
 }
 
 // Pull recent orders from Shopify and run attribution on each.
+// `shopDomain` is required in practice — the default exists only so older call
+// sites keep working. Defaulting to a specific shop in a multi-tenant engine is
+// a footgun: a missed argument silently attributes and BILLS against the wrong
+// merchant, so callers should always pass it explicitly.
 async function runAttribution(shopDomain = SHOP) {
+  if (!shopDomain) return { ok: false, reason: "no_shop" };
   if (!shopify.hasTokenForShop(shopDomain)) {
     return { ok: false, reason: "no_token" };
   }

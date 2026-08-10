@@ -1237,6 +1237,18 @@
       'ap.polLearning': 'לומד',
       'ap.polProven': 'מוכח',
       'ap.error': 'לא הצלחתי לעדכן את מצב הסוכן',
+      'ap.history': 'מה הסוכן עשה',
+      'ap.historyTitle': '🤖 יומן העבודה של הסוכן',
+      'ap.historyEmpty': 'עוד לא הייתה הרצה אוטונומית. הדלק את המצב האוטונומי והסוכן יתחיל לעבוד כל בוקר.',
+      'ap.hDate': 'תאריך',
+      'ap.hSent': 'נשלחו',
+      'ap.hRejected': 'נפסלו',
+      'ap.hStatus': 'סטטוס',
+      'ap.hDone': 'הושלם',
+      'ap.hSkipped': 'דילג',
+      'ap.hError': 'שגיאה',
+      'ap.hRejectedWhy': '"נפסלו" = לקוחות שהסוכן סירב לפנות אליהם כי לא ידע עליהם מספיק כדי לכתוב משהו אישי.',
+      'ap.hSegments': 'פלחים: {list}',
 
       'set.open': '⚙️ הגדרות',
       'set.title': '⚙️ הגדרות החנות',
@@ -1698,6 +1710,18 @@
       'ap.polLearning': 'learning',
       'ap.polProven': 'proven',
       'ap.error': 'Could not update the agent mode',
+      'ap.history': 'What the agent did',
+      'ap.historyTitle': '🤖 The agent\'s work log',
+      'ap.historyEmpty': 'No autonomous run yet. Switch on autonomous mode and the agent starts working every morning.',
+      'ap.hDate': 'Date',
+      'ap.hSent': 'Sent',
+      'ap.hRejected': 'Rejected',
+      'ap.hStatus': 'Status',
+      'ap.hDone': 'Done',
+      'ap.hSkipped': 'Skipped',
+      'ap.hError': 'Error',
+      'ap.hRejectedWhy': '"Rejected" means customers the agent refused to contact because it did not know enough about them to say anything personal.',
+      'ap.hSegments': 'Segments: {list}',
 
       'set.open': '⚙️ Settings',
       'set.title': '⚙️ Store settings',
@@ -2805,12 +2829,59 @@
       + '<button class="ap-btn' + (on ? ' is-on' : '') + '" id="apToggleBtn">'
       + esc(t(on ? 'ap.turnOff' : 'ap.turnOn')) + '</button>'
       + '<button class="ap-link" id="apPolicyBtn">' + esc(t('ap.explain')) + '</button>'
+      + '<button class="ap-link" id="apHistoryBtn" style="margin-inline-start:14px">' + esc(t('ap.history')) + '</button>'
       + '</div>';
 
     const btn = document.getElementById('apToggleBtn');
     if (btn) btn.onclick = () => toggleAutopilot(!on, d);
     const pol = document.getElementById('apPolicyBtn');
     if (pol) pol.onclick = showPolicy;
+    const hist = document.getElementById('apHistoryBtn');
+    if (hist) hist.onclick = showAgentHistory;
+  }
+
+  // The agent's work log. The card shows only the latest run, but "what has it
+  // been doing for me?" is the question that decides whether a merchant keeps
+  // it switched on — and the data was already being fetched and thrown away.
+  function showAgentHistory() {
+    const d = window._autopilot || {};
+    const runs = d.runs || [];
+    let m = document.getElementById('agentHistoryModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'agentHistoryModal';
+    m.className = 'log-modal';
+    m.style.display = 'flex';
+
+    let inner;
+    if (runs.length === 0) {
+      inner = '<div class="log-empty">' + esc(t('ap.historyEmpty')) + '</div>';
+    } else {
+      inner = '<table class="ap-table"><tr>'
+        + '<th>' + esc(t('ap.hDate')) + '</th><th>' + esc(t('ap.hSent')) + '</th>'
+        + '<th>' + esc(t('ap.hRejected')) + '</th><th>' + esc(t('ap.hStatus')) + '</th></tr>';
+      runs.forEach(r => {
+        const state = r.status === 'done' ? 'proven' : (r.status === 'error' ? 'stopped' : 'learning');
+        const label = r.status === 'done' ? t('ap.hDone') : (r.status === 'error' ? t('ap.hError') : t('ap.hSkipped'));
+        const segs = (r.details && Array.isArray(r.details.segments))
+          ? r.details.segments.filter(s => s.contacted > 0).map(s => (s.label || s.segment) + ' (' + s.contacted + ')')
+          : [];
+        inner += '<tr><td>' + esc(r.local_date) + '</td><td>' + (r.contacted || 0) + '</td>'
+          + '<td>' + (r.rejected_not_smart || 0) + '</td>'
+          + '<td><span class="ap-state ' + state + '">' + esc(label) + '</span></td></tr>';
+        if (segs.length) {
+          inner += '<tr><td colspan="4" style="padding-top:0;color:var(--text-dim);font-size:12px">'
+            + esc(t('ap.hSegments', { list: segs.join(' · ') })) + '</td></tr>';
+        }
+      });
+      inner += '</table><div class="set-help" style="margin-top:12px">' + esc(t('ap.hRejectedWhy')) + '</div>';
+    }
+
+    m.innerHTML = '<div class="log-box"><div class="log-head"><span>' + esc(t('ap.historyTitle')) + '</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'agentHistoryModal\').remove()">✕</button></div>'
+      + '<div class="log-body" style="text-align:start">' + inner + '</div></div>';
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.remove(); };
   }
 
   async function toggleAutopilot(turnOn, d) {
