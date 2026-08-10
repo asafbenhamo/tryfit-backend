@@ -1268,7 +1268,22 @@
       'set.channelHelp': 'לכל לקוחה נבחר הערוץ הזמין הראשון. למי שאין טלפון — מייל.',
       'set.todayUsed': 'היום: {used} מתוך {cap}',
       'set.dangerTitle': 'מצב הסוכן',
-      'set.close': 'סגור'
+      'set.close': 'סגור',
+
+      'bill.title': '💳 תשלום לפי תוצאות',
+      'bill.pitch': 'אתה משלם {rate}% רק ממכירות שהסוכן יכול להוכיח שהוא הביא — קופון שמומש, עגלה שהוא בנה, או קליק על הקישור שלו שאחריו הגיעה קנייה. על מכירה שהוא לא יכול להוכיח — לא משלם כלום.',
+      'bill.trial': '{days} ימים ראשונים חינם.',
+      'bill.cap': 'תקרה: {amount} ל-30 יום. לא נחייב מעבר לזה בלי אישור שלך.',
+      'bill.approve': 'אשר חיוב לפי תוצאות',
+      'bill.approving': 'פותח את מסך האישור...',
+      'bill.active': '✅ חיוב פעיל',
+      'bill.usedOf': 'חויב עד כה: {used} מתוך {cap}',
+      'bill.charges': '{n} חיובים · {amount} סה"כ',
+      'bill.noCharges': 'עוד לא היו חיובים.',
+      'bill.pending': 'ממתין לאישור שלך ב-Shopify.',
+      'bill.error': 'לא הצלחתי לפתוח את מסך החיוב',
+      'bill.why': 'למה זה הוגן?',
+      'bill.whyBody': 'החיוב נגזר מאותה טבלה שמראה לך את ההכנסות — כל חיוב מקושר למכירה אחת שאפשר לפתוח ולראות. אם הסוכן לא מכניס, אתה לא משלם.'
     },
     en: {
       'app.title': 'Smart Advisor',
@@ -1714,7 +1729,22 @@
       'set.channelHelp': 'Each customer gets the first channel available to her. No phone on file means email.',
       'set.todayUsed': 'Today: {used} of {cap}',
       'set.dangerTitle': 'Agent mode',
-      'set.close': 'Close'
+      'set.close': 'Close',
+
+      'bill.title': '💳 Pay for results',
+      'bill.pitch': 'You pay {rate}% only on sales the agent can prove it generated — a coupon that was redeemed, a cart it built, or a click on its link followed by a purchase. On a sale it cannot prove, you pay nothing.',
+      'bill.trial': 'First {days} days free.',
+      'bill.cap': 'Capped at {amount} per 30 days. We will not charge past that without your approval.',
+      'bill.approve': 'Approve results-based billing',
+      'bill.approving': 'Opening the approval screen...',
+      'bill.active': '✅ Billing active',
+      'bill.usedOf': 'Charged so far: {used} of {cap}',
+      'bill.charges': '{n} charges · {amount} total',
+      'bill.noCharges': 'No charges yet.',
+      'bill.pending': 'Waiting for your approval in Shopify.',
+      'bill.error': 'Could not open the billing screen',
+      'bill.why': 'Why is this fair?',
+      'bill.whyBody': 'Billing is derived from the same record that shows you your revenue — every charge links to one sale you can open and inspect. If the agent does not earn, you do not pay.'
     }
   };
 
@@ -1769,7 +1799,11 @@
     // otherwise we would render "₪ 21,797".
     const cur = String(CURRENCY || '₪');
     const sign = CURRENCY_SIGN[cur.toUpperCase()] || (/^[A-Za-z]{3}$/.test(cur) ? cur.toUpperCase() + ' ' : cur);
-    return sign + (Number(n) || 0).toLocaleString(loc());
+    const v = Number(n) || 0;
+    // Whole amounts stay clean (revenue totals), fractional ones show cents —
+    // a billing line reading "$127.5" looks like a bug to the person paying it.
+    const frac = Math.abs(v % 1) > 1e-9 ? 2 : 0;
+    return sign + v.toLocaleString(loc(), { minimumFractionDigits: frac, maximumFractionDigits: 2 });
   }
 
   // Fills any element carrying a data-i18n* attribute. Static markup uses these
@@ -2636,6 +2670,7 @@
     loadConvoList();
     setupHomeSections();     // must run first — it creates the slot the card renders into
     loadAutopilot();
+    loadBilling();
     loadDailySummary();
     loadInsights();
     loadMoneyCounter();
@@ -2695,10 +2730,12 @@
   }
 
   function clearHomeScreen() {
-    ['homeAutopilotSlot', 'homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
+    ['homeAutopilotSlot', 'homeBillingSlot', 'homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
       const el = document.getElementById(id); if (el) el.remove();
     });
-    const ap = document.querySelector('.ap-card'); if (ap) ap.remove();
+    // querySelectorAll, not querySelector: the agent card and the billing card
+    // share this class, so removing only the first left one stranded on screen.
+    document.querySelectorAll('.ap-card').forEach(el => el.remove());
     const w = $('welcome'); if (w) w.remove();
     const iw = document.querySelector('.insights-wrap'); if (iw) iw.remove();
     const sc = document.querySelector('.summary-card'); if (sc) sc.remove();
@@ -2708,7 +2745,7 @@
   function setupHomeSections() {
     const w = $('welcome');
     if (!w || document.getElementById('homeAutopilotSlot')) return;
-    ['homeAutopilotSlot', 'homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
+    ['homeAutopilotSlot', 'homeBillingSlot', 'homeSummarySlot', 'homePlanSlot', 'homeInsightsSlot'].forEach(id => {
       const slot = document.createElement('div');
       slot.id = id;
       slot.className = 'home-slot';
@@ -2717,6 +2754,7 @@
     // The home screen is rebuilt on every new chat, so repaint the agent card
     // from whatever we already fetched instead of leaving a blank slot.
     if (window._autopilot) renderAutopilot(window._autopilot);
+    if (window._billing) renderBilling(window._billing);
   }
 
   /* ===== AUTOPILOT — the switch that lets the agent act on its own ===== */
@@ -2795,6 +2833,92 @@
     } catch (e) {
       alert(t('ap.error'));
       if (btn) btn.disabled = false;
+    }
+  }
+
+  /* ===== BILLING =====
+     Shown on the home screen only when there is something for the merchant to
+     decide or to see. Charging a Shopify merchant outside Shopify's billing API
+     is grounds for removal from the App Store, so approval happens on their
+     side and we only ever link to it. */
+  window._billing = null;
+
+  async function loadBilling() {
+    const slot = document.getElementById('homeBillingSlot');
+    try {
+      const res = await fetch('/api/billing?password=' + encodeURIComponent(PASSWORD));
+      const d = await res.json();
+      if (!d.ok) return;
+      window._billing = d;
+      renderBilling(d);
+    } catch (e) { /* the card is optional */ }
+  }
+
+  function renderBilling(d) {
+    const slot = document.getElementById('homeBillingSlot');
+    if (!slot) return;
+    const sub = d.subscription || {};
+    const totals = d.totals || {};
+    const rate = Math.round((d.commission_rate || 0.05) * 100);
+    const active = sub.active === true;
+
+    // Nothing to approve and nothing charged yet: stay out of the way.
+    if (!active && (d.charges || []).length === 0 && sub.status === 'NONE') {
+      slot.innerHTML =
+        '<div class="ap-card"><div class="ap-head"><span class="ap-title">' + esc(t('bill.title')) + '</span></div>'
+        + '<div class="ap-desc">' + esc(t('bill.pitch', { rate: rate })) + '</div>'
+        + '<div class="ap-meta">' + esc(t('bill.trial', { days: d.trial_days || 14 })) + '</div>'
+        + '<button class="ap-btn" id="billApproveBtn">' + esc(t('bill.approve')) + '</button>'
+        + '<button class="ap-link" id="billWhyBtn">' + esc(t('bill.why')) + '</button></div>';
+    } else {
+      let meta = '<div class="ap-meta">';
+      if (active) {
+        meta += '<b>' + esc(t('bill.active')) + '</b><br>';
+        if (sub.capped_amount != null) {
+          meta += esc(t('bill.usedOf', { used: money(sub.used || 0), cap: money(sub.capped_amount) })) + '<br>';
+        }
+      } else {
+        meta += esc(t('bill.pending')) + '<br>';
+      }
+      meta += (totals.n_charged
+        ? esc(t('bill.charges', { n: totals.n_charged, amount: money(totals.billed || 0) }))
+        : esc(t('bill.noCharges')));
+      meta += '</div>';
+      slot.innerHTML =
+        '<div class="ap-card' + (active ? ' on' : '') + '">'
+        + '<div class="ap-head"><span class="ap-title">' + esc(t('bill.title')) + '</span>'
+        + '<span class="ap-pill ' + (active ? 'on' : 'off') + '">' + esc(rate + '%') + '</span></div>'
+        + '<div class="ap-desc">' + esc(t('bill.pitch', { rate: rate })) + '</div>'
+        + meta
+        + (active ? '' : '<button class="ap-btn" id="billApproveBtn">' + esc(t('bill.approve')) + '</button>')
+        + '<button class="ap-link" id="billWhyBtn">' + esc(t('bill.why')) + '</button></div>';
+    }
+
+    const approve = document.getElementById('billApproveBtn');
+    if (approve) approve.onclick = startBilling;
+    const why = document.getElementById('billWhyBtn');
+    if (why) why.onclick = () => alert(t('bill.whyBody'));
+  }
+
+  async function startBilling() {
+    const btn = document.getElementById('billApproveBtn');
+    if (btn) { btn.disabled = true; btn.textContent = t('bill.approving'); }
+    try {
+      const res = await fetch('/api/billing/subscribe?password=' + encodeURIComponent(PASSWORD), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD })
+      });
+      const d = await res.json();
+      if (!d.ok || !d.confirmationUrl) {
+        alert(d.error || t('bill.error'));
+        if (btn) { btn.disabled = false; btn.textContent = t('bill.approve'); }
+        return;
+      }
+      // Approval happens on Shopify's own screen — we never take payment details.
+      window.location.href = d.confirmationUrl;
+    } catch (e) {
+      alert(t('bill.error'));
+      if (btn) { btn.disabled = false; btn.textContent = t('bill.approve'); }
     }
   }
 

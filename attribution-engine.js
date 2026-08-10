@@ -105,7 +105,7 @@ async function attributeOrder(shopDomain, order) {
     );
     if (r.rows.length > 0) {
       console.log(`💰 [Attribution - coupon] ${code} +${orderTotal}₪ (action ${r.rows[0].id})`);
-      return { closed: true, amount: orderTotal, via: "coupon" };
+      return { closed: true, amount: orderTotal, via: "coupon", actionId: r.rows[0].id };
     }
   }
 
@@ -128,7 +128,7 @@ async function attributeOrder(shopDomain, order) {
     );
     if (r.rows.length > 0) {
       console.log(`💰 [Attribution - draft cart] +${orderTotal}₪ (action ${r.rows[0].id})`);
-      return { closed: true, amount: orderTotal, via: "draft_order" };
+      return { closed: true, amount: orderTotal, via: "draft_order", actionId: r.rows[0].id };
     }
   }
 
@@ -166,7 +166,7 @@ async function attributeOrder(shopDomain, order) {
       );
       if (r.rows.length > 0) {
         console.log(`💰 [Attribution - link click] ${buyerEmail || buyerPhone} +${orderTotal}₪ (action ${r.rows[0].id})`);
-        return { closed: true, amount: orderTotal, via: "link_click" };
+        return { closed: true, amount: orderTotal, via: "link_click", actionId: r.rows[0].id };
       }
     }
   }
@@ -197,6 +197,30 @@ async function runAttribution(shopDomain = SHOP) {
         closed++;
         totalAmount += r.amount || 0;
         if (breakdown[r.via] != null) breakdown[r.via]++;
+
+        // BILL FOR IT. This is the only place a charge is ever raised, and it is
+        // raised only for a sale we could PROVE — a redeemed coupon, an
+        // agent-built cart, or a tracked click followed by a purchase. The
+        // charge is keyed on the action id, and billing-engine claims that key
+        // in Postgres before calling Shopify, so a rerun of this scan (it runs
+        // every 5 minutes) can never bill the same sale twice.
+        //
+        // Never throws into the attribution loop: a billing problem must not
+        // stop sales being credited to the merchant's dashboard.
+        try {
+          const billing = require('./billing-engine');
+          const res = await billing.recordCommission(shopDomain, {
+            actionId: r.actionId,
+            attributedRevenue: r.amount,
+            description: `${Math.round(billing.COMMISSION_RATE * 100)}% of an attributed sale (${r.via})`
+          });
+          if (res.ok) console.log(`💳 [billing] ${shopDomain} charged ${res.amount} for action ${r.actionId}`);
+          else if (res.skipped && res.skipped !== 'already_billed') {
+            console.log(`[billing] not charged (${res.skipped}) for action ${r.actionId}`);
+          }
+        } catch (e) {
+          console.error('[billing] recordCommission failed:', e.message);
+        }
         // Notify the merchant in real time that the agent converted a sale.
         try {
           const push = require('./push-engine');
