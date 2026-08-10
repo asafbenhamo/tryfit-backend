@@ -156,22 +156,39 @@ global.Date = class extends RealDate {
   check('no single customer\'s name is baked into the template', namesInTemplate.length === 0,
     namesInTemplate.length ? 'LEAKED: ' + namesInTemplate.map(c => c.name).join(', ') : '');
 
-  // Render what two different people would actually receive.
-  const render = (body, cust) => body
+  // Render what two different people would actually receive, using the REAL
+  // coupon generator so the codes shown here are the shape they really get.
+  const campaignEngine = origLoad.call(Module, './campaign-engine.js', module, false);
+  const codeFor = (cust, pct) => campaignEngine.personalCode(cust.name || cust.email, pct);
+  const render = (body, cust, pct, code) => body
     .replace(/\{NAME\}/g, cust.name.split(' ')[0])
     .replace(/\{PRODUCT_LINE\}/g, cust.last_product ? `we saw you loved the ${cust.last_product} — ` : '')
     .replace(/\{PRODUCT\}/g, cust.last_product || '')
-    .replace(/\{COUPON\}/g, 'DANA15X')
-    .replace(/\{LINK\}/g, 'https://willow.example.com/go/abc');
-  const a = render(tmpl, CUSTOMERS[0]);
-  const b = render(tmpl, CUSTOMERS[3]);
+    .replace(/\{COUPON\}/g, code)
+    .replace(/\{LINK\}/g, 'https://willow.example.com/go/' + Math.random().toString(36).slice(2, 10))
+    .replace(/\{DISCOUNT\}/g, String(pct));
+
+  const c1 = CUSTOMERS[0], c2 = CUSTOMERS[1];
+  const pct = SENT[0].template.percentage;
+  const code1 = codeFor(c1, pct), code2 = codeFor(c2, pct);
+  const a = render(tmpl, c1, pct, code1);
+  const b = render(tmpl, c2, pct, code2);
+
   check('two customers receive genuinely different text', a !== b);
-  check('the one with a purchase gets it named', a.includes('Linen Wrap Dress'));
-  check('the one without does not get an empty phrase', !/loved the \s/.test(b) && !b.includes('undefined'));
-  console.log(`\n   ${C.d}Dana (bought a Linen Wrap Dress):${C.x}`);
-  a.split('\n').forEach(l => console.log(`      ${l}`));
-  console.log(`\n   ${C.d}Tal (no purchase on record):${C.x}`);
-  b.split('\n').forEach(l => console.log(`      ${l}`));
+  check('each gets her OWN coupon code, not a shared one', code1 !== code2, `${code1} vs ${code2}`);
+  check('the code is derived from her own name', code1.startsWith('DANA') && code2.startsWith('MAYA'), `${code1}, ${code2}`);
+  check('each names the product SHE bought', a.includes(c1.last_product) && b.includes(c2.last_product));
+  // And someone we know nothing about gets no dangling phrase.
+  const c3 = CUSTOMERS[3];
+  const bare = render(tmpl, c3, pct, codeFor(c3, pct));
+  check('a customer with no purchase gets no empty phrase', !/loved the\s+—/.test(bare) && !bare.includes('undefined'));
+  const show = (label, text) => {
+    console.log(`\n   ${C.d}${label}:${C.x}`);
+    text.split('\n').forEach(l => console.log(`      ${l}`));
+  };
+  show(`${c1.name} — bought a ${c1.last_product}`, a);
+  show(`${c2.name} — bought a ${c2.last_product}`, b);
+  show(`${c3.name} — nothing on record, so nothing is invented`, bare);
 
   // -- 5. the email -------------------------------------------------------
   console.log(`\n${C.b}5. What does the email look like?${C.x}`);

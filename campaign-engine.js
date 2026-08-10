@@ -402,4 +402,6 @@ async function runCampaign(id, shop, segment, template, channels) {
   }
 }
 
-module.exports = { startCampaign, getCampaignStatus, stopCampaign, listActiveCampaigns, MAX_PER_CAMPAIGN };
+// personalCode is exported so the smoke test can show the codes customers
+// really get, rather than reimplementing the format and drifting from it.
+module.exports = { startCampaign, getCampaignStatus, stopCampaign, listActiveCampaigns, personalCode, MAX_PER_CAMPAIGN };
