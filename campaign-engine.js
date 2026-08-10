@@ -16,6 +16,7 @@ const db = require('./database');
 const shopify = require('./shopify-client');
 const mailer = require('./mailer');
 const compliance = require('./compliance');
+const policyEngine = require('./policy-engine');
 
 const MAX_PER_CAMPAIGN = 50000;    // hard technical ceiling (UI confirms above 500)
 const SEND_DELAY_MS = 600;         // small pace between customers
@@ -142,6 +143,13 @@ async function runCampaign(id, shop, segment, template, channels) {
   const storeSettings = require('./store-settings');
   const settings = await storeSettings.getSettings(shop).catch(() => ({ brand: '770', daily_cap: 500 }));
   const BRAND = settings.brand || '770';
+  const IS_EN = settings.language === 'en';
+  // {PRODUCT_LINE} used to expand to a hardcoded Hebrew phrase, which meant an
+  // English store got Hebrew spliced into the middle of an English sentence.
+  // Ends with a dash, not a full stop, so the sentence continues cleanly whether
+  // or not we know what she bought — no capital letter stranded mid-sentence.
+  const productLineFor = (p) => !p ? ''
+    : (IS_EN ? `we saw you loved the ${p} — ` : `ראינו שאהבת את ${p} — `);
 
   // DAILY CAP: how many smart outreaches are left today. When we hit the cap,
   // remaining customers are QUEUED for tomorrow (not dropped) — graceful pacing.
@@ -199,7 +207,7 @@ async function runCampaign(id, shop, segment, template, channels) {
       if (capLeft <= 0) {
         const capBody = (template.body || '')
           .replace(/\{NAME\}/g, cust.name || '')
-          .replace(/\{PRODUCT_LINE\}/g, cust.last_product ? `ראינו שאהבת את ${cust.last_product} - ` : '')
+          .replace(/\{PRODUCT_LINE\}/g, productLineFor(cust.last_product))
           .replace(/\{PRODUCT\}/g, cust.last_product || '');
         const capChannel = (wantSms && hasPhone && smsSender.isConfigured()) ? 'sms'
                          : (wantEmail && contact.email) ? 'email' : null;
@@ -245,10 +253,7 @@ async function runCampaign(id, shop, segment, template, channels) {
       // Personalize message
       // {PRODUCT_LINE}: if we know the customer's last product, weave in a warm,
       // personal reference ("we saw you loved X") — the key edge over generic blasts.
-      let productLine = '';
-      if (cust.last_product) {
-        productLine = `ראינו שאהבת את ${cust.last_product} - חשבנו שיעניין אותך לחזור. `;
-      }
+      const productLine = productLineFor(cust.last_product);
       let body = (template.body || '')
         .replace(/\{NAME\}/g, cust.name || '')
         .replace(/\{PRODUCT_LINE\}/g, productLine)
@@ -276,7 +281,20 @@ async function runCampaign(id, shop, segment, template, channels) {
           `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
           [shop, c.campaign_type, contact.email, contact.phone,
-           JSON.stringify({ channels: chans, campaign_id: id, segment: c.segment_key || null, customer_name: cust.name || null }), finalCode]
+           // `channel` (singular) and `discount_arm` exist because that is what
+           // policy-engine scores on. It reads details->>'channel' and
+           // details->>'discount_arm'; this used to write only `channels` (an
+           // array) and nothing at all for the discount, so two of the policy's
+           // three learning dimensions had zero rows forever and it kept
+           // choosing at random instead of from evidence.
+           JSON.stringify({
+             channels: chans,
+             channel: chans.length === 1 ? chans[0] : (contact.phone && chans.includes('sms') ? 'sms' : chans[0] || null),
+             discount_arm: policyEngine.bucketDiscount(template.percentage),
+             campaign_id: id,
+             segment: c.segment_key || null,
+             customer_name: cust.name || null
+           }), finalCode]
         );
         actionId = ins.rows[0] && ins.rows[0].id;
       } catch (e) { console.error('[campaign] log:', e.message); }

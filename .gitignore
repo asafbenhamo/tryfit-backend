@@ -1,3 +1,6 @@
 .env 
 node_modules 
 uploads 
+
+# scratch output from smoke-test
+smoke-email.html

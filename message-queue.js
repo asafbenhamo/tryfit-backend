@@ -184,7 +184,13 @@ async function processDue(limit = 60) {
               `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
                VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
               [m.shop_domain, 'followup', m.email, m.phone,
-               JSON.stringify({ channel: m.channel, followup: true, segment: m.segment, campaign_id: m.campaign_id, step: m.step }),
+               // discount_arm mirrors what campaign-engine records, so follow-ups
+               // feed the same learning dimensions as the first touch.
+               JSON.stringify({
+                 channel: m.channel, followup: true, segment: m.segment,
+                 discount_arm: require('./policy-engine').bucketDiscount(m.coupon_pct),
+                 campaign_id: m.campaign_id, step: m.step
+               }),
                c.code]
             );
             actionId = ins.rows[0] && ins.rows[0].id;

@@ -240,8 +240,21 @@ function freeze(iso) {
   ok('the segment key is tagged for learning', c.segment_key === 'at_risk');
   ok('a discount from the allowed arms', policy.DISCOUNT_ARMS.includes(c.template.percentage), String(c.template.percentage));
   ok('exactly one channel per campaign', started.every(x => Array.isArray(x.channels) && x.channels.length === 1));
-  ok('the body names the product', /Linen Dress/.test(c.template.body), c.template.body.slice(0, 80));
+  // The template must carry PLACEHOLDERS, not one customer's details. It is
+  // built once per channel group and campaign-engine substitutes per recipient,
+  // so a literal name or product here would be sent to everyone in the group.
+  ok('the body carries a name placeholder', /\{NAME\}/.test(c.template.body), c.template.body.slice(0, 70));
+  ok('the body carries a product placeholder', /\{PRODUCT_LINE\}|\{PRODUCT\}/.test(c.template.body));
   ok('the body carries a coupon placeholder', /\{COUPON\}/.test(c.template.body));
+  ok('NO customer name is baked into the template',
+     !c.segment.some(x => x.name && c.template.body.includes(x.name)), c.template.body.slice(0, 70));
+  ok('NO product name is baked into the template', !/Linen Dress/.test(c.template.body), c.template.body.slice(0, 70));
+  // Prove two different recipients really do get different text.
+  const r1 = autopilot.renderForCustomer(c.template.body, { name: 'Dana', last_product: 'Linen Dress' }, 'en');
+  const r2 = autopilot.renderForCustomer(c.template.body, { name: 'Noa', last_product: null }, 'en');
+  ok('rendered per customer, the two differ', r1 !== r2);
+  ok('the buyer gets her product named', r1.includes('Linen Dress') && r1.includes('Dana'));
+  ok('the one without a purchase gets no dangling phrase', !r2.includes('Linen Dress') && !r2.includes('undefined') && r2.includes('Noa'));
   ok('every recipient has a contact method', started.every(x => x.segment.every(y => y.email || y.phone)));
 
   console.log('\n-- channel precedence: SMS beats email when there is a phone --');

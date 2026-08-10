@@ -92,25 +92,45 @@ async function finishRun(runId, patch) {
 // Build the message for one customer. Returns null when it would not clear the
 // smart-outreach bar — the caller counts that as a rejection, not a send.
 // ---------------------------------------------------------------------------
+// Expand a template the way campaign-engine will at send time.
+//
+// Needed because the smart-outreach gate has to judge what the CUSTOMER
+// receives, not the template. A template reading "{PRODUCT_LINE}" contains no
+// product name, so checking it directly rejected every message as impersonal —
+// including the ones that expand to name a real purchase.
+function renderForCustomer(body, cust, lang) {
+  const isEn = lang === 'en';
+  const product = (cust && cust.last_product) || '';
+  // Must match campaign-engine's productLineFor exactly — this is only used to
+  // judge the gate, so a mismatch would test text that never actually ships.
+  const productLine = product
+    ? (isEn ? `we saw you loved the ${product} — ` : `ראינו שאהבת את ${product} — `)
+    : '';
+  return String(body || '')
+    .replace(/\{NAME\}/g, (cust && cust.name) || '')
+    .replace(/\{PRODUCT_LINE\}/g, productLine)
+    .replace(/\{PRODUCT\}/g, product);
+}
+
+// The fallback template, used when the AI copywriter is unavailable.
+//
+// It MUST emit placeholders, never interpolated values. One template is built
+// per channel group and handed to campaign-engine, which substitutes {NAME},
+// {PRODUCT}, {PRODUCT_LINE} and {COUPON} per recipient. An earlier version
+// baked the first customer's name and product straight into the string, so
+// everyone in the group received a message addressed to that one person.
+//
+// {PRODUCT_LINE} expands to "we saw you loved X — " for customers whose last
+// purchase we know, and to nothing for those we don't, so a single template
+// covers both without sounding hollow for either.
 function buildMessage(cust, move, settings, lang) {
-  const first = String(cust.name || '').split(' ')[0] || '';
-  const product = cust.last_product || '';
-  const brand = settings.brand || '';
-
-  const he = {
-    withProduct: `היי ${first}, ראינו שאהבת את ${product} — בחרנו לך עוד כמה דברים באותו קו.\nהקוד האישי שלך: {COUPON} (${move.discount}% הנחה)\n{LINK}`,
-    plain: `היי ${first}, חשבנו עלייך — הכנו לך הצעה אישית.\nהקוד האישי שלך: {COUPON} (${move.discount}% הנחה)\n{LINK}`,
-    subject: `${first}, משהו שבחרנו במיוחד בשבילך`
+  const isEn = lang === 'en';
+  return {
+    subject: isEn ? 'Something we picked for you' : 'משהו שבחרנו במיוחד בשבילך',
+    body: isEn
+      ? `Hi {NAME}, {PRODUCT_LINE}we picked out a few things we think you'll like.\nYour personal code: {COUPON} (${move.discount}% off)\n{LINK}`
+      : `היי {NAME}, {PRODUCT_LINE}בחרנו לך כמה דברים שחשבנו שיתאימו.\nהקוד האישי שלך: {COUPON} (${move.discount}% הנחה)\n{LINK}`
   };
-  const en = {
-    withProduct: `Hi ${first}, we saw you loved the ${product} — we picked a few more things along the same line.\nYour personal code: {COUPON} (${move.discount}% off)\n{LINK}`,
-    plain: `Hi ${first}, we were thinking of you — here is something picked for you.\nYour personal code: {COUPON} (${move.discount}% off)\n{LINK}`,
-    subject: `${first}, something we picked for you`
-  };
-  const copy = lang === 'en' ? en : he;
-  const body = product ? copy.withProduct : copy.plain;
-
-  return { subject: copy.subject.replace(/^,\s*/, '').trim() || (brand || 'Hello'), body };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,8 +237,12 @@ async function runForShop(shop, opts = {}) {
         const personalHour = bestHours[(cust.email || '').toLowerCase()];
         const msg = buildMessage(cust, move, settings, settings.language);
 
-        // THE SMART BAR. Anything that would go out generic is dropped here.
-        const smart = policy.isSmartOutreach(msg.body, {
+        // THE SMART BAR. Judged on the message as SHE will read it, not on the
+        // template — a template holding "{PRODUCT_LINE}" names no product, so
+        // checking it directly would reject even the messages that expand to
+        // name a real purchase.
+        const asReceived = renderForCustomer(msg.body, cust, settings.language);
+        const smart = policy.isSmartOutreach(asReceived, {
           last_product: cust.last_product,
           segment: seg.key,
           segment_specific_offer: true,       // the offer came from policy.decide
@@ -238,7 +262,11 @@ async function runForShop(shop, opts = {}) {
       summary.rejected_not_smart += rejected;
 
       if (recipients.length === 0) {
-        summary.segments.push({ segment: seg.key, contacted: 0, held_out: heldOut, rejected, reason: 'nobody_eligible' });
+        summary.segments.push({
+          segment: seg.key, label: seg.label, contacted: 0, held_out: heldOut, rejected,
+          discount: move.discount, basis: seg.basis,
+          reason: rejected > 0 ? 'nothing_personal_to_say' : 'nobody_eligible'
+        });
         continue;
       }
 
@@ -253,12 +281,32 @@ async function runForShop(shop, opts = {}) {
         byChannel[a.channel].push(a.customer);
       }
 
+      // Copy is written per segment by the AI, not stamped from a fixed string.
+      // The approve-first path already did this; the unattended path did not,
+      // which meant the fully autonomous mode sent the most generic messages in
+      // the product — the opposite of the intent. One call per segment, not per
+      // customer: the placeholders carry the personalization.
+      let copy = null;
+      try {
+        const copywriter = require('./copywriter');
+        const ai = await copywriter.generateSegmentCopy(shop, {
+          segment_key: seg.key,
+          segment_label: seg.label || seg.key,
+          discount: move.discount,
+          sample: recipients.slice(0, 3).map(r => ({ name: r.name, last_product: r.last_product }))
+        });
+        if (ai && ai.body && /\{NAME\}/.test(ai.body)) copy = { subject: ai.subject, body: ai.body };
+        else if (ai && ai.body) console.warn('[autopilot] copywriter omitted {NAME}, using template');
+      } catch (e) {
+        console.error('[autopilot] copywriter unavailable, using template:', e.message);
+      }
+
       const campaigns = [];
       let segContacted = 0;
       for (const ch of ['whatsapp', 'sms', 'email']) {
         const group = byChannel[ch];
         if (group.length === 0) continue;
-        const sample = buildMessage(group[0], move, settings, settings.language);
+        const sample = copy || buildMessage(group[0], move, settings, settings.language);
         const started = campaignEngine.startCampaign(shop, {
           campaign_type: 'autopilot_' + seg.key,
           segment: group,
@@ -343,6 +391,6 @@ async function recentRuns(shop, limit = 7) {
 }
 
 module.exports = {
-  ensureTable, runForShop, tick, recentRuns, buildMessage,
+  ensureTable, runForShop, tick, recentRuns, buildMessage, renderForCustomer,
   RUN_HOUR, MAX_SHARE_PER_RUN, MAX_SEGMENTS_PER_RUN
 };
