@@ -291,6 +291,40 @@
     padding: 8px 16px; border-radius: 9px; cursor: pointer; margin-top: 8px;
   }
   .action-stop:hover { background: #fef2f2; }
+  /* ===== Settings ===== */
+  .set-row { padding: 15px 0; border-bottom: 1px solid var(--border); }
+  .set-row:last-child { border-bottom: none; }
+  .set-label { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 3px; }
+  .set-help { font-size: 12.5px; color: var(--text-dim); line-height: 1.55; margin-top: 5px; }
+  .set-input, .set-select {
+    width: 100%; margin-top: 8px; padding: 10px 12px; font-size: 14px;
+    font-family: 'Heebo', sans-serif; border: 1px solid var(--border-strong);
+    border-radius: 9px; background: var(--bg); color: var(--text); text-align: start;
+  }
+  .set-input:focus, .set-select:focus { outline: none; border-color: #0a6fe0; }
+  .set-note { font-size: 12.5px; border-radius: 8px; padding: 8px 11px; margin-top: 8px; }
+  .set-note.warn { background: #fef3c7; color: #92400e; }
+  .set-note.good { background: #dcfce7; color: #15803d; }
+  .set-note.info { background: #eef4ff; color: #1e40af; }
+  .set-toggle { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+  .set-switch {
+    position: relative; width: 46px; height: 26px; border-radius: 999px;
+    background: #cbd5e1; border: none; cursor: pointer; transition: background .18s; flex-shrink: 0;
+  }
+  .set-switch.on { background: #16a34a; }
+  .set-switch::after {
+    content: ''; position: absolute; top: 3px; inset-inline-start: 3px; width: 20px; height: 20px;
+    border-radius: 50%; background: #fff; transition: transform .18s;
+  }
+  .set-switch.on::after { transform: translateX(20px); }
+  html[dir="rtl"] .set-switch.on::after { transform: translateX(-20px); }
+  .set-save {
+    width: 100%; margin-top: 18px; padding: 12px; border: none; border-radius: 10px;
+    background: #0a6fe0; color: #fff; font-family: 'Heebo', sans-serif;
+    font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  .set-save:disabled { opacity: .55; cursor: default; }
+
   /* ===== Autopilot card ===== */
   .ap-card {
     background: var(--bg); border: 1px solid var(--border-strong); border-radius: 16px;
@@ -716,6 +750,7 @@
         <span><span data-i18n="nav.credits">💬 Credits:</span> <strong id="creditsBalance">—</strong></span>
         <button onclick="showBuyCredits()" style="background:#0a6fe0;border:none;color:#fff;border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer" data-i18n="nav.topUp">Top up</button>
       </div>
+      <button onclick="showSettings()" style="background:none;border:1px solid var(--border);border-radius:8px;padding:9px;font-size:13px;color:#444;cursor:pointer;text-align:start" data-i18n="set.open">⚙️ Settings</button>
       <button onclick="showRemoveCustomer()" style="background:none;border:1px solid var(--border);border-radius:8px;padding:9px;font-size:13px;color:#444;cursor:pointer;text-align:start" data-i18n="nav.removeCustomer">🚫 Unsubscribe a customer</button>
       <button onclick="toggleLanguage()" id="langToggle" style="background:none;border:1px solid var(--border);border-radius:8px;padding:9px;font-size:13px;color:#444;cursor:pointer;text-align:start" data-i18n="nav.language">English</button>
       <button onclick="showTermsModal()" style="background:none;border:none;padding:6px;font-size:12px;color:#888;cursor:pointer;text-align:start" data-i18n="nav.terms">Terms of service</button>
@@ -1201,7 +1236,39 @@
       'ap.polSuppressed': 'הופסק',
       'ap.polLearning': 'לומד',
       'ap.polProven': 'מוכח',
-      'ap.error': 'לא הצלחתי לעדכן את מצב הסוכן'
+      'ap.error': 'לא הצלחתי לעדכן את מצב הסוכן',
+
+      'set.open': '⚙️ הגדרות',
+      'set.title': '⚙️ הגדרות החנות',
+      'set.saving': 'שומר...',
+      'set.save': 'שמור',
+      'set.saved': '✅ נשמר',
+      'set.error': 'השמירה נכשלה',
+      'set.langLabel': 'שפת הממשק וההודעות',
+      'set.langHe': 'עברית',
+      'set.langEn': 'English',
+      'set.currencyLabel': 'מטבע',
+      'set.tzLabel': 'אזור זמן',
+      'set.tzHelp': 'קובע מתי מותר לשלוח. הודעות יוצאות רק בין 09:00 ל-20:30 בשעון הזה.',
+      'set.capLabel': 'מקסימום פניות ביום',
+      'set.capHelp': 'תקרה קשיחה. הסוכן לא יעבור אותה גם אם יזהה יותר הזדמנויות.',
+      'set.smsLabel': 'מזהה שולח ל-SMS',
+      'set.smsPlaceholder': 'שם החנות באנגלית, עד 11 תווים',
+      'set.smsHelp': 'חייב להיות מאושר מראש אצל ספק ה-SMS. בלעדיו לא יישלחו SMS — הפניות ילכו במייל.',
+      'set.smsMissing': '⚠️ אין מזהה שולח. הפניות יישלחו במייל בלבד.',
+      'set.smsOk': '✅ SMS פעיל',
+      'set.waLabel': 'וואטסאפ',
+      'set.waHelp': 'וואטסאפ עולה כסף לכל הודעה ומחויב מקרדיטים שרכשת מראש. כבוי — לא יחויב כלום.',
+      'set.waOn': 'מופעל',
+      'set.waOff': 'כבוי',
+      'set.waCredits': 'יתרה: {n} קרדיטים',
+      'set.waNoCredits': 'אין קרדיטים — וואטסאפ לא יישלח גם אם מופעל',
+      'set.channelsTitle': 'איך הסוכן בוחר ערוץ',
+      'set.channelOrder': 'וואטסאפ (אם נטען) ← SMS ← מייל',
+      'set.channelHelp': 'לכל לקוחה נבחר הערוץ הזמין הראשון. למי שאין טלפון — מייל.',
+      'set.todayUsed': 'היום: {used} מתוך {cap}',
+      'set.dangerTitle': 'מצב הסוכן',
+      'set.close': 'סגור'
     },
     en: {
       'app.title': 'Smart Advisor',
@@ -1615,7 +1682,39 @@
       'ap.polSuppressed': 'stopped',
       'ap.polLearning': 'learning',
       'ap.polProven': 'proven',
-      'ap.error': 'Could not update the agent mode'
+      'ap.error': 'Could not update the agent mode',
+
+      'set.open': '⚙️ Settings',
+      'set.title': '⚙️ Store settings',
+      'set.saving': 'Saving...',
+      'set.save': 'Save',
+      'set.saved': '✅ Saved',
+      'set.error': 'Could not save',
+      'set.langLabel': 'Language for the app and your messages',
+      'set.langHe': 'עברית',
+      'set.langEn': 'English',
+      'set.currencyLabel': 'Currency',
+      'set.tzLabel': 'Timezone',
+      'set.tzHelp': 'Decides when sending is allowed. Messages only go out between 09:00 and 20:30 in this zone.',
+      'set.capLabel': 'Maximum outreaches per day',
+      'set.capHelp': 'A hard ceiling. The agent will not exceed it even if it finds more opportunities.',
+      'set.smsLabel': 'SMS sender ID',
+      'set.smsPlaceholder': 'Your store name, up to 11 characters',
+      'set.smsHelp': 'Must be approved with the SMS provider first. Without one, no SMS is sent and outreach goes by email.',
+      'set.smsMissing': '⚠️ No sender ID. Outreach will go by email only.',
+      'set.smsOk': '✅ SMS active',
+      'set.waLabel': 'WhatsApp',
+      'set.waHelp': 'WhatsApp costs money per message and is billed against credits you buy up front. Off means nothing is ever charged.',
+      'set.waOn': 'On',
+      'set.waOff': 'Off',
+      'set.waCredits': 'Balance: {n} credits',
+      'set.waNoCredits': 'No credits — WhatsApp will not send even when switched on',
+      'set.channelsTitle': 'How the agent picks a channel',
+      'set.channelOrder': 'WhatsApp (if funded) → SMS → email',
+      'set.channelHelp': 'Each customer gets the first channel available to her. No phone on file means email.',
+      'set.todayUsed': 'Today: {used} of {cap}',
+      'set.dangerTitle': 'Agent mode',
+      'set.close': 'Close'
     }
   };
 
@@ -2697,6 +2796,150 @@
       alert(t('ap.error'));
       if (btn) btn.disabled = false;
     }
+  }
+
+  /* ===== SETTINGS =====
+     Every per-shop setting used to live only in the master panel, which meant a
+     store that installed from the App Store could not configure itself — most
+     importantly the SMS sender id, without which SMS never works for them. */
+  const TIMEZONES = [
+    'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'America/Toronto', 'America/Sao_Paulo', 'Europe/London', 'Europe/Dublin',
+    'Europe/Paris', 'Europe/Berlin', 'Europe/Madrid', 'Europe/Rome',
+    'Asia/Jerusalem', 'Asia/Dubai', 'Asia/Kolkata', 'Asia/Singapore', 'Asia/Tokyo',
+    'Australia/Sydney', 'Pacific/Auckland'
+  ];
+
+  async function showSettings() {
+    let m = document.getElementById('settingsModal');
+    if (m) m.remove();
+    m = document.createElement('div');
+    m.id = 'settingsModal';
+    m.className = 'log-modal';
+    m.style.display = 'flex';
+    m.innerHTML = '<div class="log-box" style="max-width:480px"><div class="log-head"><span>' + esc(t('set.title')) + '</span>'
+      + '<button class="log-close" onclick="document.getElementById(\'settingsModal\').remove()">✕</button></div>'
+      + '<div class="log-body" id="settingsBody" style="text-align:start">' + esc(t('credits.loading')) + '</div></div>';
+    document.body.appendChild(m);
+    m.onclick = (e) => { if (e.target === m) m.remove(); };
+
+    let s = null, today = null, credits = 0;
+    try {
+      const [setRes, chRes] = await Promise.all([
+        fetch('/api/settings?password=' + encodeURIComponent(PASSWORD)).then(r => r.json()),
+        fetch('/api/channels?password=' + encodeURIComponent(PASSWORD)).then(r => r.json()).catch(() => null)
+      ]);
+      if (!setRes || !setRes.ok) throw new Error('load failed');
+      s = setRes.settings; today = setRes.today;
+      credits = (chRes && chRes.credits) || 0;
+    } catch (e) {
+      const body = document.getElementById('settingsBody');
+      if (body) body.innerHTML = '<div class="log-empty">' + esc(t('set.error')) + '</div>';
+      return;
+    }
+
+    const tzList = TIMEZONES.includes(s.timezone) ? TIMEZONES : [s.timezone].concat(TIMEZONES);
+    const waOn = s.whatsapp_enabled === true || s.whatsapp_enabled === 'true';
+
+    const body = document.getElementById('settingsBody');
+    body.innerHTML =
+      // --- language -------------------------------------------------------
+      '<div class="set-row"><div class="set-label">' + esc(t('set.langLabel')) + '</div>'
+      + '<select class="set-select" id="setLang">'
+      + '<option value="he"' + (s.language === 'he' ? ' selected' : '') + '>' + esc(t('set.langHe')) + '</option>'
+      + '<option value="en"' + (s.language === 'en' ? ' selected' : '') + '>' + esc(t('set.langEn')) + '</option>'
+      + '</select></div>'
+
+      // --- currency -------------------------------------------------------
+      + '<div class="set-row"><div class="set-label">' + esc(t('set.currencyLabel')) + '</div>'
+      + '<select class="set-select" id="setCurrency">'
+      + ['₪', '$', '€', '£'].map(c =>
+          '<option value="' + c + '"' + (s.currency === c ? ' selected' : '') + '>' + c + '</option>').join('')
+      + '</select></div>'
+
+      // --- timezone -------------------------------------------------------
+      + '<div class="set-row"><div class="set-label">' + esc(t('set.tzLabel')) + '</div>'
+      + '<select class="set-select" id="setTz">'
+      + tzList.map(z => '<option value="' + esc(z) + '"' + (s.timezone === z ? ' selected' : '') + '>' + esc(z) + '</option>').join('')
+      + '</select><div class="set-help">' + esc(t('set.tzHelp')) + '</div></div>'
+
+      // --- daily cap ------------------------------------------------------
+      + '<div class="set-row"><div class="set-label">' + esc(t('set.capLabel')) + '</div>'
+      + '<input class="set-input" id="setCap" type="number" min="10" max="5000" value="' + (s.daily_cap || 500) + '">'
+      + '<div class="set-help">' + esc(t('set.capHelp')) + '</div>'
+      + (today ? '<div class="set-note info">' + esc(t('set.todayUsed', { used: today.used, cap: today.cap })) + '</div>' : '')
+      + '</div>'
+
+      // --- SMS sender -----------------------------------------------------
+      + '<div class="set-row"><div class="set-label">' + esc(t('set.smsLabel')) + '</div>'
+      + '<input class="set-input" id="setSms" type="text" maxlength="11" dir="ltr" '
+      + 'placeholder="' + esc(t('set.smsPlaceholder')) + '" value="' + esc(s.sms_sender || '') + '">'
+      + '<div class="set-help">' + esc(t('set.smsHelp')) + '</div>'
+      + (s.sms_sender
+          ? '<div class="set-note good">' + esc(t('set.smsOk')) + '</div>'
+          : '<div class="set-note warn">' + esc(t('set.smsMissing')) + '</div>')
+      + '</div>'
+
+      // --- WhatsApp -------------------------------------------------------
+      + '<div class="set-row"><div class="set-label">' + esc(t('set.waLabel')) + '</div>'
+      + '<div class="set-toggle"><button class="set-switch' + (waOn ? ' on' : '') + '" id="setWaSwitch" '
+      + 'aria-pressed="' + (waOn ? 'true' : 'false') + '"></button>'
+      + '<span id="setWaState">' + esc(t(waOn ? 'set.waOn' : 'set.waOff')) + '</span></div>'
+      + '<div class="set-help">' + esc(t('set.waHelp')) + '</div>'
+      + '<div class="set-note ' + (credits > 0 ? 'info' : 'warn') + '">'
+      + esc(credits > 0 ? t('set.waCredits', { n: credits }) : t('set.waNoCredits')) + '</div></div>'
+
+      // --- how channels are chosen ----------------------------------------
+      + '<div class="set-row"><div class="set-label">' + esc(t('set.channelsTitle')) + '</div>'
+      + '<div class="set-note info" dir="ltr" style="text-align:center;font-weight:600">' + esc(t('set.channelOrder')) + '</div>'
+      + '<div class="set-help">' + esc(t('set.channelHelp')) + '</div></div>'
+
+      + '<button class="set-save" id="setSaveBtn">' + esc(t('set.save')) + '</button>'
+      + '<div id="setMsg" style="font-size:13px;min-height:18px;margin-top:8px;text-align:center"></div>';
+
+    // WhatsApp is a local toggle until Save, so nothing is charged by a stray tap.
+    let waNext = waOn;
+    const sw = document.getElementById('setWaSwitch');
+    sw.onclick = () => {
+      waNext = !waNext;
+      sw.classList.toggle('on', waNext);
+      sw.setAttribute('aria-pressed', waNext ? 'true' : 'false');
+      document.getElementById('setWaState').textContent = t(waNext ? 'set.waOn' : 'set.waOff');
+    };
+
+    document.getElementById('setSaveBtn').onclick = async () => {
+      const btn = document.getElementById('setSaveBtn');
+      const msg = document.getElementById('setMsg');
+      btn.disabled = true; btn.textContent = t('set.saving'); msg.textContent = '';
+      const patch = {
+        language: document.getElementById('setLang').value,
+        currency: document.getElementById('setCurrency').value,
+        timezone: document.getElementById('setTz').value,
+        daily_cap: parseInt(document.getElementById('setCap').value, 10) || 500,
+        // An empty sender means "none", not "unchanged": clearing it is how a
+        // merchant turns SMS back off.
+        sms_sender: (document.getElementById('setSms').value || '').trim() || null,
+        whatsapp_enabled: waNext
+      };
+      try {
+        const res = await fetch('/api/settings?password=' + encodeURIComponent(PASSWORD), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: PASSWORD, ...patch })
+        });
+        const d = await res.json();
+        if (!d.ok) { msg.style.color = '#d33'; msg.textContent = d.error || t('set.error'); btn.disabled = false; btn.textContent = t('set.save'); return; }
+        msg.style.color = '#16a34a'; msg.textContent = t('set.saved');
+        btn.textContent = t('set.save');
+        // The language may have just changed — repaint everything, and refresh
+        // the agent card so its timezone and cap lines are current.
+        applyLanguage(patch.language, { rerender: true });
+        if (typeof loadAutopilot === 'function') loadAutopilot();
+        setTimeout(() => { const mm = document.getElementById('settingsModal'); if (mm) mm.remove(); }, 900);
+      } catch (e) {
+        msg.style.color = '#d33'; msg.textContent = t('set.error');
+        btn.disabled = false; btn.textContent = t('set.save');
+      }
+    };
   }
 
   // "Why this choice?" — the measured record the policy is acting on.
