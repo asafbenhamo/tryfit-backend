@@ -21,10 +21,19 @@ const policyEngine = require('./policy-engine');
 const MAX_PER_CAMPAIGN = 50000;    // hard technical ceiling (UI confirms above 500)
 const SEND_DELAY_MS = 600;         // small pace between customers
 
-// Cooldown: don't re-contact a customer we already messaged in the last N days.
-// During development/testing this is short (1 day) so you can test freely.
-// ⚠️ BEFORE GOING LIVE TO REAL CUSTOMERS: change this back to 14.
-const CAMPAIGN_COOLDOWN_DAYS = 4;
+// Cooldown: we already messaged this customer in the last N days.
+//
+// 14, matching what the autopilot enforces on itself. It was 4 with a note to
+// raise it before going live — but the mismatch was the real problem: the agent
+// would not touch someone within 14 days while a merchant-launched campaign
+// would at 4, so the same customer could be messaged twice in a week by the
+// same store and neither path thought it had done anything wrong.
+//
+// This is a SOFT signal (see compliance.canContactCustomer): the autopilot
+// treats it as a hard skip because nobody approved that send, while a campaign
+// the merchant launched deliberately still goes out. They just now agree on
+// what "recently" means.
+const CAMPAIGN_COOLDOWN_DAYS = 14;
 
 // In-memory registry of running/finished campaigns.
 const campaigns = {};

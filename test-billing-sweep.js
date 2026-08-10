@@ -31,14 +31,34 @@ const dbStub = {
 
     // --- the sweep's candidate query ---
     if (/FROM advisor_actions a LEFT JOIN app_usage_charges c/.test(s)) {
-      const [shop, terminal] = params;
+      const [shop, terminal, , recheckHours] = params;
+      const cutoff = new Date(Date.now() - Number(recheckHours) * 3600000);
       const rows = ACTIONS.filter(a =>
         a.shop_domain === shop && a.outcome === 'converted' && Number(a.attributed_revenue) > 0
       ).filter(a => {
         const c = CHARGES.find(c => c.shop_domain === shop && c.action_id === a.id);
-        return !c || !terminal.includes(c.status);
+        if (!c) return true;
+        if (terminal.includes(c.status)) return false;
+        // An order found not yet payable is left alone for a few hours so it
+        // does not block the sales behind it.
+        if (c.status === 'awaiting_payment') return !c.last_attempt_at || c.last_attempt_at < cutoff;
+        return true;
       });
       return { rows: rows.map(a => ({ id: a.id, attributed_revenue: a.attributed_revenue, converting_order_id: a.converting_order_id })) };
+    }
+
+    // --- markAwaitingPayment ---
+    if (/'awaiting_payment'/.test(s) && /INSERT INTO app_usage_charges/.test(s)) {
+      const [shop, actionId, orderId, key, revenue, why, terminal] = params;
+      const ex = CHARGES.find(c => c.idempotency_key === key);
+      if (ex) {
+        if (!terminal.includes(ex.status)) { ex.status = 'awaiting_payment'; ex.last_attempt_at = now(); ex.error = why; }
+      } else {
+        CHARGES.push({ id: chargeSeq++, shop_domain: shop, action_id: actionId, order_id: orderId,
+                       idempotency_key: key, amount: 0, currency: null, attributed_revenue: revenue,
+                       status: 'awaiting_payment', attempts: 0, last_attempt_at: now(), error: why });
+      }
+      return { rows: [] };
     }
 
     // --- recordCommission's claim ---
@@ -274,8 +294,32 @@ function reset() {
   ok('an unpaid order is not billed', r.billed === 0 && r.waiting === 1, JSON.stringify(r));
   ok('it stays credited on the dashboard', ACTIONS[0].outcome === 'converted');
   ORDERS['6001'].financial_status = 'paid';
+  // It was marked as awaiting payment, so it is deliberately left alone for a
+  // few hours; the sweep is not meant to re-poll the same unpaid order every
+  // 15 minutes forever.
+  CHARGES[0].last_attempt_at = new Date(Date.now() - 7 * 3600000);
   r = await billing.sweepUnbilled(SHOP);
   ok('once it clears, it IS billed', r.billed === 1, JSON.stringify(r));
+
+  console.log('\n-- unpaid orders do not starve the sales behind them --');
+  reset();
+  // The exact failure: candidates come out oldest-first, so a batch full of
+  // orders that cannot be billed yet would block every new sale forever.
+  for (let i = 0; i < 45; i++) {
+    ORDERS['90' + i] = { id: '90' + i, financial_status: 'pending', total_price: '100', current_total_price: '100' };
+    ACTIONS.push({ id: 200 + i, shop_domain: SHOP, outcome: 'converted', attributed_revenue: 100, converting_order_id: '90' + i });
+  }
+  r = await billing.sweepUnbilled(SHOP);
+  ok('the first sweep finds only unpayable ones', r.billed === 0 && r.waiting > 0, JSON.stringify(r));
+  ok('and marks every one it looked at', CHARGES.filter(c => c.status === 'awaiting_payment').length === r.waiting,
+     CHARGES.filter(c => c.status === 'awaiting_payment').length + ' vs ' + r.waiting);
+
+  // A brand new, paid sale arrives behind all of them.
+  ORDERS['9999'] = paidOrder(9999, 800);
+  ACTIONS.push({ id: 999, shop_domain: SHOP, outcome: 'converted', attributed_revenue: 800, converting_order_id: '9999' });
+  r = await billing.sweepUnbilled(SHOP);
+  ok('the new paid sale is reached and billed, not stuck behind them', r.billed === 1, JSON.stringify(r));
+  ok('for 5% of it', USAGE_CALLS.some(c => c.amount === '40.00'), JSON.stringify(USAGE_CALLS.map(c => c.amount)));
 
   console.log('\n-- a cancelled order is un-credited, not billed --');
   reset();

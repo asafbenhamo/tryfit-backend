@@ -422,6 +422,15 @@ async function recordCommission(shop, { actionId, attributedRevenue, currency, d
 // ---------------------------------------------------------------------------
 const SWEEP_BATCH = 40;
 const SWEEP_LOOKBACK_DAYS = 30;
+// How long to leave an order alone after finding it not yet payable.
+//
+// Without this the sweep starves itself: candidates come out oldest-first, and
+// an order that cannot be billed yet (cash on delivery, bank transfer, or one
+// Shopify would not return) stays at the head of the queue for the full 30-day
+// window. Forty such orders would fill every batch forever and no NEW sale
+// would ever be billed. Marking them and skipping them for a few hours keeps
+// the queue moving while still coming back to them.
+const RECHECK_UNPAID_HOURS = 6;
 
 function orderMoneyState(order) {
   if (!order) return { state: 'unknown' };
@@ -453,10 +462,14 @@ async function sweepUnbilled(shop) {
           AND a.outcome = 'converted'
           AND a.attributed_revenue > 0
           AND a.closed_at > NOW() - ($3 || ' days')::interval
-          AND (c.id IS NULL OR c.status <> ALL($2::text[]))
+          AND (c.id IS NULL OR (
+                c.status <> ALL($2::text[])
+            AND (c.status <> 'awaiting_payment'
+                 OR c.last_attempt_at IS NULL
+                 OR c.last_attempt_at < NOW() - ($4 || ' hours')::interval)))
         ORDER BY a.closed_at ASC
         FETCH FIRST ${SWEEP_BATCH} ROWS ONLY`,
-      [shop, TERMINAL, String(SWEEP_LOOKBACK_DAYS)]);
+      [shop, TERMINAL, String(SWEEP_LOOKBACK_DAYS), String(RECHECK_UNPAID_HOURS)]);
   } catch (e) {
     console.error('[billing] sweep query:', e.message);
     return { ok: false, error: e.message };
@@ -475,8 +488,9 @@ async function sweepUnbilled(shop) {
         order = (d && d.order) || null;
       }
       // No order id (legacy rows) or Shopify would not answer: skip rather than
-      // bill blind. It stays in the queue for the next sweep.
-      if (!order) { waiting++; continue; }
+      // bill blind. It stays in the queue, but marked, so it does not block the
+      // sales behind it.
+      if (!order) { await markAwaitingPayment(shop, row, 'order_not_readable'); waiting++; continue; }
 
       const money = orderMoneyState(order);
 
@@ -485,7 +499,11 @@ async function sweepUnbilled(shop) {
         reversed++;
         continue;
       }
-      if (money.state !== 'payable') { waiting++; continue; }
+      if (money.state !== 'payable') {
+        await markAwaitingPayment(shop, row, money.why || 'unpaid');
+        waiting++;
+        continue;
+      }
 
       // Bill the net, never more than what was credited.
       const billable = Math.min(Number(row.attributed_revenue) || 0, money.net);
@@ -519,6 +537,23 @@ async function sweepUnbilled(shop) {
     console.log(`💳 [billing] ${shop}: billed ${billed} (${amount.toFixed(2)}), reversed ${reversed}, waiting ${waiting}, failed ${failed}`);
   }
   return { ok: true, considered: due.rows.length, billed, amount: Math.round(amount * 100) / 100, reversed, waiting, failed };
+}
+
+// Note that this sale is real but not yet collectable, and when we last looked.
+// Not a terminal state: recordCommission will happily reclaim the row once the
+// money arrives, because 'awaiting_payment' is not in TERMINAL.
+async function markAwaitingPayment(shop, row, why) {
+  await db.query(
+    `INSERT INTO app_usage_charges
+       (shop_domain, action_id, order_id, idempotency_key, amount, currency, attributed_revenue,
+        status, attempts, last_attempt_at, error)
+     VALUES ($1,$2,$3,$4,0,NULL,$5,'awaiting_payment',0,NOW(),$6)
+     ON CONFLICT (idempotency_key) DO UPDATE
+        SET status='awaiting_payment', last_attempt_at=NOW(), error=$6
+      WHERE app_usage_charges.status <> ALL($7::text[])`,
+    [shop, row.id, row.converting_order_id ? String(row.converting_order_id) : null,
+     `advisor-${shop}-action-${row.id}`, row.attributed_revenue, String(why).slice(0, 200), TERMINAL]
+  ).catch(e => console.error('[billing] markAwaitingPayment:', e.message));
 }
 
 // Un-credit a sale that turned out not to be one. The action drops out of every
