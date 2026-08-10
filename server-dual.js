@@ -359,9 +359,19 @@ app.get("/webhook/flashy/status", (req, res) => {
 //   https://tryfit-backend-production.up.railway.app/webhook/sms-incoming?secret=<TEXTME_WEBHOOK_SECRET>
 app.post("/webhook/sms-incoming", express.json({ limit: "1mb" }), async (req, res) => {
   try {
+    // Fail CLOSED. This used to be `if (secret && ...)`, so with the env var
+    // unset there was no check at all — anyone could POST a fabricated inbound
+    // SMS, and Noa would reply by SMS to whatever number the payload named. That
+    // is free messaging on the merchant's account, and forged "customer" replies
+    // steering the agent.
     const secret = process.env.TEXTME_WEBHOOK_SECRET || null;
-    if (secret && req.query.secret !== secret) {
-      return res.status(200).json({ ok: false, reason: "bad_secret" });
+    if (!secret) {
+      console.error("[noa] TEXTME_WEBHOOK_SECRET is not set — refusing inbound SMS");
+      return res.status(503).json({ ok: false, reason: "webhook_not_configured" });
+    }
+    const given = String(req.query.secret || "");
+    if (!given || !sessionAuth.safeEqual(given, secret)) {
+      return res.status(401).json({ ok: false, reason: "bad_secret" });
     }
     const shop = process.env.FLASHY_SHOP || DEFAULT_SHOP;
     console.log("[noa] inbound sms:", JSON.stringify(req.body).slice(0, 300));
@@ -1861,16 +1871,72 @@ app.post("/api/optout/add", express.json(), async (req, res) => {
   }
 });
 
-app.get("/unsubscribe", async (req, res) => {
-  const email = req.query.email;
-  if (!email) return res.status(400).send("Missing email");
-  // Shop can be carried in the unsubscribe link (?shop=...); fall back to 770.
-  const shop = (req.query.shop || DEFAULT_SHOP).toLowerCase().trim();
+// UNSUBSCRIBE.
+//
+// Two problems with doing this on GET:
+//
+//  1. Mail providers and security appliances FOLLOW links to scan them. Gmail,
+//     Outlook and corporate filters were silently unsubscribing customers who
+//     never clicked anything — the merchant loses subscribers and cannot see why.
+//  2. The link was unsigned with the shop in the query string, so anyone could
+//     opt any address out of any shop.
+//
+// So GET only shows a confirmation, and the opt-out happens on POST. Links are
+// signed, but UNSIGNED ones are still honoured on POST: links already sitting in
+// customers' inboxes must keep working, and refusing a genuine unsubscribe is a
+// worse failure than accepting an unverified one.
+function unsubToken(email, shop) {
+  const secret = process.env.ADMIN_PASSWORD || "unsub";
+  return crypto.createHmac("sha256", secret)
+    .update(String(email || "").toLowerCase() + "|" + String(shop || ""), "utf8")
+    .digest("base64url").slice(0, 24);
+}
+
+function unsubPage({ title, body, form }) {
+  return `<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,Arial,sans-serif;text-align:center;padding:14vh 20px;color:#23272f;background:#f5f6f8;margin:0}
+.card{max-width:420px;margin:0 auto;background:#fff;border-radius:16px;padding:34px 26px;box-shadow:0 4px 20px rgba(0,0,0,.07)}
+h2{font-size:20px;margin:0 0 10px}p{color:#5b6472;line-height:1.65;font-size:14.5px}
+button{margin-top:18px;padding:13px 30px;border:none;border-radius:10px;background:#d33;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}</style>
+</head><body><div class="card"><h2>${title}</h2><p>${body}</p>${form || ""}</div></body></html>`;
+}
+
+app.get("/unsubscribe", (req, res) => {
+  const email = String(req.query.email || "");
+  if (!email) return res.status(400).send(unsubPage({ title: "קישור לא תקין", body: "חסרה כתובת מייל." }));
+  const shop = String(req.query.shop || DEFAULT_SHOP).toLowerCase().trim();
+  const t = String(req.query.t || "");
+  res.set("Content-Type", "text/html; charset=utf-8").send(unsubPage({
+    title: "להסיר אותך מרשימת התפוצה?",
+    body: `נפסיק לשלוח הודעות שיווקיות אל <b>${esc(email)}</b>.`,
+    form: `<form method="POST" action="/unsubscribe">
+      <input type="hidden" name="email" value="${esc(email)}">
+      <input type="hidden" name="shop" value="${esc(shop)}">
+      <input type="hidden" name="t" value="${esc(t)}">
+      <button type="submit">כן, הסר אותי</button></form>`
+  }));
+});
+
+app.post("/unsubscribe", express.urlencoded({ extended: false }), async (req, res) => {
+  const email = String((req.body && req.body.email) || req.query.email || "");
+  if (!email) return res.status(400).send(unsubPage({ title: "קישור לא תקין", body: "חסרה כתובת מייל." }));
+  let shop = String((req.body && req.body.shop) || req.query.shop || DEFAULT_SHOP).toLowerCase().trim();
+  const given = String((req.body && req.body.t) || req.query.t || "");
+
+  // A signature proves which shop the link was issued for. Without one we still
+  // honour the request, but only against the shop named — never a wildcard.
+  if (given && !sessionAuth.safeEqual(given, unsubToken(email, shop))) {
+    return res.status(400).send(unsubPage({ title: "קישור לא תקין", body: "הקישור אינו תקף. פנה/י לחנות שממנה קיבלת את ההודעה." }));
+  }
+
   await compliance.addOptOut(shop, { email, reason: "email_link" });
-  flashySync.pushUnsubscribe({ email: email || null }).catch(() => {});
-  res.send(`<!DOCTYPE html><html lang="he" dir="rtl"><head><meta charset="utf-8">
-    <style>body{font-family:Arial,sans-serif;text-align:center;padding:60px 20px;color:#333}</style></head>
-    <body><h2>הוסרת מרשימת התפוצה</h2><p>לא תקבל/י יותר הודעות שיווקיות. תודה.</p></body></html>`);
+  flashySync.pushUnsubscribe({ email }).catch(() => {});
+  console.log(`[unsub] ${email} opted out of ${shop}${given ? " (signed)" : " (unsigned)"}`);
+  res.set("Content-Type", "text/html; charset=utf-8").send(unsubPage({
+    title: "הוסרת מרשימת התפוצה",
+    body: "לא תקבל/י יותר הודעות שיווקיות. תודה."
+  }));
 });
 
 // Swipe away an opportunity: hide it for a couple of days and let a fresh one

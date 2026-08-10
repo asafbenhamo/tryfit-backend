@@ -113,10 +113,21 @@ async function resolveContact(contactId) {
 //    an audit trail (and a follow-up import can reconcile it).
 // ---------------------------------------------------------------------------
 async function handleWebhook(payload, providedSecret) {
-  // Optional shared-secret check (if configured).
+  // Shared-secret check. The old condition also required `providedSecret` to be
+  // truthy, so a caller who simply OMITTED the secret skipped verification
+  // entirely — the check was bypassed by sending less, not more.
   const secret = webhookSecret();
-  if (secret && providedSecret && secret !== providedSecret) {
-    return { ok: false, reason: 'bad_secret', processed: 0 };
+  if (secret) {
+    const given = String(providedSecret || '');
+    if (!given || given.length !== secret.length) {
+      return { ok: false, reason: 'bad_secret', processed: 0 };
+    }
+    const crypto = require('crypto');
+    const a = crypto.createHash('sha256').update(given).digest();
+    const b = crypto.createHash('sha256').update(secret).digest();
+    if (!crypto.timingSafeEqual(a, b)) {
+      return { ok: false, reason: 'bad_secret', processed: 0 };
+    }
   }
 
   // Flashy sends either a single event object or an array of them.

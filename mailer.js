@@ -90,10 +90,24 @@ function buildHtmlEmail(bodyText, opts = {}) {
         '</td></tr></table>'
     : "";
 
+  // The link is signed so the endpoint can tell which shop issued it, and it
+  // only opens a confirmation page — the opt-out itself happens on POST, because
+  // mail scanners follow links and were unsubscribing people who never clicked.
   const unsubBase = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
   const unsubShop = opts.shop ? '&shop=' + encodeURIComponent(opts.shop) : '';
+  let unsubSig = '';
+  if (opts.to && opts.shop) {
+    try {
+      const crypto = require('crypto');
+      const secret = process.env.ADMIN_PASSWORD || 'unsub';
+      unsubSig = '&t=' + crypto.createHmac('sha256', secret)
+        .update(String(opts.to).toLowerCase() + '|' + String(opts.shop), 'utf8')
+        .digest('base64url').slice(0, 24);
+    } catch (e) { /* unsigned links are still honoured */ }
+  }
+  const unsubLabel = isEn ? 'Unsubscribe' : 'להסרה מרשימת התפוצה';
   const unsub = opts.to
-    ? '<a href="' + unsubBase + '/unsubscribe?email=' + encodeURIComponent(opts.to) + unsubShop + '" style="color:#aaa;text-decoration:underline;">להסרה מרשימת התפוצה</a>'
+    ? '<a href="' + unsubBase + '/unsubscribe?email=' + encodeURIComponent(opts.to) + unsubShop + unsubSig + '" style="color:#aaa;text-decoration:underline;">' + unsubLabel + '</a>'
     : "";
 
   return '<!DOCTYPE html>\n' +
