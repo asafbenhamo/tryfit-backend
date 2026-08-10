@@ -19,15 +19,17 @@ const dbStub = {
   query: async (sql, params) => {
     const s = sql.replace(/\s+/g, ' ').trim();
     if (/^CREATE|^ALTER/.test(s)) return { rows: [] };
-    // Two INSERT shapes exist. createSetupLink inlines is_master and user_agent
-    // as SQL literals and passes only three parameters; create() passes six.
+    // Two INSERT shapes. createSetupLink inlines is_master, user_agent and kind
+    // as SQL literals and passes three parameters; create() passes six and tags
+    // kind='session'. The `kind` column is what stops a setup link from
+    // authenticating as a session, so the stub has to model it.
     if (/INSERT INTO advisor_sessions/.test(s)) {
       if (/'setup-link'/.test(s)) {
         SESSIONS.push({ token_hash: params[0], shop_domain: params[1], is_master: false,
-                        expires_at: params[2], ip: null, user_agent: 'setup-link' });
+                        expires_at: params[2], ip: null, user_agent: 'setup-link', kind: 'setup' });
       } else {
         SESSIONS.push({ token_hash: params[0], shop_domain: params[1], is_master: params[2],
-                        expires_at: params[3], ip: params[4] || null, user_agent: params[5] || null });
+                        expires_at: params[3], ip: params[4] || null, user_agent: params[5] || null, kind: 'session' });
       }
       return { rows: [] };
     }
@@ -41,14 +43,15 @@ const dbStub = {
       SESSIONS = SESSIONS.filter(r => r.shop_domain !== params[0]);
       return { rows: [], rowCount: before - SESSIONS.length };
     }
-    if (/DELETE FROM advisor_sessions WHERE token_hash = \$1 AND user_agent = 'setup-link'/.test(s)) {
-      const i = SESSIONS.findIndex(r => r.token_hash === params[0] && r.user_agent === 'setup-link' && new Date(r.expires_at) > new Date());
+    if (/DELETE FROM advisor_sessions.*kind = 'setup'/.test(s)) {
+      const i = SESSIONS.findIndex(r => r.token_hash === params[0] && r.kind === 'setup' && new Date(r.expires_at) > new Date());
       if (i === -1) return { rows: [] };
       const row = SESSIONS.splice(i, 1)[0];
       return { rows: [{ shop_domain: row.shop_domain }] };
     }
     if (/SELECT id, shop_domain, is_master, last_seen_at/.test(s)) {
-      const row = SESSIONS.find(r => r.token_hash === params[0] && new Date(r.expires_at) > new Date());
+      const needSession = /kind = 'session'/.test(s);
+      const row = SESSIONS.find(r => r.token_hash === params[0] && new Date(r.expires_at) > new Date() && (!needSession || r.kind === 'session'));
       return { rows: row ? [{ id: 1, shop_domain: row.shop_domain, is_master: row.is_master, last_seen_at: new Date() }] : [] };
     }
     if (/SELECT \* FROM store_settings/.test(s)) {

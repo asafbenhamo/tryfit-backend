@@ -187,4 +187,6 @@ async function log(shop, phone, message, reply, handledBy, name) {
   ).catch(e => console.error('[noa] log:', e.message));
 }
 
-module.exports = { handleInbound, ensureTable };
+// extractInbound is exported so the webhook can resolve WHICH shop an inbound
+// message belongs to before handing it off.
+module.exports = { handleInbound, ensureTable, extractInbound };

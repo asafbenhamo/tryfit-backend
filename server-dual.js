@@ -373,10 +373,39 @@ app.post("/webhook/sms-incoming", express.json({ limit: "1mb" }), async (req, re
     if (!given || !sessionAuth.safeEqual(given, secret)) {
       return res.status(401).json({ ok: false, reason: "bad_secret" });
     }
-    const shop = process.env.FLASHY_SHOP || DEFAULT_SHOP;
-    console.log("[noa] inbound sms:", JSON.stringify(req.body).slice(0, 300));
-    const result = await noaEngine.handleInbound(shop, req.body);
-    res.status(200).json(result);
+    // WHOSE customer is this? The shop used to come from an env var, so every
+    // merchant's inbound replies were filed under the pilot store. A customer of
+    // shop B texting "STOP" had her opt-out written against shop A, so
+    // isOptedOut(B, phone) stayed false and the agent kept texting her — with
+    // shop B as the sender of record for a spam-law violation.
+    //
+    // Resolve by the number instead. If more than one shop knows it, honour the
+    // STOP in all of them: over-suppressing costs a merchant one contact,
+    // under-suppressing costs them a complaint they cannot defend.
+    const inbound = noaEngine.extractInbound ? noaEngine.extractInbound(req.body) : {};
+    const digits = String(inbound.phone || "").replace(/[^0-9]/g, "");
+    let shops = [];
+    if (digits.length >= 7) {
+      try {
+        const r = await db.query(
+          `SELECT DISTINCT shop_domain FROM store_customers
+            WHERE regexp_replace(COALESCE(phone,''), '[^0-9]', '', 'g') LIKE '%' || $1`,
+          [digits.slice(-9)]);
+        shops = r.rows.map(x => x.shop_domain).filter(Boolean);
+      } catch (e) { console.error("[noa] shop lookup:", e.message); }
+    }
+    if (shops.length === 0) {
+      // Unknown number: nothing to reply about, and guessing a shop would file it
+      // against a merchant this person may have no relationship with.
+      console.warn(`[noa] inbound from an unrecognised number (…${digits.slice(-4)}) — ignored`);
+      return res.status(200).json({ ok: true, ignored: "unknown_number" });
+    }
+    console.log(`[noa] inbound sms for ${shops.length} shop(s):`, JSON.stringify(req.body).slice(0, 200));
+    const results = [];
+    for (const shop of shops) {
+      results.push(await noaEngine.handleInbound(shop, req.body));
+    }
+    res.status(200).json(results.length === 1 ? results[0] : { ok: true, shops: shops.length, results });
   } catch (err) {
     console.error("sms-incoming error:", err.message);
     res.status(200).json({ ok: false, error: safeError(err) });
@@ -2240,19 +2269,32 @@ app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
     if (!plan_id || !Array.isArray(selected_task_ids)) {
       return res.status(400).json({ ok: false, error: "חסר plan_id או רשימת מהלכים" });
     }
-    await db.query(`UPDATE agent_tasks SET selected = (id = ANY($2)) WHERE plan_id=$1`,
-      [plan_id, selected_task_ids]);
+
+    // OWNERSHIP. The sibling endpoints were scoped by shop and this one was
+    // missed — and it is the dangerous one. agent_plans.id is a global BIGSERIAL,
+    // so without this any merchant could count to another merchant's plan id,
+    // flip it to send_mode='auto' (the setting that makes the agent message real
+    // customers with no human review) and launch it against THEIR customer list.
+    const owns = await db.query(
+      `SELECT 1 FROM agent_plans WHERE id=$1 AND shop_domain=$2`, [plan_id, shop]);
+    if (!owns.rows.length) return res.status(404).json({ ok: false, error: "not found" });
+
+    // send_mode decides whether a human reviews anything. Never take it on trust.
+    const mode = (send_mode === "auto") ? "auto" : "manual";
+
+    await db.query(`UPDATE agent_tasks SET selected = (id = ANY($2)) WHERE plan_id=$1 AND shop_domain=$3`,
+      [plan_id, selected_task_ids, shop]);
     // Persist the merchant's send choice so the engine knows whether to auto-send.
     await db.query(
       `UPDATE agent_plans SET status='approved', approved_at=NOW(),
-         send_mode=$2, template_name=$3 WHERE id=$1`,
-      [plan_id, send_mode || 'manual', template_name || null]
+         send_mode=$2, template_name=$3 WHERE id=$1 AND shop_domain=$4`,
+      [plan_id, mode, template_name || null, shop]
     ).catch(async () => {
       // Columns may not exist yet on older tables — add them, then retry.
       await db.query(`ALTER TABLE agent_plans ADD COLUMN IF NOT EXISTS send_mode TEXT DEFAULT 'manual'`).catch(()=>{});
       await db.query(`ALTER TABLE agent_plans ADD COLUMN IF NOT EXISTS template_name TEXT`).catch(()=>{});
-      await db.query(`UPDATE agent_plans SET status='approved', approved_at=NOW(), send_mode=$2, template_name=$3 WHERE id=$1`,
-        [plan_id, send_mode || 'manual', template_name || null]).catch(()=>{});
+      await db.query(`UPDATE agent_plans SET status='approved', approved_at=NOW(), send_mode=$2, template_name=$3 WHERE id=$1 AND shop_domain=$4`,
+        [plan_id, mode, template_name || null, shop]).catch(()=>{});
     });
 
     agentEngine.startPlan(shop, plan_id);

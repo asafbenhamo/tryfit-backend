@@ -43,8 +43,20 @@ async function ensureTable() {
       last_seen_at TIMESTAMPTZ DEFAULT NOW(),
       expires_at TIMESTAMPTZ NOT NULL,
       ip TEXT,
-      user_agent TEXT
+      user_agent TEXT,
+      -- 'session' = a real login. 'setup' = a one-time install link, which must
+      -- NEVER authenticate a request on its own; it is only exchangeable, once,
+      -- for a session. Overloading user_agent as the type tag (the first
+      -- attempt) hid this: resolve() did not filter on it, so a setup token
+      -- worked as a full bearer token forever.
+      kind TEXT NOT NULL DEFAULT 'session'
     )`).catch(e => console.error('[session] table:', e.message));
+  await db.query(`ALTER TABLE advisor_sessions ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'session'`)
+    .catch(e => console.error('[session] kind column:', e.message));
+  // Any setup links written by the earlier build are indistinguishable from
+  // sessions to resolve(). Retag them so they stop authenticating.
+  await db.query(`UPDATE advisor_sessions SET kind='setup' WHERE user_agent='setup-link' AND kind<>'setup'`)
+    .catch(() => {});
   await db.query(`CREATE INDEX IF NOT EXISTS idx_sessions_hash ON advisor_sessions(token_hash)`).catch(() => {});
   await db.query(`CREATE INDEX IF NOT EXISTS idx_sessions_shop ON advisor_sessions(shop_domain)`).catch(() => {});
   tableReady = true;
@@ -77,8 +89,8 @@ async function create(shop, { isMaster = false, ip = null, userAgent = null } = 
   const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
   const expires = new Date(Date.now() + TTL_DAYS * 24 * 60 * 60 * 1000);
   await db.query(
-    `INSERT INTO advisor_sessions (token_hash, shop_domain, is_master, expires_at, ip, user_agent)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
+    `INSERT INTO advisor_sessions (token_hash, shop_domain, is_master, expires_at, ip, user_agent, kind)
+     VALUES ($1,$2,$3,$4,$5,$6,'session')`,
     [hash(token), shop || null, !!isMaster, expires, ip, String(userAgent || '').slice(0, 300)]
   );
   return { token, expires_at: expires.toISOString(), ttl_days: TTL_DAYS };
@@ -93,7 +105,7 @@ async function resolve(token) {
     const r = await db.query(
       `SELECT id, shop_domain, is_master, last_seen_at
          FROM advisor_sessions
-        WHERE token_hash = $1 AND expires_at > NOW()`,
+        WHERE token_hash = $1 AND kind = 'session' AND expires_at > NOW()`,
       [hash(token)]);
     const row = r.rows[0];
     if (!row) return null;
@@ -136,8 +148,8 @@ async function createSetupLink(shop, { baseUrl } = {}) {
   const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
   const expires = new Date(Date.now() + SETUP_TTL_HOURS * 60 * 60 * 1000);
   await db.query(
-    `INSERT INTO advisor_sessions (token_hash, shop_domain, is_master, expires_at, user_agent)
-     VALUES ($1,$2,FALSE,$3,'setup-link')`,
+    `INSERT INTO advisor_sessions (token_hash, shop_domain, is_master, expires_at, user_agent, kind)
+     VALUES ($1,$2,FALSE,$3,'setup-link','setup')`,
     [hash(token), shop, expires]
   );
   const base = String(baseUrl || process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
@@ -153,7 +165,7 @@ async function consumeSetupLink(token, { ip = null, userAgent = null } = {}) {
   try {
     const r = await db.query(
       `DELETE FROM advisor_sessions
-        WHERE token_hash = $1 AND user_agent = 'setup-link' AND expires_at > NOW()
+        WHERE token_hash = $1 AND kind = 'setup' AND expires_at > NOW()
         RETURNING shop_domain`,
       [hash(token)]);
     const row = r.rows[0];
