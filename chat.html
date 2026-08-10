@@ -773,6 +773,10 @@
 
 <script>
   let PASSWORD = '';
+  // Session token minted by /api/auth/login. Once set, the fetch wrapper below
+  // sends it as a header and strips the password out of every request, so the
+  // merchant's actual password stops travelling with each call.
+  let AUTH_TOKEN = '';
   let SELECTED_SHOP = '';   // set when master picks a store; appended to all API calls
   let IS_MASTER = false;
   let history = [];
@@ -2004,20 +2008,59 @@
   // When a master has selected a store, automatically attach ?shop=/shop: to our
   // own API requests so the backend serves the right store. Store logins don't
   // need this (their password already identifies the store).
-  (function patchFetchForShop(){
+  // ===== One place where every API call is fixed up =====
+  //
+  // Call sites all over this file build URLs like `/api/x?password=` + PASSWORD.
+  // Sending the store's actual password on every request is the problem: query
+  // strings are written verbatim into server access logs, kept in browser
+  // history, and leaked through the Referer header to any third-party origin the
+  // page touches. And that password never expires.
+  //
+  // Rather than edit ~26 call sites (and rely on nobody adding a 27th), this
+  // wrapper is the single choke point: it attaches the session token as a
+  // header and STRIPS the password out of both the query string and the JSON
+  // body. The call sites are free to keep writing ?password= — it never leaves
+  // the browser once we hold a token.
+  (function patchFetch(){
     const _fetch = window.fetch;
     window.fetch = function(url, opts) {
       try {
-        if (SELECTED_SHOP && typeof url === 'string' && url.indexOf('/api/') === 0) {
-          // query-string requests
-          if (url.indexOf('password=') > -1 && url.indexOf('shop=') === -1) {
+        if (typeof url === 'string' && (url.indexOf('/api/') === 0 || url.indexOf('/admin/') === 0)) {
+          opts = opts || {};
+
+          if (AUTH_TOKEN) {
+            // Headers may arrive as a Headers instance, an array, or a plain
+            // object — normalise before adding to any of them.
+            const h = new Headers(opts.headers || {});
+            h.set('Authorization', 'Bearer ' + AUTH_TOKEN);
+            opts.headers = h;
+
+            // Remove the password from the URL now that the token carries auth.
+            if (url.indexOf('password=') > -1) {
+              const [path, qs] = url.split('?');
+              const params = new URLSearchParams(qs || '');
+              params.delete('password');
+              const rest = params.toString();
+              url = rest ? path + '?' + rest : path;
+            }
+          }
+
+          // Master acting on a chosen store still has to name it.
+          if (SELECTED_SHOP && url.indexOf('shop=') === -1 && (AUTH_TOKEN || url.indexOf('password=') > -1)) {
             url += (url.indexOf('?') > -1 ? '&' : '?') + 'shop=' + encodeURIComponent(SELECTED_SHOP);
           }
-          // JSON body requests
-          if (opts && opts.body && typeof opts.body === 'string') {
+
+          if (opts.body && typeof opts.body === 'string') {
             try {
               const b = JSON.parse(opts.body);
-              if (b && b.password && !b.shop) { b.shop = SELECTED_SHOP; opts.body = JSON.stringify(b); }
+              if (b && typeof b === 'object') {
+                let touched = false;
+                if (SELECTED_SHOP && !b.shop) { b.shop = SELECTED_SHOP; touched = true; }
+                // Same reasoning as the query string: with a token in the header
+                // the body has no reason to carry the password.
+                if (AUTH_TOKEN && b.password) { delete b.password; touched = true; }
+                if (touched) opts.body = JSON.stringify(b);
+              }
             } catch(e) {}
           }
         }
@@ -2264,6 +2307,9 @@
       catch (e) { $('gateErr').textContent = t('gate.badResponse', { code: res.status }); return; }
       if (!data.ok) { $('gateErr').textContent = data.error || t('gate.wrongPass'); return; }
       PASSWORD = pass;
+      // Prefer the token from here on. PASSWORD is kept only so a server that
+      // has not yet been redeployed still authenticates.
+      AUTH_TOKEN = data.token || '';
       if (data.mode === 'master') {
         IS_MASTER = true;
         showStorePicker(data.stores || []);
@@ -2419,7 +2465,12 @@
     $('gatePass').style.display = '';
     $('gatePass').value = '';
     document.querySelector('#gate button').style.display = '';
-    IS_MASTER = false; PASSWORD = ''; SELECTED_SHOP = '';
+    // Revoke server-side too, so a copy of the token elsewhere stops working
+    // rather than staying valid for its full 14 days.
+    if (AUTH_TOKEN) {
+      fetch('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).catch(() => {});
+    }
+    IS_MASTER = false; PASSWORD = ''; AUTH_TOKEN = ''; SELECTED_SHOP = '';
   }
 
   function enterAdvisor(storeName, shopDomain) {

@@ -53,6 +53,85 @@ app.use((req, res, next) => {
   return express.json({ limit: '20mb' })(req, res, next);
 });
 
+// Turn an exception into something safe to hand a client.
+//
+// ~75 handlers returned `err.message` verbatim. That message is often written
+// by Postgres or the Shopify SDK, and it happily describes our schema
+// ("column advisor_actions.foo does not exist"), our queries, internal
+// hostnames, file paths, or the tail of a credential. Attackers map a system
+// out of exactly those replies.
+//
+// Messages we author ourselves are short, human, and safe to show — those still
+// reach the user, because "the store is not connected" is more useful than
+// "server error". Anything that smells like machinery is replaced by a
+// reference id which is logged in full server-side, so support can still find
+// the real error without publishing it.
+// The credential patterns require an adjacent VALUE (`token: abc`), so a plain
+// human sentence that merely mentions the word — "the store is not connected
+// (no token)" — is still shown to the merchant, which is the whole point.
+const LEAKY_ERROR = /(relation |column |syntax error|constraint|duplicate key|ECONN|ETIMEDOUT|ENOTFOUND|EAI_|\bat \w+[. ]|node_modules|[A-Za-z]:\\|\/(usr|home|app)\/|SELECT |INSERT |UPDATE |DELETE |shpat_|shpss_|Bearer \S|(password|api[_-]?key|secret|token)\s*[=:]\s*\S)/i;
+
+function safeError(e) {
+  const id = crypto.randomBytes(5).toString("hex");
+  const raw = (e && (e.stack || e.message)) || String(e);
+  console.error(`[err:${id}]`, raw);
+  const msg = String((e && e.message) || "").trim();
+  if (msg && msg.length <= 140 && !LEAKY_ERROR.test(msg)) return msg;
+  return `שגיאת שרת (ref ${id})`;
+}
+
+// ===== Rate limiting =====
+//
+// The login route had a counter, but nothing else did — and every other
+// endpoint accepts ?password= and does the same comparison. An attacker never
+// needed to touch /api/auth/login: `GET /api/settings?password=<guess>` answers
+// 401 on a miss and 200 on a hit, at whatever rate they can manage. Guarding
+// only the front door while the windows are open is not a guard.
+//
+// express-rate-limit was already a declared dependency and was never required.
+const rateLimit = (() => {
+  try { const m = require("express-rate-limit"); return m.rateLimit || m.default || m; }
+  catch (e) { console.warn("[boot] express-rate-limit unavailable — rate limiting disabled"); return null; }
+})();
+
+if (rateLimit) {
+  const common = {
+    standardHeaders: true,
+    legacyHeaders: false,
+    // Railway sits behind a proxy, so req.ip comes from X-Forwarded-For, which
+    // a client can spoof. Keying on the leftmost hop is still the best signal
+    // available here; the real backstop is that credentials now expire.
+    message: { error: "יותר מדי בקשות. נסה שוב בעוד רגע." }
+  };
+
+  // Anything that authenticates: the brute-force surface.
+  app.use(["/api", "/admin"], rateLimit({
+    ...common,
+    windowMs: 60 * 1000,
+    limit: 240,                       // generous for a live dashboard, useless for guessing
+    skip: (req) => req.method === "OPTIONS"
+  }));
+
+  // Credential checks specifically: far tighter, and counted per IP.
+  app.use(["/api/auth/login"], rateLimit({
+    ...common,
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    skipSuccessfulRequests: true,     // only failures burn the budget
+    message: { ok: false, error: "יותר מדי ניסיונות התחברות. נסה שוב בעוד 15 דקות." }
+  }));
+
+  // The AI is the expensive one: each call costs real money and can run a tool
+  // loop, so a tighter ceiling protects the bill as much as the service.
+  app.use(["/api/chat", "/api/transcribe"], rateLimit({
+    ...common,
+    windowMs: 60 * 1000,
+    limit: 20
+  }));
+
+  console.log("🛡️  Rate limiting active (240/min API, 10/15min login, 20/min AI)");
+}
+
 // SESSION RESOLUTION — must sit above EVERY route, because resolveShop() is
 // called synchronously from dozens of handlers and cannot await a lookup itself.
 // Placed after the body parser so a request is fully formed by the time we look.
@@ -265,7 +344,7 @@ app.post("/webhook/flashy", express.json({ limit: "1mb" }), async (req, res) => 
     res.status(200).json(result);
   } catch (err) {
     console.error("flashy webhook error:", err.message);
-    res.status(200).json({ ok: false, error: err.message });
+    res.status(200).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -290,7 +369,7 @@ app.post("/webhook/sms-incoming", express.json({ limit: "1mb" }), async (req, re
     res.status(200).json(result);
   } catch (err) {
     console.error("sms-incoming error:", err.message);
-    res.status(200).json({ ok: false, error: err.message });
+    res.status(200).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -365,7 +444,7 @@ app.get("/api/health/ai", async (req, res) => {
       } catch (e) {
         return res.json({
           ok: false, mode: "full_chat_path", stage: "askBrain",
-          chat_ms: Date.now() - t0, error: e.message
+          chat_ms: Date.now() - t0, error: safeError(e)
         });
       }
     }
@@ -416,7 +495,7 @@ app.get("/api/billing", async (req, res) => {
       charges: hist.charges,
       totals: hist.totals
     });
-  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  } catch (e) { res.status(500).json({ ok: false, error: safeError(e) }); }
 });
 
 // Start the approval flow. Returns the Shopify-hosted confirmation URL the
@@ -434,7 +513,7 @@ app.post("/api/billing/subscribe", express.json(), async (req, res) => {
       test: req.body && req.body.test === true
     });
     res.json(r);
-  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  } catch (e) { res.status(500).json({ ok: false, error: safeError(e) }); }
 });
 
 // Where Shopify sends the merchant back after they approve or decline.
@@ -474,7 +553,7 @@ app.get("/api/channels", async (req, res) => {
       sms_sender: settings.sms_sender || null
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: safeError(e) });
   }
 });
 
@@ -523,7 +602,7 @@ app.get("/api/autopilot", async (req, res) => {
       }
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: safeError(e) });
   }
 });
 
@@ -545,7 +624,7 @@ app.get("/api/autopilot/policy", async (req, res) => {
   try {
     res.json({ ok: true, ...(await policyEngine.learn(shop)) });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: safeError(e) });
   }
 });
 
@@ -556,7 +635,7 @@ app.post("/api/autopilot/run-now", express.json(), async (req, res) => {
   try {
     res.json(await autopilot.runForShop(shop, { force: true }));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: safeError(e) });
   }
 });
 
@@ -689,7 +768,7 @@ app.post("/api/consent", express.json(), async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("Consent endpoint error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -972,13 +1051,13 @@ app.post("/admin/backfill/run", express.json(), async (req, res) => {
         });
         backfillStatus[shop] = { ...backfillStatus[shop], ...result };
       } catch (err) {
-        backfillStatus[shop] = { ...backfillStatus[shop], success: false, fatal_error: err.message };
+        backfillStatus[shop] = { ...backfillStatus[shop], success: false, fatal_error: safeError(err) };
       }
     });
     res.json({ success: true, message: "Backfill started" });
   } catch (err) {
     console.error("Backfill run error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -1098,7 +1177,7 @@ app.get("/api/wa-credits/balance", async (req, res) => {
     const balance = await creditsEngine.getBalance(shop);
     res.json({ ok: true, balance, price_per_credit: creditsEngine.PRICE_PER_CREDIT_ILS });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1114,7 +1193,7 @@ app.post("/api/wa-credits/add", express.json(), async (req, res) => {
     const r = await creditsEngine.addCredits(shop, amount, "topup_manual", { by: "admin" });
     res.json(r);
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1136,7 +1215,7 @@ app.get("/api/wa-credits/all", async (req, res) => {
     }
     res.json({ ok: true, stores: out, price_per_credit: creditsEngine.PRICE_PER_CREDIT_ILS });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1231,7 +1310,7 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
     });
   } catch (err) {
     console.error("send-auto error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1276,7 +1355,7 @@ app.post("/api/campaign/save-result", express.json(), async (req, res) => {
       [shop, String(key).slice(0, 120), JSON.stringify(whatsapp)]
     );
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  } catch (err) { res.status(500).json({ ok: false, error: safeError(err) }); }
 });
 
 // Fetch a saved result (the card asks on render; if found, it restores the squares).
@@ -1290,7 +1369,7 @@ app.get("/api/campaign/get-result", async (req, res) => {
       `SELECT whatsapp FROM campaign_results WHERE shop_domain=$1 AND campaign_key=$2`, [shop, key]);
     if (!r.rows[0]) return res.json({ ok: true, found: false });
     res.json({ ok: true, found: true, whatsapp: r.rows[0].whatsapp || [] });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  } catch (err) { res.status(500).json({ ok: false, error: safeError(err) }); }
 });
 
 // Mark one square as sent (clicked) so the state survives refresh.
@@ -1312,7 +1391,7 @@ app.post("/api/campaign/mark-sent", express.json(), async (req, res) => {
       [shop, String(key).slice(0, 120), String(phone)]
     );
     res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+  } catch (err) { res.status(500).json({ ok: false, error: safeError(err) }); }
 });
 
 app.post("/api/terms/accept", express.json(), async (req, res) => {
@@ -1323,7 +1402,7 @@ app.post("/api/terms/accept", express.json(), async (req, res) => {
     res.json(r);
   } catch (err) {
     console.error("terms/accept error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1341,7 +1420,7 @@ app.post("/api/optout/remove-customer", express.json(), async (req, res) => {
     res.json({ ok: true, removed: { email: email || null, phone: phone || null }, result: r });
   } catch (err) {
     console.error("optout/remove-customer error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1379,7 +1458,7 @@ app.get("/admin/set-owner-email", async (req, res) => {
     res.json({ ok: true, shop, owner_email: email, note: "מייל בעל החנות נשמר. הוא יקבל עותק דוגמה מכל קמפיין מייל." });
   } catch (err) {
     console.error("set-owner-email error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1401,7 +1480,7 @@ app.get("/admin/set-logo", async (req, res) => {
     res.json({ ok: true, shop, logo_url: logoUrl, note: "הלוגו עודכן. ישמש כאייקון האפליקציה במסך הבית." });
   } catch (err) {
     console.error("set-logo error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1423,7 +1502,7 @@ app.get("/admin/set-password", async (req, res) => {
     res.json({ ok: true, shop, note: "הסיסמה עודכנה. בעל החנות יכול להתחבר עם הסיסמה החדשה." });
   } catch (err) {
     console.error("set-password error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1437,7 +1516,7 @@ app.get("/admin/set-wa-key", async (req, res) => {
     await shopify.setWhatsAppConfig(shop, { d360_api_key: key, wa_language: language });
     res.json({ ok: true, shop, configured: true });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1463,7 +1542,7 @@ app.post("/api/wa-templates/upsert", express.json(), async (req, res) => {
     });
     res.json(r);
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1477,7 +1556,7 @@ app.post("/api/wa-templates/remove", express.json(), async (req, res) => {
     const r = await waTemplates.removeTemplate(shop, name);
     res.json(r);
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1492,7 +1571,7 @@ app.get("/api/wa-templates/list", async (req, res) => {
     const configured = whatsappSender.isConfigured(shop);
     res.json({ ok: true, configured, templates: list });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1525,7 +1604,7 @@ app.post("/api/chat", express.json({ limit: '12mb' }), async (req, res) => {
     });
   } catch (err) {
     console.error("Chat endpoint error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1596,7 +1675,7 @@ app.post("/api/transcribe", express.json({ limit: '15mb' }), async (req, res) =>
     res.json({ ok: true, text: out.text || '' });
   } catch (err) {
     console.error("Transcribe error:", err);
-    res.status(500).json({ ok: false, error: err.message, detail: err.message });
+    res.status(500).json({ ok: false, error: safeError(err), detail: err.message });
   }
 });
 
@@ -1618,7 +1697,7 @@ app.get("/api/daily-plan", async (req, res) => {
     res.json({ ok: true, plan: result.answer, generated_at: new Date().toISOString() });
   } catch (err) {
     console.error("Daily plan error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1630,7 +1709,7 @@ app.get("/api/daily-summary", async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Daily summary error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1655,7 +1734,7 @@ app.post("/api/sms/test", express.json(), async (req, res) => {
     res.json({ ok: r.ok, result: r });
   } catch (err) {
     console.error("sms test error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1669,7 +1748,7 @@ app.get("/api/morning-brief", async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Morning brief error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1683,7 +1762,7 @@ app.get("/api/insights", async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Insights endpoint error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1703,7 +1782,7 @@ app.post("/api/coupon/create", express.json(), async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Coupon create error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1743,7 +1822,7 @@ app.post("/api/send-email", express.json(), async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Send email error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1756,7 +1835,7 @@ app.post("/api/optout/add", express.json(), async (req, res) => {
     flashySync.pushUnsubscribe({ email: email || null, phone: phone || null }).catch(() => {});
     res.json(result);
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1784,7 +1863,7 @@ app.post("/api/insights/dismiss", express.json(), async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error("dismiss error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1797,7 +1876,7 @@ app.get("/api/memory", async (req, res) => {
     const prefs = await memory.getPreferences(shop);
     res.json({ ok: true, preferences: prefs });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1812,7 +1891,7 @@ app.post("/api/memory/delete", express.json(), async (req, res) => {
     await memory.deletePreference(shop, id);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -1870,7 +1949,7 @@ app.post("/api/campaign/start", express.json(), async (req, res) => {
     res.json({ ok: true, campaign_id: id, total: Math.min(segment.length, campaignEngine.MAX_PER_CAMPAIGN) });
   } catch (err) {
     console.error("Campaign start error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2013,7 +2092,7 @@ app.post("/api/agent/propose-plan", express.json(), async (req, res) => {
     res.json({ ok: true, plan_id: planId, projected_revenue: totalProjected, ...status });
   } catch (err) {
     console.error("Propose plan error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2061,7 +2140,7 @@ app.post("/api/agent/preview-plan", express.json(), async (req, res) => {
     res.json({ ok: true, total: recipients.length, wa_count: waCount, email_count: emailCount, recipients, sample });
   } catch (err) {
     console.error("preview-plan error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2092,7 +2171,7 @@ app.post("/api/agent/approve-plan", express.json(), async (req, res) => {
     res.json({ ok: true, started: true, plan_id });
   } catch (err) {
     console.error("Approve plan error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2182,7 +2261,7 @@ ${tasksJson}
     res.json({ ok: true, plan_id, projected_revenue: Math.round(projected), ...refreshed });
   } catch (err) {
     console.error("Revise plan error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2223,7 +2302,7 @@ app.get("/api/advisor-actions-log", async (req, res) => {
     res.json({ ok: true, actions });
   } catch (err) {
     console.error("Actions log error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2254,7 +2333,7 @@ app.get("/api/advisor-stats", async (req, res) => {
     });
   } catch (err) {
     console.error("Advisor stats error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2301,7 +2380,7 @@ app.get("/api/team-stats", async (req, res) => {
     });
   } catch (err) {
     console.error("team-stats error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2450,7 +2529,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Action execute error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2576,7 +2655,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("Build cart error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2689,7 +2768,7 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
     res.json({ ok: true, whatsapp, emails_sent: emailsSent, failed, skipped, total: carts.length });
   } catch (err) {
     console.error("Build cart batch error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 app.get("/icon-192.png", (req, res) => {
@@ -2805,7 +2884,7 @@ app.post("/api/chat/save", express.json(), async (req, res) => {
     }
   } catch (err) {
     console.error("chat/save error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2826,7 +2905,7 @@ app.get("/api/chat/list", async (req, res) => {
     res.json({ ok: true, conversations: result.rows });
   } catch (err) {
     console.error("chat/list error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2848,7 +2927,7 @@ app.get("/api/chat/get/:id", async (req, res) => {
     res.json({ ok: true, conversation: result.rows[0] });
   } catch (err) {
     console.error("chat/get error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2865,7 +2944,7 @@ app.delete("/api/chat/delete/:id", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error("chat/delete error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2878,7 +2957,7 @@ app.get("/admin/sync-products", async (req, res) => {
     const result = await shopify.syncProducts(resolveShop(req) || DEFAULT_SHOP);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -2891,7 +2970,7 @@ app.get("/admin/sync-checkouts", async (req, res) => {
     const result = await shopify.syncAbandonedCheckouts(resolveShop(req) || DEFAULT_SHOP);
     res.json(result);
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -3191,7 +3270,7 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
   } catch (err) {
     console.error("Generate error:", err);
     if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -3225,7 +3304,7 @@ app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, 
           const outputImage = await submitAndWaitRunPod(dataUri, gUrl, cat);
           results.push({ status: "completed", output: [outputImage], garment_url: gUrl, category: cat });
         } catch (err) {
-          results.push({ error: err.message, garment_url: gUrl, category: cat });
+          results.push({ error: safeError(err), garment_url: gUrl, category: cat });
         }
       } else {
         var data = await submitFashn(dataUri, gUrl, cat);
@@ -3255,7 +3334,7 @@ app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, 
     res.json({ results: results });
   } catch (err) {
     console.error("Multi generate error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -3305,7 +3384,7 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
         currentModelImage = outputUrl;
       } catch (err) {
         console.error("  Step", i + 1, "failed:", err.message);
-        stepResults.push({ step: i + 1, error: err.message, garment_url: garmentUrls[i] });
+        stepResults.push({ step: i + 1, error: safeError(err), garment_url: garmentUrls[i] });
       }
     }
     if (req.file && req.file.path) fs.unlink(req.file.path, () => {});
@@ -3339,7 +3418,7 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
     });
   } catch (err) {
     console.error("Chain error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -3367,7 +3446,7 @@ app.get("/api/tryon/status/:id", async (req, res) => {
     }
   } catch (err) {
     console.error("Status error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -3401,7 +3480,7 @@ app.post("/api/tryon/generate-video", async (req, res) => {
     res.json({ prediction_id: data.id });
   } catch (err) {
     console.error("Video generation error:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeError(err) });
   }
 });
 
@@ -3418,7 +3497,7 @@ app.get("/api/tryon/video-status/:id", async (req, res) => {
       res.json({ status: data.status || "processing", error: data.error });
     }
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: safeError(e) });
   }
 });
 
@@ -3622,7 +3701,7 @@ function handleCheckoutWebhook(req, res) {
     });
   } catch (err) {
     console.error("Checkout webhook error:", err.message);
-    if (!res.headersSent) res.status(500).json({ error: err.message });
+    if (!res.headersSent) res.status(500).json({ error: safeError(err) });
   }
 }
 
@@ -3672,7 +3751,7 @@ function handleOrderWebhook(req, res) {
     });
   } catch (err) {
     console.error("Order webhook error:", err.message);
-    if (!res.headersSent) res.status(500).json({ error: err.message });
+    if (!res.headersSent) res.status(500).json({ error: safeError(err) });
   }
 }
 app.post("/webhooks/orders/create", express.raw({ type: "application/json" }), handleOrderWebhook);
@@ -3719,7 +3798,7 @@ app.get("/admin/fix-data", async (req, res) => {
     });
   } catch (err) {
     console.error("fix-data error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -3755,7 +3834,7 @@ app.get("/admin/add-store", async (req, res) => {
     });
   } catch (err) {
     console.error("add-store error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -3948,7 +4027,7 @@ app.get("/auth/callback", async (req, res) => {
           await mailer.sendEmail({ to: ownerEmail, subject, html, text: bodyTxt }).catch(() => {});
         }
       } catch (err) {
-        backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], success: false, fatal_error: err.message };
+        backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], success: false, fatal_error: safeError(err) };
       }
     });
 
@@ -4022,7 +4101,7 @@ app.get("/admin/run-attribution", async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error("run-attribution error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -4108,7 +4187,7 @@ app.get("/admin/unattribute", async (req, res) => {
     });
   } catch (err) {
     console.error("unattribute error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -4156,7 +4235,7 @@ app.get("/admin/setup-agent-tables", async (req, res) => {
     res.json({ ok: true, message: "טבלאות הסוכן נוצרו בהצלחה", verification: check.rows[0] });
   } catch (err) {
     console.error("Setup agent tables error:", err);
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok: false, error: safeError(err) });
   }
 });
 
@@ -4191,7 +4270,7 @@ app.get("/admin/register-webhooks", async (req, res) => {
         result: r.status === 201 ? "created" : (body.errors || body)
       });
     } catch (err) {
-      results.push({ topic: t.topic, error: err.message });
+      results.push({ topic: t.topic, error: safeError(err) });
     }
   }
 
