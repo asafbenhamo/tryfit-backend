@@ -116,6 +116,58 @@ async function resolve(token) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// SETUP LINKS — how a newly-installed merchant gets in without us mailing them
+// a password.
+//
+// Onboarding used to email `/chat?shop=X&password=<their real password>`. That
+// link is permanent and it lands in their mailbox forever, in the mail
+// provider's logs, in browser history, and in every forward of the message.
+// Anyone who ever sees it owns that store's customer list.
+//
+// A setup link instead carries a single-use token that is exchanged for a normal
+// session on first click and then destroyed. It expires on its own even if
+// never used, and knowing it does not reveal the password.
+// ---------------------------------------------------------------------------
+const SETUP_TTL_HOURS = 72;
+
+async function createSetupLink(shop, { baseUrl } = {}) {
+  await ensureTable();
+  const token = crypto.randomBytes(TOKEN_BYTES).toString('base64url');
+  const expires = new Date(Date.now() + SETUP_TTL_HOURS * 60 * 60 * 1000);
+  await db.query(
+    `INSERT INTO advisor_sessions (token_hash, shop_domain, is_master, expires_at, user_agent)
+     VALUES ($1,$2,FALSE,$3,'setup-link')`,
+    [hash(token), shop, expires]
+  );
+  const base = String(baseUrl || process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+  return { token, url: `${base}/chat?setup=${encodeURIComponent(token)}`, expires_at: expires.toISOString() };
+}
+
+// Exchange a setup token for a real session. Single use: the setup row is
+// deleted whether or not the caller keeps the session, so a leaked link is
+// worthless the moment it has been clicked once.
+async function consumeSetupLink(token, { ip = null, userAgent = null } = {}) {
+  if (!token) return null;
+  await ensureTable();
+  try {
+    const r = await db.query(
+      `DELETE FROM advisor_sessions
+        WHERE token_hash = $1 AND user_agent = 'setup-link' AND expires_at > NOW()
+        RETURNING shop_domain`,
+      [hash(token)]);
+    const row = r.rows[0];
+    if (!row) return null;
+    const sess = await create(row.shop_domain, { ip, userAgent });
+    // create() does not know which shop it minted for; the caller needs it to
+    // build the login response, so carry it back explicitly.
+    return { ...sess, shop: row.shop_domain };
+  } catch (e) {
+    console.error('[session] consumeSetupLink:', e.message);
+    return null;
+  }
+}
+
 async function revoke(token) {
   if (!token) return { ok: true };
   await ensureTable();
@@ -154,6 +206,7 @@ function extractToken(req) {
 
 module.exports = {
   ensureTable, create, resolve, revoke, revokeAllForShop, purgeExpired,
+  createSetupLink, consumeSetupLink,
   extractToken, safeEqual, hash,
   TTL_DAYS
 };

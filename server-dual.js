@@ -468,6 +468,28 @@ app.get("/api/health/ai", async (req, res) => {
   }
 });
 
+// Exchange a one-time setup link for a real session. This is how a merchant
+// gets in straight after installing, without us ever mailing them a password.
+app.post("/api/auth/setup", express.json(), async (req, res) => {
+  const token = (req.body && req.body.setup) || "";
+  if (!token) return res.status(400).json({ ok: false, error: "missing setup token" });
+  const ip = (req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim();
+  const sess = await sessionAuth.consumeSetupLink(token, { ip, userAgent: req.headers["user-agent"] });
+  if (!sess) {
+    // Deliberately vague: expired, already used and never valid are the same
+    // answer, so the link cannot be probed.
+    return res.status(401).json({ ok: false, error: "קישור ההתקנה כבר נוצל או פג תוקף. התחבר עם הסיסמה." });
+  }
+  const shop = sess.shop || null;
+  const cfg = shop ? shopify.getStore(shop) : null;
+  res.json({
+    ok: true, mode: "store", shop,
+    name: (cfg && cfg.name) || String(shop || "").replace(".myshopify.com", ""),
+    terms_accepted: shop ? shopify.hasAcceptedTerms(shop) : false,
+    token: sess.token, expires_at: sess.expires_at
+  });
+});
+
 // End a session. The token is revoked server-side, so a copy someone else holds
 // (a shared screenshot, a synced browser history) stops working immediately.
 app.post("/api/auth/logout", express.json(), async (req, res) => {
@@ -3876,10 +3898,11 @@ app.get("/auth", (req, res) => {
   }
   cleanOldStates();
   const state = crypto.randomBytes(16).toString("hex");
-  // Optionally let the operator preset the advisor login password via the install
-  // link (?password=XXX). Stashed with the state and applied in the callback.
-  // If omitted, a random one is generated.
-  oauthStates.set(state, { ts: Date.now(), pw: (req.query.password || "").trim() || null });
+  // NOTE: ?password= used to be honoured here, letting whoever sent the install
+  // link choose the merchant's advisor password. /auth is unauthenticated, so
+  // anyone could mail a store a crafted link and then log in as them afterwards.
+  // The password is always generated here now, and nothing external sets it.
+  oauthStates.set(state, { ts: Date.now(), pw: null });
   const redirectUri = `${APP_BASE_URL}/auth/callback`;
   const installUrl =
     `https://${shop}/admin/oauth/authorize` +
@@ -4005,7 +4028,17 @@ app.get("/auth/callback", async (req, res) => {
     } catch (e) { console.error("[OAuth] webhook registration:", e.message); }
 
     // Personal chat link — the "install and get your agent" moment.
-    const chatLink = `${APP_BASE_URL}/chat?shop=${encodeURIComponent(shopDomain)}&password=${encodeURIComponent(advisorPassword)}`;
+    // A single-use setup link, NOT the password. The old form put the merchant's
+    // permanent password in a URL that then lived forever in their mailbox, in
+    // the mail provider's logs, in browser history and in every forward.
+    // This one logs them in once and is destroyed on use.
+    let chatLink = `${APP_BASE_URL}/chat`;
+    try {
+      const link = await sessionAuth.createSetupLink(shopDomain, { baseUrl: APP_BASE_URL });
+      chatLink = link.url;
+    } catch (e) {
+      console.error("[OAuth] setup link:", e.message);
+    }
 
     // Kick off backfill in the background; when done, email the owner that the
     // team is ready, with their personal link.
@@ -4020,11 +4053,18 @@ app.get("/auth/callback", async (req, res) => {
         if (ownerEmail) {
           const he = isIsraeli;
           const subject = he ? `הצוות של ${displayName} מוכן לעבודה 🎉` : `Your ${displayName} sales team is ready 🎉`;
+          // The password is deliberately NOT in this email. It was shown once on
+          // the install success page; mailing it would leave a permanent copy in
+          // the merchant's inbox and in the mail provider's logs. The link below
+          // is single-use and expires on its own.
           const bodyTxt = he
-            ? `היי!\n\nסיימנו לנתח את החנות שלך. דניאל (האנליסט), מאיה (המכירות) ונועה (השירות) מוכנים.\n\nהיכנס לצ'אט האישי שלך:\n${chatLink}\n\nסיסמת הכניסה שלך: ${advisorPassword}\n\nנתראה בפנים,\nSmart Advisor`
-            : `Hi!\n\nWe finished analyzing your store. Daniel (analyst), Maya (sales) and Noa (support) are ready to work.\n\nOpen your personal chat:\n${chatLink}\n\nYour password: ${advisorPassword}\n\nSee you inside,\nSmart Advisor`;
+            ? `היי!\n\nסיימנו לנתח את החנות שלך. דניאל (האנליסט), מאיה (המכירות) ונועה (השירות) מוכנים.\n\nהקישור הבא יכניס אותך פעם אחת — שמור את הסיסמה שהוצגה לך בסיום ההתקנה:\n${chatLink}\n\nנתראה בפנים,\nSmart Advisor`
+            : `Hi!\n\nWe finished analyzing your store. Daniel (analyst), Maya (sales) and Noa (support) are ready to work.\n\nThe link below signs you in once — keep the password you were shown at the end of setup:\n${chatLink}\n\nSee you inside,\nSmart Advisor`;
           const html = mailer.buildHtmlEmail(bodyTxt, { cta_url: chatLink, cta_label: he ? "לצ'אט האישי שלך ←" : "Open your chat →", brand: displayName, to: ownerEmail });
-          await mailer.sendEmail({ to: ownerEmail, subject, html, text: bodyTxt }).catch(() => {});
+          // fromName was missing, so a brand-new merchant received their welcome
+          // email from the FIRST store's name. Every outbound mail carries the
+          // identity of the shop it belongs to.
+          await mailer.sendEmail({ to: ownerEmail, subject, html, text: bodyTxt, fromName: displayName }).catch(() => {});
         }
       } catch (err) {
         backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], success: false, fatal_error: safeError(err) };

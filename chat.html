@@ -1743,6 +1743,32 @@
 
   applyLanguage(initialLang());
 
+  // A merchant arriving straight from installing the app carries a single-use
+  // setup token instead of a password. Exchange it for a session and go
+  // straight in — they should never have to type anything on their first visit.
+  async function trySetupLink() {
+    let setup = null;
+    try { setup = new URLSearchParams(location.search).get('setup'); } catch (e) {}
+    if (!setup) return false;
+    // Strip it from the address bar immediately: it is single-use, but leaving
+    // it in history invites a confusing "link already used" on refresh.
+    try { history.replaceState({}, '', location.pathname); } catch (e) {}
+    try {
+      const res = await fetch('/api/auth/setup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ setup })
+      });
+      const d = await res.json();
+      if (!d.ok || !d.token) return false;
+      AUTH_TOKEN = d.token;
+      SELECTED_SHOP = '';
+      if (d.terms_accepted === false) showTermsGate(d.name || '');
+      else enterAdvisor(d.name || '', d.shop || '');
+      return true;
+    } catch (e) { return false; }
+  }
+  trySetupLink();
+
   // ===== Team / agents =====
   // The advisor is the "head of team". These are the agents it runs. Two are live
   // today (campaigner + sales); the rest are on the roadmap.

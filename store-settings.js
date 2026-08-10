@@ -91,7 +91,13 @@ async function getSettings(shop) {
     brand: (row && row.brand) || legacyBrand(shop),
     language: (row && row.language) || DEFAULTS.language,
     currency: (row && row.currency) || DEFAULTS.currency,
-    sms_sender: (row && row.sms_sender) || process.env.TEXTME_SENDER || null,
+    // The env sender belongs to the ORIGINAL pilot shop and is verified with the
+    // SMS provider under that brand. Falling back to it for every shop meant a
+    // newly-installed store's customers would receive texts signed "770" — an
+    // unrelated brand they never bought from. Each shop must have its own
+    // approved sender; without one, SMS is simply unavailable to it and the
+    // channel router falls through to email.
+    sms_sender: (row && row.sms_sender) || (shop === DEFAULT_SHOP ? (process.env.TEXTME_SENDER || null) : null),
     daily_cap: (row && row.daily_cap != null) ? row.daily_cap : DEFAULTS.daily_cap,
     autopilot: (row && row.autopilot) || DEFAULTS.autopilot,
     followup_default: (row && row.followup_default != null) ? row.followup_default : DEFAULTS.followup_default,

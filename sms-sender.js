@@ -54,7 +54,15 @@ async function sendOne(shop, { phone, message, sender }) {
   let shopSender = sender || null;
   if (!shopSender) {
     try { shopSender = (await require('./store-settings').getSettings(shop)).sms_sender; }
-    catch (e) { /* env fallback below */ }
+    catch (e) { /* handled below */ }
+  }
+  // Refuse rather than borrow another shop's identity. Sending a store's
+  // customers a text signed with a different brand's name is impersonation, and
+  // on a shared provider account it also puts that brand's sender reputation at
+  // risk for messages it never authorised.
+  if (!shopSender) {
+    return { ok: false, error: 'no_sender_id',
+      detail: 'לחנות הזו אין עדיין מזהה שולח מאושר ל-SMS. עד שיוגדר, הפניות יישלחו במייל.' };
   }
 
   // Body per TextMe docs: everything wrapped in "sms", username under "user",
@@ -62,7 +70,7 @@ async function sendOne(shop, { phone, message, sender }) {
   const body = {
     sms: {
       user: { username: process.env.TEXTME_USERNAME },
-      source: (shopSender || process.env.TEXTME_SENDER || '770').slice(0, 11),
+      source: String(shopSender).slice(0, 11),
       message: message,
       add_unsubscribe: 3, // TextMe appends its own one-click removal link (legal)
       destinations: { phone: [ { "_": to } ] }
