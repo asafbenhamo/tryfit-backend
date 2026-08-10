@@ -566,12 +566,13 @@ app.post("/api/billing/subscribe", express.json(), async (req, res) => {
   if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
   try {
     const settings = await storeSettings.getSettings(shop);
+    // `test` is NOT taken from the request. It means "never actually charge me",
+    // and a client that can set it can make the app free forever. startSubscription
+    // asks Shopify what kind of store this is instead. The cap is clamped there
+    // too, so a hand-crafted body cannot approve a ceiling nobody chose.
     const r = await billing.startSubscription(shop, {
       cappedAmount: req.body && req.body.capped_amount,
-      currency: (req.body && req.body.currency) || (settings.currency === "₪" ? "ILS" : "USD"),
-      // Development stores cannot be charged for real; a test charge exercises
-      // the whole flow without money moving.
-      test: req.body && req.body.test === true
+      currency: (settings.currency === "₪" ? "ILS" : "USD")
     });
     res.json(r);
   } catch (e) { res.status(500).json({ ok: false, error: safeError(e) }); }
@@ -3851,7 +3852,15 @@ function handleOrderWebhook(req, res) {
     }
     res.status(200).json({ success: true });
 
-    const shopDomain = req.headers["x-shopify-shop-domain"] || "seven770.myshopify.com";
+    // No default shop here. Falling back to the pilot store meant a webhook
+    // without the header credited — and would have billed — a merchant who had
+    // nothing to do with the order. A webhook we cannot attribute is a webhook
+    // we drop.
+    const shopDomain = String(req.headers["x-shopify-shop-domain"] || "").toLowerCase().trim();
+    if (!isValidShopDomain(shopDomain)) {
+      console.warn("⚠️  [Webhook] order webhook with no usable shop domain — ignored");
+      return;
+    }
     let order;
     try { order = JSON.parse(rawBody.toString("utf8")); } catch (e) { return; }
 
@@ -4135,6 +4144,30 @@ app.get("/auth/callback", async (req, res) => {
       }
     } catch (e) { console.error("[OAuth] webhook registration:", e.message); }
 
+    // Create the billing subscription now, at install, while we have the
+    // merchant's attention.
+    //
+    // It used to be created only if they happened to notice a card on the home
+    // screen, which meant that for most stores the agent worked for free
+    // forever — there was no subscription for a usage charge to attach to, and
+    // every charge came back 'no_subscription'. Shopify also expects the money
+    // conversation to happen at install, not to be discovered later.
+    //
+    // Approving it is still their decision — this only produces the URL where
+    // they can. The agent runs either way; it just cannot bill until they do.
+    let billingUrl = null;
+    try {
+      const sub = await billing.startSubscription(shopDomain, {
+        currency: isIsraeli ? "ILS" : "USD"
+      });
+      billingUrl = sub && sub.confirmationUrl;
+      console.log(`[OAuth] ${shopDomain} subscription created (${sub && sub.status})`);
+    } catch (e) {
+      // Never block an install on billing. A merchant with a working agent and
+      // no subscription is recoverable; a failed install is not.
+      console.error("[OAuth] startSubscription:", e.message);
+    }
+
     // Personal chat link — the "install and get your agent" moment.
     // A single-use setup link, NOT the password. The old form put the merchant's
     // permanent password in a URL that then lived forever in their mailbox, in
@@ -4168,7 +4201,13 @@ app.get("/auth/callback", async (req, res) => {
           const bodyTxt = he
             ? `היי!\n\nסיימנו לנתח את החנות שלך. דניאל (האנליסט), מאיה (המכירות) ונועה (השירות) מוכנים.\n\nהקישור הבא יכניס אותך פעם אחת — שמור את הסיסמה שהוצגה לך בסיום ההתקנה:\n${chatLink}\n\nנתראה בפנים,\nSmart Advisor`
             : `Hi!\n\nWe finished analyzing your store. Daniel (analyst), Maya (sales) and Noa (support) are ready to work.\n\nThe link below signs you in once — keep the password you were shown at the end of setup:\n${chatLink}\n\nSee you inside,\nSmart Advisor`;
-          const html = mailer.buildHtmlEmail(bodyTxt, { cta_url: chatLink, cta_label: he ? "לצ'אט האישי שלך ←" : "Open your chat →", brand: displayName, to: ownerEmail });
+          // language was missing, so an English merchant got their welcome mail
+          // laid out right-to-left with a Hebrew footer. transactional keeps the
+          // unsubscribe link off it — this is their account mail, not marketing.
+          const html = mailer.buildHtmlEmail(bodyTxt, {
+            cta_url: chatLink, cta_label: he ? "לצ'אט האישי שלך ←" : "Open your chat →",
+            brand: displayName, to: ownerEmail, language: he ? 'he' : 'en', transactional: true
+          });
           // fromName was missing, so a brand-new merchant received their welcome
           // email from the FIRST store's name. Every outbound mail carries the
           // identity of the shop it belongs to.
@@ -4189,12 +4228,21 @@ app.get("/auth/callback", async (req, res) => {
           <div style="font-size:48px;">🎉</div>
           <h1 style="font-size:22px;color:#111;">${hePage ? `${displayName} מחוברת!` : `${displayName} is connected!`}</h1>
           <p style="color:#444;line-height:1.7;">${hePage
-            ? 'הצוות שלך — דניאל, מאיה ונועה — מתחיל עכשiv לנתח את החנות (לקוחות והזמנות). זה ייקח כמה דקות, ונשלח לך מייל כשהכל מוכן.'
+            ? 'הצוות שלך — דניאל, מאיה ונועה — מתחיל עכשיו לנתח את החנות (לקוחות והזמנות). זה ייקח כמה דקות, ונשלח לך מייל כשהכל מוכן.'
             : 'Your team — Daniel, Maya and Noa — is now analyzing your store (customers & orders). This takes a few minutes; we will email you when everything is ready.'}</p>
           <a href="${chatLink}" style="display:inline-block;background:#0a6fe0;color:#fff;text-decoration:none;font-weight:700;padding:14px 26px;border-radius:12px;margin:10px 0;">${hePage ? "לצ'אט האישי שלך ←" : 'Open your personal chat →'}</a>
           <p style="color:#444;line-height:1.7;margin-top:14px;">${hePage ? 'סיסמת הכניסה שלך:' : 'Your password:'}</p>
           <div style="font-size:20px;font-weight:800;letter-spacing:1px;background:#f0f4ff;color:#0a6fe0;padding:12px;border-radius:10px;">${advisorPassword}</div>
-          <p style="color:#888;font-size:13px;margin-top:18px;">${hePage ? 'שמור את הסיסמה. שלחנו לך אותה גם למייל.' : 'Save this password. We also emailed it to you.'}</p>
+          <p style="color:#888;font-size:13px;margin-top:18px;">${hePage
+            ? 'שמור את הסיסמה עכשיו — היא מוצגת פעם אחת בלבד ולא נשלחת במייל.'
+            : 'Save this password now — it is shown once and is never emailed.'}</p>
+          ${billingUrl ? `<div style="border-top:1px solid #eceff3;margin-top:22px;padding-top:20px;text-align:${hePage ? 'right' : 'left'};">
+            <div style="font-weight:700;color:#111;margin-bottom:6px;">${hePage ? 'שלב אחרון: אישור התמחור' : 'Last step: approve the pricing'}</div>
+            <p style="color:#5b6472;font-size:14px;line-height:1.7;margin:0 0 12px;">${hePage
+              ? `${Math.round(billing.COMMISSION_RATE * 100)}% ממכירות שהסוכן הוכיח שהוא יצר — קוד קופון שנוצל, סל שהוא בנה, או קליק במעקב שהסתיים ברכישה. על כל השאר לא משלמים. ${billing.TRIAL_DAYS} ימי ניסיון, ותקרה חודשית שאתה מאשר מראש.`
+              : `${Math.round(billing.COMMISSION_RATE * 100)}% of sales the agent can prove it generated — a redeemed coupon, a cart it built, or a tracked click that ended in a purchase. Nothing for anything else. ${billing.TRIAL_DAYS}-day trial, and a monthly cap you approve up front.`}</p>
+            <a href="${billingUrl}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:10px;">${hePage ? 'לאישור התמחור ←' : 'Review & approve →'}</a>
+          </div>` : ''}
         </div>
       </body></html>`);
   } catch (err) {
@@ -4641,6 +4689,33 @@ app.listen(PORT, async () => {
     setTimeout(runAttr, 120000); // first run 2 min after startup
     setInterval(runAttr, 5 * 60 * 1000); // then every 5 minutes
     console.log("🔁 Attribution scan scheduled (every 5 min, all stores)");
+
+    // ========== Billing sweep (every 15 minutes) ==========
+    // Attribution credits sales; this is what charges for them. It is a separate
+    // pass on purpose: the webhook and the scan both close sales, and billing
+    // inside either one meant the other path collected nothing. Reading the
+    // state instead of hooking the event makes it impossible to miss a sale
+    // because the wrong path got there first.
+    //
+    // Slower than the scan because each item costs a Shopify order lookup (to
+    // confirm the money actually arrived) and nothing is time-critical: usage
+    // records are settled by Shopify on the merchant's billing cycle.
+    let sweepRunning = false;
+    const runSweep = async () => {
+      if (sweepRunning) return;
+      sweepRunning = true;
+      try {
+        const shops = allActiveShops().filter(s => shopify.hasTokenForShop(s));
+        await billing.sweepAll(shops);
+      } catch (e) {
+        console.error("⚠️  [billing] scheduled sweep failed:", e.message);
+      } finally {
+        sweepRunning = false;
+      }
+    };
+    setTimeout(runSweep, 240000); // 4 min after startup, behind the first scan
+    setInterval(runSweep, 15 * 60 * 1000);
+    console.log("💳 Billing sweep scheduled (every 15 min, all stores)");
   }
 
   agentEngine.resumeInterruptedPlans();

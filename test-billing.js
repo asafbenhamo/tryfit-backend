@@ -20,12 +20,29 @@ let SUB = null;              // what Shopify reports as the active subscription
 const dbStub = {
   query: async (sql, params) => {
     const s = sql.replace(/\s+/g, ' ');
+    // The claim is an upsert now, not INSERT ... DO NOTHING: a charge that
+    // failed for a temporary reason has to be reclaimable, or the sale is
+    // never billed. Reclaim requires a non-terminal status, attempts left, and
+    // a cooled-off last attempt — mirrored here so the guarantees are real.
     if (/INSERT INTO app_usage_charges/.test(s)) {
-      const key = params[2];
-      if (claimed.has(key)) return { rows: [] };          // ON CONFLICT DO NOTHING
-      const row = { id: nextId++, shop: params[0], action_id: params[1], key, amount: Number(params[3]), status: 'pending' };
-      claimed.set(key, row); charges.push(row);
-      return { rows: [{ id: row.id }] };
+      const [shop, actionId, , key, amount, , , terminal, maxAttempts, retryMin] = params;
+      const existing = claimed.get(key);
+      if (!existing) {
+        const row = { id: nextId++, shop, action_id: actionId, key, amount: Number(amount),
+                      status: 'pending', attempts: 1, last_attempt_at: new Date() };
+        claimed.set(key, row); charges.push(row);
+        return { rows: [{ id: row.id, attempts: 1 }] };
+      }
+      const cooled = !existing.last_attempt_at ||
+        existing.last_attempt_at < new Date(Date.now() - Number(retryMin) * 60000);
+      if (terminal.includes(existing.status) || existing.attempts >= maxAttempts || !cooled) return { rows: [] };
+      existing.status = 'pending'; existing.attempts += 1;
+      existing.last_attempt_at = new Date(); existing.amount = Number(amount);
+      return { rows: [{ id: existing.id, attempts: existing.attempts }] };
+    }
+    if (/SELECT status, attempts FROM app_usage_charges WHERE idempotency_key/.test(s)) {
+      const row = claimed.get(params[0]);
+      return { rows: row ? [{ status: row.status, attempts: row.attempts }] : [] };
     }
     if (/UPDATE app_usage_charges SET status/.test(s)) {
       const row = charges.find(c => c.id === params[0]);

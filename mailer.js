@@ -106,9 +106,14 @@ function buildHtmlEmail(bodyText, opts = {}) {
     } catch (e) { /* unsigned links are still honoured */ }
   }
   const unsubLabel = isEn ? 'Unsubscribe' : 'להסרה מרשימת התפוצה';
-  const unsub = opts.to
+  // Transactional mail carries no unsubscribe link. The welcome mail with the
+  // merchant's own sign-in link is not marketing, and offering to unsubscribe
+  // them from their own account mail is both wrong and a way to lose the person
+  // who installed the app. Marketing to their customers still always carries it.
+  const unsub = (opts.to && !opts.transactional)
     ? '<a href="' + unsubBase + '/unsubscribe?email=' + encodeURIComponent(opts.to) + unsubShop + unsubSig + '" style="color:#aaa;text-decoration:underline;">' + unsubLabel + '</a>'
     : "";
+  const defaultFooter = isEn ? ('Sent by ' + brand) : ('נשלח מ-' + brand);
 
   return '<!DOCTYPE html>\n' +
 '<html dir="' + dir + '" lang="' + (isEn ? 'en' : 'he') + '">\n' +
@@ -121,7 +126,7 @@ function buildHtmlEmail(bodyText, opts = {}) {
 '      ' + cta + '\n' +
 '    </div>\n' +
 '    <div style="text-align:center;color:#9a9a9a;font-size:12px;line-height:1.7;margin-top:22px;">\n' +
-'      ' + (opts.footer || ('נשלח מ-' + brand)) + '<br>\n' +
+'      ' + (opts.footer || defaultFooter) + '<br>\n' +
 '      ' + unsub + '\n' +
 '    </div>\n' +
 '  </div>\n' +

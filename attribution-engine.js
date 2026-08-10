@@ -63,6 +63,35 @@ async function orderAlreadyCredited(shopDomain, orderId) {
   return r.rows.length > 0;
 }
 
+// Has this order stopped being a sale? A cancelled or fully refunded order is
+// money the merchant does not have, and it must not sit in their dashboard as
+// revenue the agent earned — nor be billed 5% of.
+function voidReason(order) {
+  if (order.cancelled_at) return 'cancelled';
+  const fs = String(order.financial_status || '').toLowerCase();
+  if (fs === 'refunded' || fs === 'voided') return fs;
+  return null;
+}
+
+// Take back a credit. Delegated to billing-engine because the interesting half
+// is the billing side — whether we already charged for it, and therefore
+// whether we now owe the merchant a credit.
+async function reverseCredit(shopDomain, orderId, why) {
+  try {
+    const r = await db.query(
+      `SELECT id FROM advisor_actions
+        WHERE shop_domain=$1 AND converting_order_id=$2 AND outcome='converted'`,
+      [shopDomain, String(orderId)]);
+    if (!r.rows.length) return 0;
+    const billing = require('./billing-engine');
+    for (const row of r.rows) await billing.reverseAction(shopDomain, row.id, why);
+    return r.rows.length;
+  } catch (e) {
+    console.error('[attribution] reverseCredit:', e.message);
+    return 0;
+  }
+}
+
 function buildBuyerName(order) {
   const name = (
     (order.customer ? `${order.customer.first_name || ""} ${order.customer.last_name || ""}`.trim() : "") ||
@@ -75,9 +104,25 @@ function buildBuyerName(order) {
 
 // Try to close exactly one pending action for a single order.
 // Returns { closed: bool, amount, via } describing what happened.
+//
+// This function CREDITS. It does not bill. Billing is a separate sweep
+// (billing-engine.sweepUnbilled) that runs off the state this leaves behind —
+// see the long note at the top of billing-engine.js for why the two were split.
 async function attributeOrder(shopDomain, order) {
   await ensureOrderColumn();
   const orderId = order.id != null ? String(order.id) : (order.order_id != null ? String(order.order_id) : null);
+
+  // An order can stop being a sale after we credited it. The 5-minute scan uses
+  // updated_at_min, so a cancellation or a refund brings the order back through
+  // here — which makes this the natural place to take the credit back.
+  if (orderId) {
+    const void_ = voidReason(order);
+    if (void_) {
+      const undone = await reverseCredit(shopDomain, orderId, void_);
+      if (undone) console.log(`↩️  [Attribution] order ${orderId} ${void_} — credit reversed`);
+      return { closed: false, voided: void_, reversed: undone };
+    }
+  }
 
   // GUARD: if this exact order already credited an action, never credit it again.
   // This stops one sale from being counted twice when the same customer got two
@@ -192,7 +237,7 @@ async function runAttribution(shopDomain = SHOP) {
     return { ok: false, reason: "no_token" };
   }
   const sinceDate = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  let scanned = 0, closed = 0, totalAmount = 0;
+  let scanned = 0, closed = 0, totalAmount = 0, reversed = 0;
   const breakdown = { coupon: 0, draft_order: 0, link_click: 0 };
 
   try {
@@ -205,34 +250,18 @@ async function runAttribution(shopDomain = SHOP) {
     for (const order of orders) {
       scanned++;
       const r = await attributeOrder(shopDomain, order);
+      if (r.reversed) reversed += r.reversed;
       if (r.closed) {
         closed++;
         totalAmount += r.amount || 0;
         if (breakdown[r.via] != null) breakdown[r.via]++;
 
-        // BILL FOR IT. This is the only place a charge is ever raised, and it is
-        // raised only for a sale we could PROVE — a redeemed coupon, an
-        // agent-built cart, or a tracked click followed by a purchase. The
-        // charge is keyed on the action id, and billing-engine claims that key
-        // in Postgres before calling Shopify, so a rerun of this scan (it runs
-        // every 5 minutes) can never bill the same sale twice.
+        // NOT billed here. It used to be, and that is precisely why the app
+        // collected nothing: the orders/create webhook closes almost every sale
+        // before this scan sees it, so this branch — the only one that billed —
+        // never ran. billing-engine.sweepUnbilled() now bills off the state we
+        // leave behind, whichever path wrote it.
         //
-        // Never throws into the attribution loop: a billing problem must not
-        // stop sales being credited to the merchant's dashboard.
-        try {
-          const billing = require('./billing-engine');
-          const res = await billing.recordCommission(shopDomain, {
-            actionId: r.actionId,
-            attributedRevenue: r.amount,
-            description: `${Math.round(billing.COMMISSION_RATE * 100)}% of an attributed sale (${r.via})`
-          });
-          if (res.ok) console.log(`💳 [billing] ${shopDomain} charged ${res.amount} for action ${r.actionId}`);
-          else if (res.skipped && res.skipped !== 'already_billed') {
-            console.log(`[billing] not charged (${res.skipped}) for action ${r.actionId}`);
-          }
-        } catch (e) {
-          console.error('[billing] recordCommission failed:', e.message);
-        }
         // Notify the merchant in real time that the agent converted a sale.
         try {
           const push = require('./push-engine');
@@ -248,11 +277,11 @@ async function runAttribution(shopDomain = SHOP) {
         } catch (e) { /* never let a push failure break attribution */ }
       }
     }
-    console.log(`🔁 [Attribution] scanned ${scanned} orders, closed ${closed}, +${Math.round(totalAmount)}₪`,
+    console.log(`🔁 [Attribution] scanned ${scanned} orders, closed ${closed}, reversed ${reversed}, +${Math.round(totalAmount)}₪`,
       JSON.stringify(breakdown));
     // After closing what we can, retire pending actions that are past the 3-day window.
     const expired = await expireOldActions(shopDomain);
-    return { ok: true, scanned, closed, total_amount: Math.round(totalAmount), breakdown, expired };
+    return { ok: true, scanned, closed, reversed, total_amount: Math.round(totalAmount), breakdown, expired };
   } catch (err) {
     console.error("⚠️  [Attribution] run failed:", err.message);
     return { ok: false, error: err.message };
@@ -286,4 +315,4 @@ async function expireOldActions(shopDomain) {
   }
 }
 
-module.exports = { runAttribution, attributeOrder, expireOldActions };
+module.exports = { runAttribution, attributeOrder, expireOldActions, voidReason, reverseCredit };
