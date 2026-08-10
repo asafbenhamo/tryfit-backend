@@ -80,14 +80,25 @@ async function getSettings(shop) {
   if (hit && Date.now() - hit.at < TTL) return hit.settings;
 
   await ensureTable();
-  let row = null;
+  let row = null, read = true;
   try {
     const r = await db.query(`SELECT * FROM store_settings WHERE shop_domain=$1`, [shop]);
     row = r.rows[0] || null;
-  } catch (e) { /* defaults */ }
+  } catch (e) {
+    // "the database is down" and "this shop has no row yet" both used to end up
+    // here as an identical bag of defaults. They are not the same: the defaults
+    // include a TIMEZONE, and handing a US store Asia/Jerusalem because a query
+    // failed means messaging its customers at two in the morning. Flag it so
+    // callers that care about the difference can tell.
+    read = false;
+    console.error('[settings] read failed for', shop, '-', e.message);
+  }
 
   const s = {
     shop,
+    // false = these values are guesses because the read failed, not the store's
+    // actual configuration.
+    resolved: read,
     brand: (row && row.brand) || legacyBrand(shop),
     language: (row && row.language) || DEFAULTS.language,
     currency: (row && row.currency) || DEFAULTS.currency,
@@ -104,7 +115,9 @@ async function getSettings(shop) {
     timezone: validTz(row && row.timezone) || DEFAULTS.timezone,
     whatsapp_enabled: (row && row.whatsapp_enabled != null) ? row.whatsapp_enabled : DEFAULTS.whatsapp_enabled
   };
-  cache.set(shop, { at: Date.now(), settings: s });
+  // Never cache a failed read — the next call should try again rather than
+  // serve guesses for a minute.
+  if (read) cache.set(shop, { at: Date.now(), settings: s });
   return s;
 }
 
@@ -138,14 +151,24 @@ async function updateSettings(shop, patch = {}) {
 // reset at 5 PM local, mid-afternoon, and can send 1000 in one working day.
 // Both the campaign engine and the message queue must consult this.
 // ---------------------------------------------------------------------------
+// Rows in advisor_actions that are NOT a message to a customer, and so must not
+// eat the customer-outreach budget:
+//   daily_report / morning_report — the app's own summaries, sent to the MERCHANT
+//   holdout                       — a control-group row, which by definition was
+//                                   never contacted
+// Counting these meant a store's 500 was quietly spent on its own bookkeeping,
+// and the last real customers of the day were deferred to tomorrow for nothing.
+const NON_OUTREACH = ['daily_report', 'morning_report', 'holdout'];
+
 async function outreachesToday(shop) {
   try {
     const s = await getSettings(shop);
     const r = await db.query(
       `SELECT COUNT(*)::int AS n FROM advisor_actions
        WHERE shop_domain=$1
+         AND action_type <> ALL($3::text[])
          AND created_at >= date_trunc('day', NOW() AT TIME ZONE $2) AT TIME ZONE $2`,
-      [shop, s.timezone]);
+      [shop, s.timezone, NON_OUTREACH]);
     return (r.rows[0] && r.rows[0].n) || 0;
   } catch (e) { return 0; }
 }

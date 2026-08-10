@@ -627,7 +627,7 @@ app.get("/api/autopilot", async (req, res) => {
   if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
   try {
     const s = await storeSettings.getSettings(shop);
-    const [runs, cap, earned] = await Promise.all([
+    const [runs, cap, earned, queued] = await Promise.all([
       autopilot.recentRuns(shop, 7),
       storeSettings.remainingToday(shop),
       // What the agent has brought in, reported the way every marketing
@@ -642,9 +642,18 @@ app.get("/api/autopilot", async (req, res) => {
            FROM advisor_actions
           WHERE shop_domain=$1 AND action_type <> 'holdout'`,
         [shop]
+      ).catch(() => ({ rows: [{}] })),
+      // What is still waiting to go out, and what gave up trying. The merchant
+      // could not see either: a message that exhausted its retries just vanished.
+      db.query(
+        `SELECT COUNT(*) FILTER (WHERE status='pending')::int AS pending,
+                COUNT(*) FILTER (WHERE status='failed'
+                  AND created_at >= NOW() - INTERVAL '7 days')::int AS failed
+           FROM scheduled_messages WHERE shop_domain=$1`, [shop]
       ).catch(() => ({ rows: [{}] }))
     ]);
     const e = (earned.rows && earned.rows[0]) || {};
+    const q = (queued.rows && queued.rows[0]) || {};
     res.json({
       ok: true,
       mode: s.autopilot,
@@ -655,6 +664,11 @@ app.get("/api/autopilot", async (req, res) => {
       daily_cap: s.daily_cap,
       today: cap,
       runs: runs.runs || [],
+      queue: { pending: q.pending || 0, failed: q.failed || 0 },
+      // Day one: the backfill is still running and there is genuinely nothing to
+      // show yet. Without this the home screen renders blank, which reads as
+      // "broken" rather than "still analysing your store".
+      warming_up: (runs.runs || []).length === 0 && !(e.outreaches > 0),
       earned: {
         total: Math.round(parseFloat(e.total || 0)),
         this_month: Math.round(parseFloat(e.this_month || 0)),
@@ -675,7 +689,42 @@ app.post("/api/autopilot", express.json(), async (req, res) => {
   const r = await storeSettings.updateSettings(shop, { autopilot: on ? "full" : "approve" });
   if (!r.ok) return res.status(500).json(r);
   console.log(`🤖 [autopilot] ${shop} -> ${on ? "FULL (acts alone)" : "approve (asks first)"}`);
-  res.json({ ok: true, on, mode: r.settings.autopilot });
+
+  // Switching it OFF has to mean off NOW. It used to mean "do not start again
+  // tomorrow": today's run kept going to the end and everything already queued
+  // kept arriving for days, which from the merchant's side is indistinguishable
+  // from the switch being broken.
+  let stopped = null;
+  if (!on) {
+    autopilot.requestStop(shop);
+    stopped = await messageQueue.cancelPending(shop).catch(() => ({ cancelled: 0 }));
+  } else {
+    autopilot.clearStop(shop);
+  }
+  res.json({ ok: true, on, mode: r.settings.autopilot, cancelled_pending: stopped ? stopped.cancelled : 0 });
+});
+
+// Stop everything in flight WITHOUT changing the mode — the panic button for a
+// merchant who sees a campaign going out and wants it to stop right now.
+app.post("/api/autopilot/stop", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    autopilot.requestStop(shop);
+    const q = await messageQueue.cancelPending(shop);
+    // Anything mid-flight in the campaign engine stops too.
+    let campaigns = 0;
+    try {
+      const ce = require("./campaign-engine");
+      for (const c of ce.listActiveCampaigns(shop) || []) {
+        if (c.status === 'running') { ce.stopCampaign(c.id, shop); campaigns++; }
+      }
+    } catch (e) { /* best effort */ }
+    console.log(`🛑 [autopilot] ${shop} STOP: ${q.cancelled} queued cancelled, ${campaigns} campaign(s) halted`);
+    res.json({ ok: true, cancelled_pending: q.cancelled, campaigns_stopped: campaigns });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: safeError(e) });
+  }
 });
 
 // What the agent learned: per-segment / offer / channel performance, so the
@@ -1310,13 +1359,24 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
     const combine = (b.combine === 'no' || b.combine === 'false') ? false : true;
     const days_valid = b.days_valid ? parseInt(b.days_valid) : 2;
 
+    // The daily smart-outreach cap applies here too. It did not, so this one
+    // endpoint could message the entire customer list in a single call while
+    // every other path in the app respected the merchant's limit.
+    let capLeft = Infinity;
+    try { capLeft = (await storeSettings.remainingToday(shop)).remaining; } catch (e) { /* unlimited */ }
+    if (capLeft <= 0) {
+      const st = await storeSettings.remainingToday(shop).catch(() => ({ cap: 0 }));
+      return res.json({ ok: false, error: `נגמרה מכסת הפניות להיום (${st.cap}). נסה שוב מחר.` });
+    }
+
     // Build recipients: each gets a personal coupon, and template body params
     // filled in the order declared by tpl.body_vars (e.g. ['name','coupon','discount']).
     const recipients = [];
-    let skippedOptout = 0;
+    let skippedOptout = 0, skippedCap = 0;
     for (const c of segment) {
       const phone = c.phone || null;
       if (!phone) continue; // auto-send is WhatsApp only
+      if (recipients.length >= capLeft) { skippedCap++; continue; }
       // Opt-out: never include a customer who asked to stop.
       if (await compliance.isOptedOut(shop, { email: c.email, phone })) { skippedOptout++; continue; }
       const name = c.name || (c.first_name || '');
@@ -1343,23 +1403,49 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
         to: phone,
         params,
         urlSuffix: coupon || '',
+        email: c.email || null,
         meta: { campaign_type: b.campaign_type || 'campaign', customer_name: name, coupon }
       });
-
-      // Log the action for attribution (mirror of manual path).
-      await db.query(
-        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [shop, b.campaign_type || 'campaign', c.email || null, phone,
-         JSON.stringify({ customer_name: name, auto: true, template: templateName }), coupon]
-      ).catch(e => console.error("auto-campaign log:", e.message));
+      // NOT logged yet — see below.
     }
 
     if (recipients.length === 0) return res.json({ ok: false, error: "אין לקוחות עם טלפון" });
 
+    // The window is rechecked immediately before sending. Building the batch
+    // costs a Shopify call per recipient (each gets their own coupon), so a
+    // large segment can take minutes — long enough to start at 20:25 and be
+    // texting people at 20:40.
+    if (!(await compliance.isWithinWorkingHours(shop))) {
+      const st = await compliance.workingHoursStatus(shop);
+      return res.json({ ok: false, error: `חלון השליחה נסגר בזמן ההכנה (${st.window} ${st.timezone}). לא נשלח כלום.` });
+    }
+
     const result = await whatsappSender.sendTemplateBatch(shop, templateName, recipients, {});
     if (!result.ok && result.reason === 'not_configured') {
       return res.status(400).json({ ok: false, error: "החנות לא מוגדרת" });
+    }
+
+    // Log ONLY the customers who were actually messaged, and only now.
+    //
+    // This used to be written while building the batch, before a single message
+    // went out. sendTemplateBatch stops the moment the store runs out of
+    // WhatsApp credits, so everyone after that point was recorded as contacted
+    // without being contacted: they counted against the daily cap, sat in the
+    // cooldown that stops us contacting them again, and waited in the
+    // attribution window for a purchase that no message ever asked for. The
+    // merchant's own dashboard told them the agent had reached people it never
+    // reached.
+    const delivered = new Map();
+    for (const r of (result.results || [])) if (r.ok) delivered.set(r.to, true);
+    for (const r of recipients) {
+      if (!delivered.get(r.to)) continue;
+      await db.query(
+        `INSERT INTO advisor_actions (shop_domain, action_type, target_email, target_phone, details, coupon_code)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [shop, b.campaign_type || 'campaign', r.email || null, r.to,
+         JSON.stringify({ customer_name: r.meta.customer_name, auto: true, template: templateName,
+                          channel: 'whatsapp' }), r.meta.coupon]
+      ).catch(e => console.error("auto-campaign log:", e.message));
     }
     const balance = await creditsEngine.getBalance(shop);
     res.json({
@@ -1367,6 +1453,7 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
       sent: result.sent || 0,
       failed: result.failed || 0,
       skipped_optout: skippedOptout,
+      skipped_daily_cap: skippedCap,
       stopped_no_credits: !!result.stopped_no_credits,
       balance
     });

@@ -136,6 +136,30 @@ function buildMessage(cust, move, settings, lang) {
 // ---------------------------------------------------------------------------
 // One store's daily run.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// THE STOP BUTTON.
+//
+// An autonomous agent that cannot be interrupted is not one a merchant will
+// leave switched on. Turning autopilot off used to mean "do not start again
+// tomorrow" — today's run carried on to the end, and everything it had already
+// queued kept arriving for days. Stopping now means all three: this run halts
+// between segments, nothing further is queued, and messages already waiting are
+// cancelled.
+//
+// In memory deliberately. It only has to outlive a single run, and a run lives
+// in one process; a redeploy ends the run anyway.
+const stopFlags = new Map();          // shop -> timestamp
+const STOP_TTL_MS = 30 * 60 * 1000;
+
+function requestStop(shop) { stopFlags.set(shop, Date.now()); return { ok: true }; }
+function clearStop(shop) { stopFlags.delete(shop); }
+function stopRequested(shop) {
+  const at = stopFlags.get(shop);
+  if (!at) return false;
+  if (Date.now() - at > STOP_TTL_MS) { stopFlags.delete(shop); return false; }
+  return true;
+}
+
 async function runForShop(shop, opts = {}) {
   const settings = await storeSettings.getSettings(shop);
   if (settings.autopilot !== 'full' && !opts.force) {
@@ -153,6 +177,11 @@ async function runForShop(shop, opts = {}) {
 
   const runId = opts.runId || await claimRun(shop, localDate);
   if (!runId) return { ok: true, skipped: 'already_ran_today' };
+  // A stop asked for before this run began applies to it.
+  if (stopRequested(shop)) {
+    await finishRun(runId, { status: 'skipped', details: { reason: 'stopped_by_merchant' } });
+    return { ok: true, skipped: 'stopped_by_merchant' };
+  }
 
   const summary = {
     shop, local_date: localDate, timezone: tz,
@@ -196,6 +225,15 @@ async function runForShop(shop, opts = {}) {
 
     for (const seg of ranked) {
       if (spent >= budget) break;
+      // The merchant asked it to stop. Checked between segments, which is the
+      // granularity that matters: a segment is one campaign launch, and there
+      // was previously no way at all to interrupt a run once it began — turning
+      // autopilot off only affected TOMORROW.
+      if (stopRequested(shop)) {
+        summary.stopped = true;
+        console.log(`🛑 [autopilot] ${shop} stopped by merchant after ${spent} outreach(es)`);
+        break;
+      }
 
       const move = policy.decide(stats, seg.key, {
         allowedChannels: ['email'],   // offer only; the router assigns the channel
@@ -392,5 +430,6 @@ async function recentRuns(shop, limit = 7) {
 
 module.exports = {
   ensureTable, runForShop, tick, recentRuns, buildMessage, renderForCustomer,
+  requestStop, clearStop, stopRequested,
   RUN_HOUR, MAX_SHARE_PER_RUN, MAX_SEGMENTS_PER_RUN
 };

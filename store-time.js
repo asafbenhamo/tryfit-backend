@@ -17,6 +17,9 @@
 // ============================================================================
 
 const DEFAULT_TZ = 'Asia/Jerusalem';   // legacy default: the original pilot shop
+// Returned when we genuinely do not know a shop's zone. Deliberately not a real
+// zone: nothing may treat it as one and send on the strength of it.
+const UNKNOWN_TZ = '__unknown__';
 
 // The send window, in the store's local time. Deliberately narrower than what
 // either jurisdiction allows, so we are never near the line:
@@ -114,6 +117,10 @@ function zonedTimeToUtc(tz, { year, month, day, hour, minute = 0 }) {
 // The send window.
 // ---------------------------------------------------------------------------
 function isWithinSendWindow(tz, when) {
+  // An unknown zone is not a reason to fall back to a default one and send
+  // anyway — the whole point of the window is that it is the RECIPIENT's
+  // evening, and a guessed zone can put that at 2am. No zone, no send.
+  if (tz === null || tz === UNKNOWN_TZ) return false;
   const p = partsIn(tz, when);
   if (p.hour < SEND_START_HOUR) return false;
   if (p.hour > SEND_END_HOUR) return false;
@@ -155,18 +162,35 @@ function nextSendAt(tz, hour, daysFromNow = 0, minLeadMs = 10 * 60 * 1000) {
 // Shop-aware convenience. Kept async + lazy-required so this module stays
 // dependency-free for callers that already know the timezone.
 // ---------------------------------------------------------------------------
+// The last zone we successfully read for each shop. A transient database
+// failure should not change what time of day a store's customers are contacted.
+const lastKnownTz = new Map();
+
 async function tzForShop(shop) {
   try {
     const settings = require('./store-settings');
     const s = await settings.getSettings(shop);
-    return normalizeTz(s && s.timezone);
+    // resolved === false means the settings read failed and every value in `s`
+    // is a default — including a timezone that has nothing to do with this shop.
+    if (s && s.resolved === false) {
+      const known = lastKnownTz.get(shop);
+      if (known) return known;
+      console.error(`[time] no timezone for ${shop} and settings unreadable — refusing to guess`);
+      return UNKNOWN_TZ;
+    }
+    const tz = normalizeTz(s && s.timezone);
+    lastKnownTz.set(shop, tz);
+    return tz;
   } catch (e) {
-    return DEFAULT_TZ;
+    const known = lastKnownTz.get(shop);
+    if (known) return known;
+    console.error(`[time] tzForShop(${shop}) failed and nothing cached:`, e.message);
+    return UNKNOWN_TZ;
   }
 }
 
 module.exports = {
-  DEFAULT_TZ,
+  DEFAULT_TZ, UNKNOWN_TZ,
   SEND_START_HOUR, SEND_END_HOUR, SEND_END_MIN,
   isValidTz, normalizeTz, fromShopifyShop,
   partsIn, hourIn, dateKeyIn, zonedTimeToUtc,

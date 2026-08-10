@@ -40,10 +40,21 @@ async function ensureTable() {
       created_at TIMESTAMPTZ DEFAULT NOW(),
       sent_at TIMESTAMPTZ, error TEXT
     )`).catch(e => console.error('[queue] table:', e.message));
+  await db.query(`ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0`).catch(() => {});
   await db.query(`CREATE INDEX IF NOT EXISTS idx_sched_due
     ON scheduled_messages (status, send_at)`).catch(() => {});
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_sched_shop
+    ON scheduled_messages (shop_domain, status)`).catch(() => {});
   tableReady = true;
 }
+
+// A send that fails is not necessarily a send that cannot happen. The provider
+// rate-limited us, the mail API had a bad minute, Shopify was slow building the
+// coupon. Marking those 'failed' on the first try — which is what this did —
+// threw the message away silently: nothing ever re-read a failed row, and the
+// merchant was never told the customer had not been reached.
+const MAX_SEND_ATTEMPTS = 3;
+const RETRY_BACKOFF_MIN = [12, 45];   // minutes before attempt 2 and attempt 3
 
 // Compute a legal send time for THIS SHOP: the next occurrence of `hour` in the
 // shop's own timezone, at least 10 minutes out, clamped into the send window.
@@ -118,7 +129,7 @@ async function processDue(limit = 60) {
      FETCH FIRST ${parseInt(limit)} ROWS ONLY`
   ).catch(e => { console.error('[queue] fetch due:', e.message); return { rows: [] }; });
 
-  let sent = 0, skipped = 0, failed = 0, deferred = 0, outOfHours = 0;
+  let sent = 0, skipped = 0, failed = 0, deferred = 0, outOfHours = 0, retried = 0;
   const storeSettings = require('./store-settings');
   const capCache = {}; // shop -> remaining today (fetched once per tick)
   const tzCache = {};  // shop -> IANA zone (fetched once per tick)
@@ -258,19 +269,59 @@ async function processDue(limit = 60) {
       }
 
       if (ok) { await mark(m.id, 'sent', new Date(), null); sent++; capCache[m.shop_domain]--; }
+      else if (await retryLater(m, err)) { retried++; }
       else { await mark(m.id, 'failed', null, err); failed++; }
 
       await new Promise(r => setTimeout(r, 400)); // pace
     } catch (e) {
-      await mark(m.id, 'failed', null, e.message).catch(() => {});
-      failed++;
+      if (await retryLater(m, e.message).catch(() => false)) retried++;
+      else { await mark(m.id, 'failed', null, e.message).catch(() => {}); failed++; }
     }
   }
 
-  if (sent + skipped + failed + deferred + outOfHours > 0) {
-    console.log(`📬 [queue] processed: sent=${sent} skipped=${skipped} failed=${failed} deferred=${deferred} out_of_hours=${outOfHours}`);
+  if (sent + skipped + failed + deferred + outOfHours + retried > 0) {
+    console.log(`📬 [queue] processed: sent=${sent} skipped=${skipped} failed=${failed} retrying=${retried} deferred=${deferred} out_of_hours=${outOfHours}`);
   }
-  return { sent, skipped, failed, deferred, out_of_hours: outOfHours };
+  if (failed > 0) {
+    console.error(`⚠️  [queue] ${failed} message(s) gave up after ${MAX_SEND_ATTEMPTS} attempts — customers not reached`);
+  }
+  return { sent, skipped, failed, retrying: retried, deferred, out_of_hours: outOfHours };
+}
+
+// Give a failed send another go, later. Returns true if it was rescheduled,
+// false when it has run out of attempts and should be recorded as failed.
+async function retryLater(m, err) {
+  const attempts = (m.attempts || 0) + 1;
+  if (attempts >= MAX_SEND_ATTEMPTS) return false;
+  const wait = RETRY_BACKOFF_MIN[attempts - 1] || 45;
+  const when = new Date(Date.now() + wait * 60 * 1000);
+  const r = await db.query(
+    `UPDATE scheduled_messages
+        SET attempts=$2, send_at=$3, error=$4, status='pending'
+      WHERE id=$1`,
+    [m.id, attempts, when, err ? String(err).slice(0, 300) : null]
+  ).catch(e => { console.error('[queue] retryLater:', e.message); return null; });
+  if (!r) return false;
+  console.log(`[queue] #${m.id} failed (${String(err).slice(0, 60)}) — retry ${attempts + 1}/${MAX_SEND_ATTEMPTS} in ${wait}m`);
+  return true;
+}
+
+// Cancel messages that have not gone out yet. This is what "stop" means for
+// anything already queued: the agent can be switched off, but until now the
+// messages it had already scheduled kept arriving for days afterwards, which
+// from the merchant's side looks exactly like the off switch not working.
+async function cancelPending(shop, { campaignId = null, kind = null } = {}) {
+  await ensureTable();
+  const where = [`shop_domain=$1`, `status='pending'`];
+  const params = [shop];
+  if (campaignId) { params.push(campaignId); where.push(`campaign_id=$${params.length}`); }
+  if (kind) { params.push(kind); where.push(`kind=$${params.length}`); }
+  const r = await db.query(
+    `UPDATE scheduled_messages SET status='cancelled', error='cancelled by merchant'
+      WHERE ${where.join(' AND ')} RETURNING id`, params
+  ).catch(e => { console.error('[queue] cancelPending:', e.message); return { rows: [] }; });
+  if (r.rows.length) console.log(`🛑 [queue] cancelled ${r.rows.length} pending message(s) for ${shop}`);
+  return { ok: true, cancelled: r.rows.length };
 }
 
 async function mark(id, status, sentAt, error) {
@@ -300,4 +351,5 @@ function startScheduler() {
   });
 }
 
-module.exports = { ensureTable, enqueue, processDue, preferredHours, computeSendAt, pendingStats, startScheduler };
+module.exports = { ensureTable, enqueue, processDue, preferredHours, computeSendAt, pendingStats,
+                   startScheduler, cancelPending, retryLater, MAX_SEND_ATTEMPTS, RETRY_BACKOFF_MIN };

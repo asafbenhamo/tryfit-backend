@@ -1220,6 +1220,12 @@
       'ap.today': 'היום: {used} מתוך {cap} פניות',
       'ap.lastRun': 'הרצה אחרונה ({date}): {contacted} פניות · {rejected} נפסלו כלא-מספיק-אישיות',
       'ap.noRuns': 'עוד לא הייתה הרצה אוטונומית.',
+      'ap.warmingUp': 'הסוכן עדיין לומד את החנות. המספרים הראשונים יופיעו אחרי הפנייה הראשונה.',
+      'ap.queued': '{n} הודעות ממתינות לשליחה.',
+      'ap.queueFailed': '{n} הודעות לא הצליחו להישלח בשבוע האחרון.',
+      'ap.stopNow': 'עצור הכל עכשיו',
+      'ap.confirmStop': 'לעצור את הסוכן עכשיו? ההרצה הנוכחית תיעצר וכל ההודעות שממתינות בתור יבוטלו. הודעות שכבר נשלחו לא ניתן להחזיר.',
+      'ap.stopped': 'נעצר. {n} הודעות שהמתינו בתור בוטלו.',
       'ap.earned': 'הכנסתי לך עד היום: {amount}',
       'ap.earnedMonth': 'מתוכם החודש: {amount}',
       'ap.record': '{outreaches} פניות · {conversions} נסגרו במכירה',
@@ -1693,6 +1699,12 @@
       'ap.today': 'Today: {used} of {cap} outreaches',
       'ap.lastRun': 'Last run ({date}): {contacted} sent · {rejected} rejected as not personal enough',
       'ap.noRuns': 'No autonomous run yet.',
+      'ap.warmingUp': 'The agent is still learning your store. The first numbers appear after its first outreach.',
+      'ap.queued': '{n} messages waiting to go out.',
+      'ap.queueFailed': '{n} messages could not be delivered in the last 7 days.',
+      'ap.stopNow': 'Stop everything now',
+      'ap.confirmStop': 'Stop the agent now? The current run halts and every message still waiting in the queue is cancelled. Messages already sent cannot be recalled.',
+      'ap.stopped': 'Stopped. {n} queued messages were cancelled.',
       'ap.earned': 'Earned for you so far: {amount}',
       'ap.earnedMonth': 'This month: {amount}',
       'ap.record': '{outreaches} outreaches · {conversions} closed a sale',
@@ -2804,18 +2816,28 @@
     const last = (d.runs || []).find(r => r.status === 'done');
 
     const e = d.earned || {};
+    const q = d.queue || {};
     let meta = '<div class="ap-meta">';
-    // The headline: money the agent brought in, on its own record.
-    meta += '<b>' + esc(t('ap.earned', { amount: money(e.total || 0) })) + '</b><br>';
-    if (e.this_month) meta += esc(t('ap.earnedMonth', { amount: money(e.this_month) })) + '<br>';
-    if (e.outreaches) meta += esc(t('ap.record', { outreaches: e.outreaches, conversions: e.conversions || 0 })) + '<br>';
+    if (d.warming_up) {
+      // Day one. There is nothing to report yet and saying so is far better than
+      // a card full of zeroes, which reads as "this does not work".
+      meta += esc(t('ap.warmingUp')) + '<br>';
+    } else {
+      // The headline: money the agent brought in, on its own record.
+      meta += '<b>' + esc(t('ap.earned', { amount: money(e.total || 0) })) + '</b><br>';
+      if (e.this_month) meta += esc(t('ap.earnedMonth', { amount: money(e.this_month) })) + '<br>';
+      if (e.outreaches) meta += esc(t('ap.record', { outreaches: e.outreaches, conversions: e.conversions || 0 })) + '<br>';
+    }
     meta += esc(t('ap.today', { used: (d.today && d.today.used) || 0, cap: (d.today && d.today.cap) || d.daily_cap })) + '<br>';
     meta += esc(t('ap.timezone', { tz: d.timezone || '' }));
+    if (q.pending) meta += '<br>' + esc(t('ap.queued', { n: q.pending }));
+    // A message that ran out of retries used to disappear without a word.
+    if (q.failed) meta += '<br><span style="color:var(--danger,#c0392b)">' + esc(t('ap.queueFailed', { n: q.failed })) + '</span>';
     if (last) {
       meta += '<br>' + esc(t('ap.lastRun', {
         date: last.local_date, contacted: last.contacted, rejected: last.rejected_not_smart
       }));
-    } else if (on) {
+    } else if (on && !d.warming_up) {
       meta += '<br>' + esc(t('ap.noRuns'));
     }
     meta += '</div>';
@@ -2830,6 +2852,14 @@
       + esc(t(on ? 'ap.turnOff' : 'ap.turnOn')) + '</button>'
       + '<button class="ap-link" id="apPolicyBtn">' + esc(t('ap.explain')) + '</button>'
       + '<button class="ap-link" id="apHistoryBtn" style="margin-inline-start:14px">' + esc(t('ap.history')) + '</button>'
+      // The panic button. Only shown when there is actually something to stop.
+      // Separate from the on/off switch on purpose: "halt what is happening
+      // right now" and "do not do this from tomorrow" are different requests,
+      // and a merchant watching messages go out wants the first one.
+      + ((on || q.pending)
+          ? '<button class="ap-link" id="apStopBtn" style="margin-inline-start:14px;color:var(--danger,#c0392b)">'
+            + esc(t('ap.stopNow')) + '</button>'
+          : '')
       + '</div>';
 
     const btn = document.getElementById('apToggleBtn');
@@ -2838,6 +2868,28 @@
     if (pol) pol.onclick = showPolicy;
     const hist = document.getElementById('apHistoryBtn');
     if (hist) hist.onclick = showAgentHistory;
+    const stop = document.getElementById('apStopBtn');
+    if (stop) stop.onclick = stopEverything;
+  }
+
+  // Halt the current run and cancel everything already queued. Leaves the mode
+  // alone — the merchant can decide separately whether to switch the agent off.
+  async function stopEverything() {
+    if (!confirm(t('ap.confirmStop'))) return;
+    const btn = document.getElementById('apStopBtn');
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch('/api/autopilot/stop', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+      const r = await res.json();
+      if (!r.ok) { alert(r.error || t('ap.error')); if (btn) btn.disabled = false; return; }
+      alert(t('ap.stopped', { n: r.cancelled_pending || 0 }));
+      await loadAutopilot();
+    } catch (e) {
+      alert(t('ap.error'));
+      if (btn) btn.disabled = false;
+    }
   }
 
   // The agent's work log. The card shows only the latest run, but "what has it

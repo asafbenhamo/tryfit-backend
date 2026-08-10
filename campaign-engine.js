@@ -153,8 +153,21 @@ async function runCampaign(id, shop, segment, template, channels) {
 
   // DAILY CAP: how many smart outreaches are left today. When we hit the cap,
   // remaining customers are QUEUED for tomorrow (not dropped) — graceful pacing.
-  let capLeft = Infinity;
-  try { capLeft = (await storeSettings.remainingToday(shop)).remaining; } catch (e) { /* unlimited */ }
+  //
+  // Re-read periodically rather than trusting one snapshot. The snapshot is a
+  // per-campaign local counter, so two campaigns running at once each believed
+  // it had the whole budget and the shop sent double what the merchant set —
+  // and the autopilot runs alongside merchant-launched campaigns by design.
+  // Re-reading every CAP_RECHECK_EVERY sends bounds the overshoot to that
+  // number per concurrent sender instead of a full budget each.
+  const CAP_RECHECK_EVERY = 25;
+  let capLeft = Infinity, sinceCapCheck = 0;
+  const refreshCap = async () => {
+    try { capLeft = (await storeSettings.remainingToday(shop)).remaining; }
+    catch (e) { /* leave the last known value */ }
+    sinceCapCheck = 0;
+  };
+  await refreshCap();
 
   // SMART TIMING: pre-compute each customer's personal best hour (from her own
   // order history) in ONE batched query. Sends are then queued for that hour.
@@ -204,6 +217,7 @@ async function runCampaign(id, shop, segment, template, channels) {
       // DAILY CAP (default 500/day): when today's budget is exhausted, queue this
       // customer for TOMORROW morning instead of sending now — graceful pacing,
       // nobody is dropped, and every day stays within the smart-outreach budget.
+      if (sinceCapCheck >= CAP_RECHECK_EVERY) await refreshCap();
       if (capLeft <= 0) {
         const capBody = (template.body || '')
           .replace(/\{NAME\}/g, cust.name || '')
@@ -224,7 +238,7 @@ async function runCampaign(id, shop, segment, template, channels) {
         c.log.push({ customer: cust.name || cust.email, deferred: 'daily_cap' });
         continue;
       }
-      capLeft--;
+      capLeft--; sinceCapCheck++;
 
       // Coupon: if the merchant supplied their OWN existing code (fixed_code), use it
       // for everyone exactly as requested — don't create a new one. Otherwise create a
