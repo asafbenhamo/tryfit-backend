@@ -1231,7 +1231,11 @@ app.post("/api/auth/login", express.json(), async (req, res) => {
     const pw = (req.body && req.body.password) || "";
     if (!pw) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
 
-    if (MASTER_PASSWORD && pw === MASTER_PASSWORD) {
+    // safeEqual, not ===. Every other credential check in this file already
+    // uses it; this one branch compared the PLATFORM super-admin password with
+    // a plain ===, which returns faster the earlier the first differing
+    // character is and hands an attacker the password one character at a time.
+    if (MASTER_PASSWORD && sessionAuth.safeEqual(pw, MASTER_PASSWORD)) {
       loginRecordSuccess(ip);
       let stores = [];
       try {
@@ -4014,7 +4018,9 @@ app.post("/webhooks/orders/create", express.raw({ type: "application/json" }), h
 
 // ======================
 // ONE-TIME FIX: clean bad phones + backfill last_order_date
-// Call once: /admin/fix-data?password=Ariel770%21
+// Call once, authenticated as the platform admin. (The literal admin password
+// used to be written out here as an example URL — a working credential sitting
+// in source, in git history, and in every clone of this repo.)
 // ======================
 app.get("/admin/fix-data", async (req, res) => {
   if (!isAdmin(req)) {
