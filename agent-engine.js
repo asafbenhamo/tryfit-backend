@@ -250,12 +250,19 @@ async function runTaskAuto(shop, task, segment, templateName) {
         const storeName = (shopify.getStore(shop)?.name) || (shop === 'seven770.myshopify.com' ? '770' : shop.replace('.myshopify.com',''));
         const storeUrl = shopify.getPublicDomain(shop);
         const body = tmpl.body.replace(/\{NAME\}/g, c.name || '').replace(/\{COUPON\}/g, coupon || '');
+        // `shop` ties the unsubscribe link to THIS merchant; without it the
+        // opt-out is filed against the pilot store and this merchant keeps
+        // mailing someone who asked them to stop. `language` and `fromName`
+        // stop an English store's customers getting a Hebrew, right-to-left
+        // email signed by the wrong brand.
+        const stLang = (await require('./store-settings').getSettings(shop).catch(() => ({}))).language;
+        const isEn = stLang === 'en';
         const html = mailer.buildHtmlEmail(body, {
-          brand: storeName, to: c.email,
-          cta_url: storeUrl, cta_label: 'לאתר החנות',
-          footer: `נשלח באמצעות היועץ החכם של ${storeName}`
+          brand: storeName, to: c.email, shop, language: stLang,
+          cta_url: storeUrl, cta_label: isEn ? 'Visit the store' : 'לאתר החנות',
+          footer: isEn ? `Sent by ${storeName}` : `נשלח באמצעות היועץ החכם של ${storeName}`
         });
-        const sent = await mailer.sendEmail({ to: c.email, subject: tmpl.subject, html, text: body });
+        const sent = await mailer.sendEmail({ to: c.email, subject: tmpl.subject, html, text: body, fromName: storeName });
         if (sent && sent.ok) { sentEmail++; await logAction(c, 'email', coupon); }
         else { failed++; if (priceRuleId) await shopify.deleteDiscountCode(shop, priceRuleId).catch(()=>{}); }
       } catch (e) {

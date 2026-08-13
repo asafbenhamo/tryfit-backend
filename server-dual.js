@@ -1484,8 +1484,16 @@ async function ensureCampaignResultsTable() {
       shop_domain TEXT NOT NULL,
       email TEXT,
       phone TEXT,
+      reason TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`).catch(e => console.error('message_optouts table:', e.message));
+  // This table is declared in TWO places — here, at module load, and in
+  // schema.sql, which runs later inside the listen callback. On a fresh
+  // database this one wins, and it was missing the `reason` column that
+  // compliance.addOptOut inserts into. Every opt-out therefore failed with
+  // "column reason does not exist", addOptOut returned {ok:false}, and the
+  // customer stayed on the list. Added here so both shapes agree.
+  await db.query(`ALTER TABLE message_optouts ADD COLUMN IF NOT EXISTS reason TEXT`).catch(()=>{});
   await db.query(`CREATE INDEX IF NOT EXISTS idx_optouts_shop ON message_optouts(shop_domain)`).catch(()=>{});
 }
 ensureCampaignResultsTable();
@@ -2002,6 +2010,17 @@ app.post("/api/optout/add", express.json(), async (req, res) => {
 // signed, but UNSIGNED ones are still honoured on POST: links already sitting in
 // customers' inboxes must keep working, and refusing a genuine unsubscribe is a
 // worse failure than accepting an unverified one.
+// HTML-escape. This existed only in chat.html (client side), while the
+// unsubscribe page called it server side — so every click on an unsubscribe
+// link in a marketing email threw ReferenceError and returned a 500 stack
+// trace. The page is the legally required way out of our messages, and it has
+// never once worked.
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 function unsubToken(email, shop) {
   const secret = process.env.ADMIN_PASSWORD || "unsub";
   return crypto.createHmac("sha256", secret)
@@ -3898,7 +3917,16 @@ function handleCheckoutWebhook(req, res) {
 
     res.status(200).json({ success: true });
 
-    const shopDomain = req.headers["x-shopify-shop-domain"] || "seven770.myshopify.com";
+    // Same rule as the order webhook: a payload we cannot attribute is dropped,
+    // never filed against the pilot store. This one still had the fallback, so
+    // an unattributable abandoned checkout — with a stranger's email, cart and
+    // total — was written into one specific merchant's data, where the agent
+    // then read it and messaged that person on their behalf.
+    const shopDomain = String(req.headers["x-shopify-shop-domain"] || "").toLowerCase().trim();
+    if (!isValidShopDomain(shopDomain)) {
+      console.warn("⚠️  [Webhook] checkout webhook with no usable shop domain — ignored");
+      return;
+    }
     let checkout;
     try {
       checkout = JSON.parse(rawBody.toString("utf8"));

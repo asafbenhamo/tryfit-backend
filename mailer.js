@@ -37,9 +37,13 @@ async function sendEmail({ to, subject, html, text, fromName, replyTo }) {
       },
       body: JSON.stringify({
         from: from,
-        ...(replyTo ? { reply_to: replyTo } : {}),
+        // Reply-To is the SHOP's, falling back to the platform address only
+        // when the caller does not know one. This used to spread the per-call
+        // replyTo and then overwrite it on the very next line with the global
+        // REPLY_TO -- later key wins in an object literal -- so every merchant's
+        // customer who hit Reply landed in the pilot store's inbox.
         to: Array.isArray(to) ? to : [to],
-        reply_to: REPLY_TO,
+        ...((replyTo || REPLY_TO) ? { reply_to: replyTo || REPLY_TO } : {}),
         subject,
         html: html || undefined,
         text: text || undefined

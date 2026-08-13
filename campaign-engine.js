@@ -373,7 +373,11 @@ async function runCampaign(id, shop, segment, template, channels) {
           }).then(() => { c.queued++; didSomething = true; })
             .catch(e => c.log.push({ customer: cust.email, failed: e.message }));
         } else {
-          const html = mailer.buildHtmlEmail(fullBody, { brand: BRAND, language: settings.language, to: contact.email });
+          // `shop` is what makes the unsubscribe link belong to THIS merchant. Without
+          // it the link carries no shop and no signature, and /unsubscribe files the
+          // opt-out against the pilot store -- so this merchant keeps mailing someone
+          // who asked them to stop, with this merchant as sender of record.
+          const html = mailer.buildHtmlEmail(fullBody, { brand: BRAND, language: settings.language, to: contact.email, shop });
           const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || ('הודעה מ-' + BRAND), html, text: fullBody, fromName: BRAND });
           if (sent.ok) { c.sent++; didSomething = true; }
           else { c.log.push({ customer: cust.email, failed: sent.error }); }
