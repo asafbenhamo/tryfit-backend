@@ -53,17 +53,42 @@ api_version = "2026-01"
   topics = [ "app/uninstalled" ]
   uri = "https://tryfit-backend-production.up.railway.app/webhooks/app/uninstalled"
 
-  [[webhooks.subscriptions]]
-  topics = [ "orders/create" ]
-  uri = "https://tryfit-backend-production.up.railway.app/webhooks/orders/create"
-
-  [[webhooks.subscriptions]]
-  topics = [ "checkouts/create" ]
-  uri = "https://tryfit-backend-production.up.railway.app/webhooks/checkouts/create"
-
-  [[webhooks.subscriptions]]
-  topics = [ "checkouts/update" ]
-  uri = "https://tryfit-backend-production.up.railway.app/webhooks/checkouts/update"
+  # ---------------------------------------------------------------------------
+  # BLOCKED UNTIL PROTECTED CUSTOMER DATA IS APPROVED FOR THIS APP.
+  #
+  # orders/create, checkouts/create and checkouts/update all carry customer
+  # personal data, and Shopify refuses to create an app version that subscribes
+  # to them until the app has been granted Protected Customer Data access:
+  #
+  #   Version couldn't be created.
+  #   This app is not approved to subscribe to webhook topics containing
+  #   protected customer data.
+  #
+  # That approval belongs to the APP, not the Partner account — the previous
+  # app had it, this one starts without it. Request it in the Dev Dashboard
+  # under "API access requests", then uncomment these four blocks and deploy
+  # again.
+  #
+  # Commented out rather than deleted so the correct URIs are not lost and
+  # nobody has to reconstruct them from the server later.
+  #
+  # WHAT IS DEGRADED IN THE MEANTIME: attribution falls back to the 5-minute
+  # order scan instead of closing a sale the second it happens, and abandoned
+  # checkouts are not captured at all. Nothing is broken, and nothing sends to
+  # a customer that should not — the agent simply learns about sales a few
+  # minutes late and cannot offer cart recovery.
+  #
+  # [[webhooks.subscriptions]]
+  # topics = [ "orders/create" ]
+  # uri = "https://tryfit-backend-production.up.railway.app/webhooks/orders/create"
+  #
+  # [[webhooks.subscriptions]]
+  # topics = [ "checkouts/create" ]
+  # uri = "https://tryfit-backend-production.up.railway.app/webhooks/checkouts/create"
+  #
+  # [[webhooks.subscriptions]]
+  # topics = [ "checkouts/update" ]
+  # uri = "https://tryfit-backend-production.up.railway.app/webhooks/checkouts/update"
 
 [pos]
 embedded = false
@@ -74,4 +99,3 @@ embedded = false
 # `shopify app dev` runs — which would silently point the LIVE app at a tunnel
 # that stops existing the moment the laptop closes.
 automatically_update_urls_on_dev = false
-include_config_on_deploy = true
