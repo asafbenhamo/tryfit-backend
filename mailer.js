@@ -103,7 +103,10 @@ function buildHtmlEmail(bodyText, opts = {}) {
   if (opts.to && opts.shop) {
     try {
       const crypto = require('crypto');
-      const secret = process.env.ADMIN_PASSWORD || 'unsub';
+      // Same preference order as the verifier in server-dual (unsubSecrets).
+      // A dedicated key so rotating ADMIN_PASSWORD never invalidates links
+      // already sitting in customers' inboxes.
+      const secret = process.env.UNSUBSCRIBE_SECRET || process.env.ADMIN_PASSWORD || 'unsub';
       unsubSig = '&t=' + crypto.createHmac('sha256', secret)
         .update(String(opts.to).toLowerCase() + '|' + String(opts.shop), 'utf8')
         .digest('base64url').slice(0, 24);

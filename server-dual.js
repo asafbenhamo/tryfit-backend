@@ -2824,8 +2824,43 @@ function esc(s) {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+// Every secret an unsubscribe link may have been signed with, newest first.
+//
+// ADMIN_PASSWORD was doing two unrelated jobs: the platform admin credential
+// AND the signing key for unsubscribe links. Rotating it — which is exactly
+// what you do after a suspected exposure — silently invalidated the signature
+// on every unsubscribe link already sitting in customers' inboxes, and those
+// links then answered "הקישור אינו תקף". Refusing a genuine unsubscribe is a
+// legal failure, caused by a routine security action, with no warning.
+//
+// UNSUBSCRIBE_SECRET is the dedicated key. ADMIN_PASSWORD stays accepted so
+// links already in the wild keep verifying, and ADMIN_PASSWORD_PREVIOUS
+// carries them across a rotation.
+function unsubSecrets() {
+  const list = [
+    process.env.UNSUBSCRIBE_SECRET,
+    process.env.ADMIN_PASSWORD,
+    process.env.ADMIN_PASSWORD_PREVIOUS
+  ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
+  return list.length ? list : ["unsub"];
+}
+
+function unsubTokenWith(secret, email, shop) {
+  return crypto.createHmac("sha256", secret)
+    .update(String(email || "").toLowerCase() + "|" + String(shop || ""), "utf8")
+    .digest("base64url").slice(0, 24);
+}
+
+// Does this signature match ANY key we have signed with?
+function unsubSignatureOk(given, email, shop) {
+  for (const secret of unsubSecrets()) {
+    if (sessionAuth.safeEqual(given, unsubTokenWith(secret, email, shop))) return true;
+  }
+  return false;
+}
+
 function unsubToken(email, shop) {
-  const secret = process.env.ADMIN_PASSWORD || "unsub";
+  const secret = process.env.UNSUBSCRIBE_SECRET || process.env.ADMIN_PASSWORD || "unsub";
   return crypto.createHmac("sha256", secret)
     .update(String(email || "").toLowerCase() + "|" + String(shop || ""), "utf8")
     .digest("base64url").slice(0, 24);
@@ -2863,15 +2898,23 @@ app.post("/unsubscribe", express.urlencoded({ extended: false }), async (req, re
   let shop = String((req.body && req.body.shop) || req.query.shop || DEFAULT_SHOP).toLowerCase().trim();
   const given = String((req.body && req.body.t) || req.query.t || "");
 
-  // A signature proves which shop the link was issued for. Without one we still
-  // honour the request, but only against the shop named — never a wildcard.
-  if (given && !sessionAuth.safeEqual(given, unsubToken(email, shop))) {
-    return res.status(400).send(unsubPage({ title: "קישור לא תקין", body: "הקישור אינו תקף. פנה/י לחנות שממנה קיבלת את ההודעה." }));
+  // A signature proves which shop the link was issued for, and is checked
+  // against every key we have ever signed with, so a rotated ADMIN_PASSWORD
+  // does not invalidate links already in customers' inboxes.
+  //
+  // An unrecognised signature does NOT refuse the request. Turning someone away
+  // from an unsubscribe page is the one failure with legal consequences, and it
+  // would land on a person who did exactly what the email told them to do. The
+  // opt-out is honoured against the shop named — never a wildcard — and the
+  // mismatch is logged loudly so abuse is still visible.
+  const signed = given ? unsubSignatureOk(given, email, shop) : null;
+  if (given && !signed) {
+    console.warn(`[unsub] signature did not match any known key for ${email} @ ${shop} — honouring anyway`);
   }
 
   await compliance.addOptOut(shop, { email, reason: "email_link" });
   flashySync.pushUnsubscribe({ email }).catch(() => {});
-  console.log(`[unsub] ${email} opted out of ${shop}${given ? " (signed)" : " (unsigned)"}`);
+  console.log(`[unsub] ${email} opted out of ${shop} (${signed === null ? "unsigned" : signed ? "signed" : "bad signature"})`);
   res.set("Content-Type", "text/html; charset=utf-8").send(unsubPage({
     title: "הוסרת מרשימת התפוצה",
     body: "לא תקבל/י יותר הודעות שיווקיות. תודה."
