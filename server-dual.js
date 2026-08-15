@@ -851,6 +851,105 @@ app.post("/api/autopilot/run-now", express.json(), async (req, res) => {
 // but accuracy is not the same as sufficiency in every jurisdiction.
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@smartadvisor.app";
 
+// TERMS OF SERVICE.
+//
+// Shopify requires a PUBLIC terms URL for the listing. Until now the terms
+// existed only as i18n strings rendered in a modal behind the login — a
+// reviewer could not reach them — and the text said of itself that it was
+// preliminary. It also had no pricing clause at all, while the app charges 5%
+// of attributed sales and sells message credits.
+//
+// This states the commercial terms accurately and in the merchant's favour
+// where there is doubt. It still needs a lawyer: accuracy is not the same as
+// sufficiency, and nothing here is a substitute for advice in your jurisdiction.
+// What it is not is a placeholder — a merchant can read this and know exactly
+// what they are agreeing to.
+app.get("/terms", (req, res) => {
+  const pct = Math.round(billing.COMMISSION_RATE * 100);
+  res.set("Content-Type", "text/html; charset=utf-8").send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Advisor — Terms of Service</title>
+<style>
+body{font-family:system-ui,-apple-system,Arial,sans-serif;max-width:820px;margin:0 auto;padding:40px 22px;color:#23272f;line-height:1.65}
+h1{font-size:26px;margin-bottom:4px}h2{font-size:18px;margin-top:32px}
+.sub{color:#6b7280;font-size:14px;margin-top:0}
+table{border-collapse:collapse;width:100%;margin:14px 0}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid #e5e7eb;font-size:14.5px;vertical-align:top}
+th{font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:#6b7280}
+code{background:#f3f4f6;padding:1px 5px;border-radius:3px;font-size:13px}
+footer{margin-top:44px;padding-top:18px;border-top:1px solid #e5e7eb;color:#6b7280;font-size:13.5px}
+</style></head><body>
+<h1>Terms of Service</h1>
+<p class="sub">Smart Advisor for Shopify</p>
+
+<h2>1. What the app does</h2>
+<p>Smart Advisor analyses your store's customers and orders, identifies sales
+opportunities, and sends marketing messages to your customers by email, SMS and
+(optionally) WhatsApp. It can run in an approval mode, where you confirm each
+plan, or an autonomous mode, where it sends on its own within limits you set.
+You can switch modes, stop a run in progress, and cancel queued messages at any
+time from inside the app.</p>
+
+<h2>2. What you are charged</h2>
+<table>
+<tr><th>Charge</th><th>Amount</th><th>When</th></tr>
+<tr><td>Performance fee</td><td>${pct}% of attributed sales</td>
+    <td>Only for a sale the app can prove it generated: a coupon it issued was
+        redeemed, a cart it built was purchased, or a customer clicked its
+        tracked link and then bought within 3 days. Nothing is charged for any
+        other sale.</td></tr>
+<tr><td>Monthly cap</td><td>You approve it up front</td>
+    <td>The performance fee never exceeds the capped amount you agreed to in a
+        30-day window. Raising it requires your explicit approval.</td></tr>
+<tr><td>Free trial</td><td>${billing.TRIAL_DAYS} days</td><td>From installation.</td></tr>
+<tr><td>WhatsApp credits</td><td>Optional, pre-paid</td>
+    <td>WhatsApp costs money per message, so it is off unless you buy credits.
+        Email and SMS are always included at no additional per-message cost.</td></tr>
+</table>
+<p>All charges go through Shopify's billing system and appear on your Shopify
+invoice. We never see or hold a payment method. A sale that is cancelled,
+refunded, or never paid for is not charged; where a refund happens after we have
+already charged, we owe you that amount back.</p>
+
+<h2>3. Your customers' data, and your responsibility</h2>
+<p>The app messages <em>your</em> customers, with <em>you</em> as the sender of
+record. You are responsible for having a lawful basis to contact them on the
+channel used. We enforce, on your behalf: opt-outs, Shopify's own marketing
+consent flag where a customer has explicitly declined, a daily message cap, and
+sending only within legal hours in your store's own timezone. These are
+safeguards, not a substitute for your own compliance obligations.</p>
+<p>How data is handled is described in our <a href="/privacy">Privacy Policy</a>,
+which forms part of these terms.</p>
+
+<h2>4. What the app does not promise</h2>
+<p>We do not guarantee any level of sales, revenue, deliverability or
+conversion. Marketing results depend on your products, prices, customer base and
+market. The app makes decisions automatically; you remain responsible for what
+your store sends.</p>
+
+<h2>5. Ending it</h2>
+<p>You can uninstall at any time from your Shopify admin. On uninstall we stop
+all sending immediately, cancel anything queued, and revoke our access to your
+store. Data is deleted as described in the Privacy Policy. You are charged for
+attributed sales up to that point; unused WhatsApp credits are not refundable
+once purchased, and we will tell you your balance before you buy.</p>
+
+<h2>6. Changes and contact</h2>
+<p>If we change these terms materially we will tell you in the app before the
+change takes effect. Questions: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p>
+
+<footer>
+<p><strong>Legal review pending.</strong> These terms describe the product
+accurately and are current as of this deployment, but they have not yet been
+reviewed by counsel and do not yet name a legal entity or governing law. Those
+will be added before general availability.</p>
+</footer>
+</body></html>`);
+});
+
 app.get("/privacy", (req, res) => {
   res.set("Content-Type", "text/html; charset=utf-8").send(`<!DOCTYPE html>
 <html lang="en">
