@@ -748,12 +748,25 @@ app.get("/api/whoami", (req, res) => {
   const shop = resolveShop(req);
   if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
   const cfg = shopify.getStore(shop);
+  // A shop can be signed in and still be useless to us: Shopify considers the
+  // app installed, but our OAuth callback never completed, so we hold no access
+  // token and cannot read a single thing from the store.
+  //
+  // That happened here for real — an install went through while a bug in the
+  // state check was live, so Shopify recorded the app as installed and our side
+  // stored nothing. Every action then answered "גישה נדחתה", which reads as a
+  // permissions problem and is actually "we were never given the keys".
+  //
+  // Reporting it lets the app say "reconnect" instead of "access denied".
+  const connected = shopify.hasTokenForShop(shop);
   res.json({
     ok: true,
     shop,
     name: (cfg && cfg.name) || String(shop).replace(".myshopify.com", ""),
     terms_accepted: shopify.hasAcceptedTerms(shop),
-    embedded: !!(req._session && req._session.via === "shopify")
+    embedded: !!(req._session && req._session.via === "shopify"),
+    connected,
+    reconnect_url: connected ? null : `/auth?shop=${encodeURIComponent(shop)}`
   });
 });
 

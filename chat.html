@@ -953,6 +953,9 @@
       'gate.verify': 'אמת קוד',
       'gate.codeSent': 'שלחנו קוד בן 6 ספרות אל {email}. הקוד תקף ל-{minutes} דקות.',
       'gate.badCode': 'הקוד שגוי.',
+      'reconnect.title': 'צריך לחבר מחדש',
+      'reconnect.body': 'האפליקציה מותקנת ב-{store}, אבל לא קיבלנו הרשאת גישה לנתוני החנות — ולכן אי אפשר לקרוא לקוחות והזמנות. חיבור מחדש לוקח כמה שניות ולא מוחק כלום.',
+      'reconnect.cta': 'חבר מחדש',
       'gate.loginError': 'שגיאה בהתחברות: {msg}',
       'gate.noStores': 'אין חנויות רשומות עדיין.',
       'gate.manageCredits': '💬 ניהול קרדיטים',
@@ -1463,6 +1466,9 @@
       'gate.verify': 'Verify',
       'gate.codeSent': 'We sent a 6-digit code to {email}. It expires in {minutes} minutes.',
       'gate.badCode': 'That code is not right.',
+      'reconnect.title': 'Reconnect needed',
+      'reconnect.body': 'The app is installed on {store}, but we never received access to the store data, so it cannot read customers or orders. Reconnecting takes a few seconds and deletes nothing.',
+      'reconnect.cta': 'Reconnect',
       'gate.loginError': 'Sign-in error: {msg}',
       'gate.noStores': 'No stores registered yet.',
       'gate.manageCredits': '💬 Manage credits',
@@ -2122,10 +2128,31 @@
       const d = await res.json();
       if (!d.ok || !d.shop) return false;
       SELECTED_SHOP = '';
+      // Signed in, but we hold no access token for this store — Shopify thinks
+      // the app is installed and our OAuth never finished. Say that, with the
+      // one button that fixes it, instead of letting every action fail with
+      // "access denied" and leaving the merchant to guess.
+      if (d.connected === false) { showReconnect(d.name || '', d.reconnect_url); return true; }
       if (d.terms_accepted === false) showTermsGate(d.name || '');
       else enterAdvisor(d.name || '', d.shop);
       return true;
     } catch (e) { return false; }
+  }
+
+  function showReconnect(storeName, url) {
+    const g = $('gate');
+    if (!g) return;
+    g.style.display = 'flex';
+    g.innerHTML =
+      '<h2>' + esc(t('reconnect.title')) + '</h2>'
+      + '<p>' + esc(t('reconnect.body', { store: storeName || '' })) + '</p>'
+      + '<button id="reconnectBtn">' + esc(t('reconnect.cta')) + '</button>'
+      + '<div class="err" id="gateErr"></div>';
+    document.getElementById('reconnectBtn').onclick = () => {
+      // Must break out of the admin iframe: Shopify's consent screen refuses to
+      // render framed, so staying inside would show the merchant a blank panel.
+      window.top.location.href = url;
+    };
   }
 
   // Order matters: a setup link is a one-time thing and takes precedence; the
