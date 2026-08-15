@@ -46,11 +46,47 @@ const flashySync = require("./flashy-sync");
 const app = express();
 const upload = multer({ dest: "uploads/", limits: { fileSize: 5 * 1024 * 1024 } });
 app.set("trust proxy", 1);
+// CORS.
+//
+// This was origin "*" with Authorization and the two advisor auth headers on the
+// allow-list, which means any website on the internet could drive a merchant's
+// API from their browser as long as it obtained a token. The app's own client is
+// served from this same origin, so it needs no cross-origin grant at all.
+//
+// Public, unauthenticated surfaces stay open, because they are genuinely public
+// and some are embedded elsewhere: the tracked-click redirect, the unsubscribe
+// page, the privacy policy, health, and the webhook endpoints (which are called
+// server-to-server by Shopify and carry no browser origin anyway).
+const PUBLIC_CORS = /^\/(go\/|unsubscribe|privacy|terms|health|webhooks?\/|webhook\/)/;
+const ALLOWED_ORIGINS = String(process.env.CORS_ORIGINS || "")
+  .split(",").map(s => s.trim()).filter(Boolean);
+
 app.use(cors({
-  origin: "*",
+  origin: function (origin, cb) {
+    // No Origin header at all: same-origin navigations, curl, and every
+    // server-to-server call. Never a cross-site browser request.
+    if (!origin) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    // Shopify's admin, for when the app is embedded there.
+    if (/^https:\/\/([a-z0-9-]+\.)?myshopify\.com$/i.test(origin)) return cb(null, true);
+    if (/^https:\/\/admin\.shopify\.com$/i.test(origin)) return cb(null, true);
+    // Our own origin.
+    try {
+      const base = billing.publicBase();
+      if (base && origin === base) return cb(null, true);
+    } catch (e) { /* fall through */ }
+    // Anything else gets no CORS headers, so the browser blocks the response.
+    // Not an error — an error here would break the public paths below.
+    return cb(null, false);
+  },
   methods: ["GET", "POST", "OPTIONS", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning", "x-advisor-password", "x-advisor-token"]
 }));
+// The genuinely public, unauthenticated surfaces stay readable from anywhere.
+app.use((req, res, next) => {
+  if (PUBLIC_CORS.test(req.path)) res.set("Access-Control-Allow-Origin", "*");
+  next();
+});
 app.use((req, res, next) => {
   // Every one of these verifies an HMAC over the RAW request bytes, so they must
   // not be JSON-parsed here — express.raw is mounted on each route instead.
@@ -4129,13 +4165,44 @@ const ADVISOR_SHOPIFY_KEY = process.env.ADVISOR_SHOPIFY_KEY || "";
 const ADVISOR_SHOPIFY_SECRET = process.env.ADVISOR_SHOPIFY_SECRET || "";
 const OAUTH_SCOPES = "read_customers,write_customers,read_orders,read_products,read_inventory,read_checkouts,read_fulfillments,read_locations,read_price_rules,read_discounts,read_marketing_events,write_discounts,write_draft_orders";
 const APP_BASE_URL = "https://tryfit-backend-production.up.railway.app";
-// Short-lived state store for CSRF protection (state -> timestamp).
-const oauthStates = new Map();
-function cleanOldStates() {
-  const now = Date.now();
-  for (const [k, v] of oauthStates) {
-    const ts = (v && v.ts) ? v.ts : v;
-    if (now - ts > 10 * 60 * 1000) oauthStates.delete(k);
+// OAuth state — CSRF protection for the install flow.
+//
+// This was a process-local Map. Two consequences, both silent:
+//   - A restart or redeploy between /auth and /auth/callback threw away the
+//     state, so a merchant halfway through installing got "state לא תקין" and
+//     had to start again. Railway redeploys often.
+//   - With more than one instance, the callback usually lands on a different
+//     process than the one that issued the state, so installs fail at random.
+// It was also not bound to the shop it was issued for, so a state minted for
+// one store would have been accepted for another.
+//
+// The state is now self-describing and signed: shop + timestamp + HMAC. It
+// needs no server memory, survives restarts and scaling, expires on its own,
+// and cannot be replayed for a different shop.
+const OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
+
+function makeOAuthState(shop) {
+  const nonce = crypto.randomBytes(8).toString("hex");
+  const payload = `${shop}.${Date.now()}.${nonce}`;
+  const sig = crypto.createHmac("sha256", ADVISOR_SHOPIFY_SECRET || "oauth")
+    .update(payload, "utf8").digest("base64url").slice(0, 32);
+  return Buffer.from(`${payload}.${sig}`, "utf8").toString("base64url");
+}
+
+// Returns the shop the state was issued for, or null.
+function readOAuthState(state) {
+  try {
+    const raw = Buffer.from(String(state || ""), "base64url").toString("utf8");
+    const parts = raw.split(".");
+    if (parts.length !== 4) return null;
+    const [shop, ts, nonce, sig] = parts;
+    const expect = crypto.createHmac("sha256", ADVISOR_SHOPIFY_SECRET || "oauth")
+      .update(`${shop}.${ts}.${nonce}`, "utf8").digest("base64url").slice(0, 32);
+    if (!sessionAuth.safeEqual(sig, expect)) return null;
+    if (!Number(ts) || Date.now() - Number(ts) > OAUTH_STATE_TTL_MS) return null;
+    return shop;
+  } catch (e) {
+    return null;
   }
 }
 function isValidShopDomain(shop) {
@@ -4151,13 +4218,11 @@ app.get("/auth", (req, res) => {
   if (!ADVISOR_SHOPIFY_KEY || !ADVISOR_SHOPIFY_SECRET) {
     return res.status(500).send("האפליקציה לא מוגדרת (חסרים ADVISOR_SHOPIFY_KEY/SECRET).");
   }
-  cleanOldStates();
-  const state = crypto.randomBytes(16).toString("hex");
+  const state = makeOAuthState(shop);
   // NOTE: ?password= used to be honoured here, letting whoever sent the install
   // link choose the merchant's advisor password. /auth is unauthenticated, so
   // anyone could mail a store a crafted link and then log in as them afterwards.
   // The password is always generated here now, and nothing external sets it.
-  oauthStates.set(state, { ts: Date.now(), pw: null });
   const redirectUri = `${APP_BASE_URL}/auth/callback`;
   const installUrl =
     `https://${shop}/admin/oauth/authorize` +
@@ -4189,12 +4254,13 @@ app.get("/auth/callback", async (req, res) => {
     if (!isValidShopDomain((shop || "").toLowerCase())) {
       return res.status(400).send("shop לא תקין.");
     }
-    if (!state || !oauthStates.has(state)) {
+    const stateShop = readOAuthState(state);
+    if (!stateShop || stateShop !== (shop || "").toLowerCase().trim()) {
       return res.status(403).send("state לא תקין (ייתכן שפג תוקף). נסה להתקין שוב.");
     }
-    const stateData = oauthStates.get(state);
-    oauthStates.delete(state);
-    const presetPassword = (stateData && stateData.pw) ? stateData.pw : null;
+    // Nothing external has ever been allowed to preset the password; keeping the
+    // variable makes the intent explicit at the one place it is read.
+    const presetPassword = null;
     if (!verifyOAuthHmac(req.query)) {
       return res.status(403).send("אימות HMAC נכשל.");
     }
