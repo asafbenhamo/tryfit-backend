@@ -36,6 +36,7 @@ async function discountTitle(shop, key, vars) {
 }
 const storeTime = require("./store-time");
 const sessionAuth = require("./session-auth");
+const shopifySessionToken = require("./shopify-session-token");
 const billing = require("./billing-engine");
 const policyEngine = require("./policy-engine");
 const autopilot = require("./autopilot-engine");
@@ -185,8 +186,31 @@ app.use(async (req, res, next) => {
   try {
     const token = sessionAuth.extractToken(req);
     if (token) {
-      const s = await sessionAuth.resolve(token);
-      if (s) req._session = s;
+      // Two kinds of bearer token arrive here.
+      //
+      // 1. A Shopify SESSION TOKEN, when the app is running embedded in the
+      //    Shopify admin. App Bridge mints it, Shopify signs it with our app
+      //    secret, and it lives about a minute. This is the path a merchant
+      //    uses when they open the app from their admin — no password, because
+      //    they are already signed in to Shopify.
+      // 2. Our own opaque session token, for the standalone PWA.
+      //
+      // Shape tells them apart (a JWT has three dot-separated parts; ours is
+      // random bytes), and each is verified by its own code. A token that fails
+      // its check simply does not authenticate — it never falls through to the
+      // other verifier hoping for a second opinion.
+      if (shopifySessionToken.looksLikeJwt(token)) {
+        const claims = shopifySessionToken.verify(token, {
+          apiKey: ADVISOR_SHOPIFY_KEY,
+          apiSecret: shopifyAppSecret()
+        });
+        // is_master is false by construction: a merchant in their own admin is
+        // never the platform super-admin.
+        if (claims) req._session = { shop: claims.shop, is_master: false, via: 'shopify' };
+      } else {
+        const s = await sessionAuth.resolve(token);
+        if (s) req._session = s;
+      }
     }
   } catch (e) { /* fall through to the legacy password path */ }
   next();
@@ -572,6 +596,23 @@ app.post("/api/auth/setup", express.json(), async (req, res) => {
     name: (cfg && cfg.name) || String(shop || "").replace(".myshopify.com", ""),
     terms_accepted: shop ? shopify.hasAcceptedTerms(shop) : false,
     token: sess.token, expires_at: sess.expires_at
+  });
+});
+
+// Who am I? The embedded app's first call: it holds a Shopify session token but
+// does not itself know the store's display name or whether the terms have been
+// accepted. Deliberately says nothing a caller could not already derive from the
+// credential they presented.
+app.get("/api/whoami", (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+  const cfg = shopify.getStore(shop);
+  res.json({
+    ok: true,
+    shop,
+    name: (cfg && cfg.name) || String(shop).replace(".myshopify.com", ""),
+    terms_accepted: shopify.hasAcceptedTerms(shop),
+    embedded: !!(req._session && req._session.via === "shopify")
   });
 });
 
@@ -1971,8 +2012,51 @@ app.post("/api/transcribe", express.json({ limit: '15mb' }), async (req, res) =>
   }
 });
 
+// The app surface. Served both standalone and INSIDE the Shopify admin iframe.
+//
+// A browser will only render a page in an iframe if the page says who may frame
+// it. Shopify requires frame-ancestors naming the specific shop plus
+// admin.shopify.com; anything looser (or the X-Frame-Options: DENY that some
+// hosts add by default) shows the merchant a blank panel. It has to be the
+// shop from the request, not a wildcard, so one merchant's admin cannot frame
+// another merchant's session.
+function embeddableHeaders(req, res) {
+  const shop = String(req.query.shop || "").toLowerCase().trim();
+  if (isValidShopDomain(shop)) {
+    res.set("Content-Security-Policy",
+      `frame-ancestors https://${shop} https://admin.shopify.com;`);
+  } else {
+    // No shop named: standalone use. Refuse framing entirely rather than allow
+    // it from anywhere.
+    res.set("Content-Security-Policy", "frame-ancestors 'none';");
+  }
+  // X-Frame-Options cannot express "this one shop", and where both are present
+  // browsers may honour the stricter one — so it must not be set at all here.
+  res.removeHeader("X-Frame-Options");
+}
+
 app.get("/chat", (req, res) => {
+  embeddableHeaders(req, res);
   res.sendFile(__dirname + "/chat.html");
+});
+
+// Shopify opens the app at its App URL with ?shop=&host=&embedded=1. Send that
+// straight to the same surface so there is one page to maintain.
+app.get("/", (req, res, next) => {
+  if (!req.query.shop && !req.query.host) return next();
+  embeddableHeaders(req, res);
+  res.sendFile(__dirname + "/chat.html");
+});
+
+// The API key the front end needs to boot App Bridge. Public by design — it is
+// the app's client ID, which is visible in every install URL; the SECRET is what
+// must never leave the server.
+app.get("/api/app-bridge-config", (req, res) => {
+  res.json({
+    ok: true,
+    api_key: ADVISOR_SHOPIFY_KEY || null,
+    embedded_ready: !!(ADVISOR_SHOPIFY_KEY && shopifyAppSecret())
+  });
 });
 
 app.get("/api/daily-plan", async (req, res) => {
@@ -4502,6 +4586,21 @@ app.get("/auth/callback", async (req, res) => {
         backfillStatus[shopDomain] = { ...backfillStatus[shopDomain], success: false, fatal_error: safeError(err) };
       }
     });
+
+    // Where the merchant lands after installing.
+    //
+    // An embedded app is expected to drop them back INSIDE their Shopify admin,
+    // on the app's page — that is the flow a reviewer walks and the one a
+    // merchant expects, rather than being left on a standalone site holding a
+    // password. The standalone success page is kept for installs that are not
+    // coming from the admin (and as a fallback if we cannot build the admin URL),
+    // because the PWA is still a real way to use this on a phone.
+    if (ADVISOR_SHOPIFY_KEY) {
+      const handle = String(ADVISOR_SHOPIFY_KEY).trim();
+      const adminUrl = `https://${shopDomain}/admin/apps/${encodeURIComponent(handle)}`;
+      console.log(`[OAuth] ${shopDomain} installed — returning to the Shopify admin`);
+      return res.redirect(adminUrl);
+    }
 
     // Success page for the merchant — bilingual, with the DIRECT chat link.
     const hePage = isIsraeli;

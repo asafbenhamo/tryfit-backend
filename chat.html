@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Smart Advisor</title>
+<!-- App Bridge. Must be the FIRST script on the page and must come from
+     Shopify's CDN — they check this, and a bundled copy is not supported.
+     data-api-key is filled in by the server-rendered value below.
+     Harmless when the page is opened standalone: the script simply finds no
+     host to attach to. -->
+<script>
+  // Boot the embedded experience only when Shopify actually opened us. `host`
+  // is the parameter Shopify adds, and its absence means the merchant is on the
+  // standalone PWA, which keeps the password/token flow it already had.
+  window.__SHOPIFY_HOST__ = new URLSearchParams(location.search).get('host') || '';
+  window.__SHOPIFY_EMBEDDED__ = !!window.__SHOPIFY_HOST__;
+</script>
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#0b8aff">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -831,6 +843,53 @@
   // merchant's actual password stops travelling with each call.
   let AUTH_TOKEN = '';
   let SELECTED_SHOP = '';   // set when master picks a store; appended to all API calls
+
+  // ===== EMBEDDED IN THE SHOPIFY ADMIN =====
+  //
+  // When Shopify opens the app, the merchant is ALREADY signed in to Shopify and
+  // must not be asked for a password. App Bridge mints a short-lived signed token
+  // per request; the server verifies it against the app secret and learns which
+  // shop is asking. See shopify-session-token.js.
+  //
+  // The token expires in about a minute, so it is fetched per request rather
+  // than stored — App Bridge caches and refreshes internally, which is why this
+  // is cheap to call every time.
+  const EMBEDDED = !!window.__SHOPIFY_EMBEDDED__;
+  let APP_BRIDGE_READY = false;
+
+  async function shopifySessionToken() {
+    if (!EMBEDDED) return null;
+    try {
+      // App Bridge v4 exposes this globally once its script has run.
+      if (window.shopify && typeof window.shopify.idToken === 'function') {
+        return await window.shopify.idToken();
+      }
+    } catch (e) { /* fall through — the request goes out unauthenticated and 401s */ }
+    return null;
+  }
+
+  async function bootAppBridge() {
+    if (!EMBEDDED) return;
+    try {
+      const res = await fetch('/api/app-bridge-config');
+      const cfg = await res.json();
+      if (!cfg.ok || !cfg.api_key) {
+        console.warn('[app-bridge] no api key configured; staying standalone');
+        return;
+      }
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.shopify.com/shopifycloud/app-bridge.js';
+        s.setAttribute('data-api-key', cfg.api_key);
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('app-bridge failed to load'));
+        document.head.appendChild(s);
+      });
+      APP_BRIDGE_READY = true;
+    } catch (e) {
+      console.warn('[app-bridge]', e.message);
+    }
+  }
   let IS_MASTER = false;
   let history = [];
   let busy = false;
@@ -1964,7 +2023,33 @@
       return true;
     } catch (e) { return false; }
   }
-  trySetupLink();
+
+  // Opened from inside the Shopify admin: the merchant is already signed in to
+  // Shopify, so asking them for a password would be both redundant and, to a
+  // reviewer, a sign the app is not really integrated. Boot App Bridge, then
+  // ask the server who we are — the Shopify session token answers that.
+  async function tryEmbedded() {
+    if (!EMBEDDED) return false;
+    await bootAppBridge();
+    if (!APP_BRIDGE_READY) return false;
+    try {
+      const res = await fetch('/api/whoami');
+      const d = await res.json();
+      if (!d.ok || !d.shop) return false;
+      SELECTED_SHOP = '';
+      if (d.terms_accepted === false) showTermsGate(d.name || '');
+      else enterAdvisor(d.name || '', d.shop);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // Order matters: a setup link is a one-time thing and takes precedence; the
+  // embedded path is the everyday one; the password gate is the fallback for
+  // the standalone PWA.
+  (async () => {
+    if (await trySetupLink()) return;
+    await tryEmbedded();
+  })();
 
   // ===== Team / agents =====
   // The advisor is the "head of team". These are the agents it runs. Two are live
@@ -2244,11 +2329,42 @@
   // header and STRIPS the password out of both the query string and the JSON
   // body. The call sites are free to keep writing ?password= — it never leaves
   // the browser once we hold a token.
+  //
+  // Embedded in the Shopify admin there is no password at all: the wrapper
+  // fetches a fresh Shopify session token per request instead. That makes the
+  // wrapper async, which is fine — window.fetch already returns a promise.
   (function patchFetch(){
     const _fetch = window.fetch;
-    window.fetch = function(url, opts) {
+    window.fetch = async function(url, opts) {
       try {
         if (typeof url === 'string' && (url.indexOf('/api/') === 0 || url.indexOf('/admin/') === 0)) {
+          // Embedded: Shopify's own short-lived token, minted per request.
+          if (EMBEDDED && APP_BRIDGE_READY) {
+            const sid = await shopifySessionToken();
+            if (sid) {
+              opts = opts || {};
+              const h = new Headers(opts.headers || {});
+              h.set('Authorization', 'Bearer ' + sid);
+              opts.headers = h;
+              // Strip the password the call sites still write. Inside the admin
+              // there is no password to send, and sending one would be worse
+              // than useless.
+              if (url.indexOf('password=') > -1) {
+                const [path, qs] = url.split('?');
+                const params = new URLSearchParams(qs || '');
+                params.delete('password');
+                const rest = params.toString();
+                url = rest ? path + '?' + rest : path;
+              }
+              if (opts.body && typeof opts.body === 'string') {
+                try {
+                  const b = JSON.parse(opts.body);
+                  if (b && typeof b === 'object' && b.password) { delete b.password; opts.body = JSON.stringify(b); }
+                } catch (e) { /* not JSON */ }
+              }
+              return _fetch(url, opts);
+            }
+          }
           opts = opts || {};
 
           if (AUTH_TOKEN) {

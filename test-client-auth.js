@@ -36,15 +36,26 @@ global.URLSearchParams = require('url').URLSearchParams;
 let captured = null;
 global.window = { fetch: (url, opts) => { captured = { url, opts }; return Promise.resolve({}); } };
 let AUTH_TOKEN = '', SELECTED_SHOP = '';
+// The wrapper also reads the embedded-mode flags. They must be in scope: the
+// wrapper's outer try/catch would otherwise swallow the ReferenceError and let
+// every request out with no Authorization header at all, which is a fail-safe
+// direction but would make this suite pass while testing nothing.
+let EMBEDDED = false, APP_BRIDGE_READY = false, SHOPIFY_ID_TOKEN = null;
 
 // Evaluate the real wrapper with our variables in scope.
 new Function('window', 'Headers', 'URLSearchParams',
-  'return function(getTok, getShop){ ' +
+  'return function(getTok, getShop, getEmb, getReady, getSid){ ' +
   'Object.defineProperty(globalThis, "AUTH_TOKEN", { get: getTok, configurable: true });' +
   'Object.defineProperty(globalThis, "SELECTED_SHOP", { get: getShop, configurable: true });' +
-  src + ' }')(global.window, global.Headers, global.URLSearchParams)(() => AUTH_TOKEN, () => SELECTED_SHOP);
+  'Object.defineProperty(globalThis, "EMBEDDED", { get: getEmb, configurable: true });' +
+  'Object.defineProperty(globalThis, "APP_BRIDGE_READY", { get: getReady, configurable: true });' +
+  'globalThis.shopifySessionToken = async () => getSid();' +
+  src + ' }')(global.window, global.Headers, global.URLSearchParams)(
+    () => AUTH_TOKEN, () => SELECTED_SHOP, () => EMBEDDED, () => APP_BRIDGE_READY, () => SHOPIFY_ID_TOKEN);
 
 const call = (url, opts) => { captured = null; window.fetch(url, opts); return captured; };
+// The embedded path awaits App Bridge, so the capture is not synchronous.
+const callAsync = async (url, opts) => { captured = null; await window.fetch(url, opts); return captured; };
 const auth = (c) => c.opts && c.opts.headers && c.opts.headers.get && c.opts.headers.get('authorization');
 
 (async () => {
@@ -118,6 +129,49 @@ const auth = (c) => c.opts && c.opts.headers && c.opts.headers.get && c.opts.hea
   console.log('\n-- a malformed body is passed through, not destroyed --');
   c = call('/api/x', { method: 'POST', body: 'not json at all' });
   ok('left exactly as it was', c.opts.body === 'not json at all');
+
+  // ==========================================================================
+  console.log('\n-- embedded in the Shopify admin: Shopify\'s token, never a password --');
+  EMBEDDED = true; APP_BRIDGE_READY = true; SHOPIFY_ID_TOKEN = 'shopify.session.jwt';
+  AUTH_TOKEN = ''; SELECTED_SHOP = '';
+
+  c = await callAsync('/api/insights?password=' + encodeURIComponent(PW));
+  ok('Shopify\'s session token is sent', auth(c) === 'Bearer shopify.session.jwt', String(auth(c)));
+  ok('the password is stripped from the query string', c.url.indexOf('password') === -1, c.url);
+
+  c = await callAsync('/api/autopilot?password=' + encodeURIComponent(PW), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: PW, on: true })
+  });
+  ok('and from the JSON body', JSON.parse(c.opts.body).password === undefined, c.opts.body);
+  ok('the rest of the body survives', JSON.parse(c.opts.body).on === true);
+  ok('existing headers are preserved', c.opts.headers.get('content-type') === 'application/json');
+
+  // The merchant's own password must never travel in the admin, even if a call
+  // site still writes it and even if the PWA token happens to be lying around.
+  AUTH_TOKEN = TOK;
+  c = await callAsync('/api/settings?password=' + encodeURIComponent(PW), {
+    method: 'POST', body: JSON.stringify({ password: PW })
+  });
+  ok('Shopify\'s token wins over the PWA token', auth(c) === 'Bearer shopify.session.jwt', String(auth(c)));
+  ok('and the password still does not leave', !String(c.url).includes(PW) && !String(c.opts.body).includes(PW));
+
+  console.log('\n-- if App Bridge never came up, we do not invent a token --');
+  APP_BRIDGE_READY = false; AUTH_TOKEN = TOK;
+  c = await callAsync('/api/insights?password=' + encodeURIComponent(PW));
+  ok('falls back to the PWA token', auth(c) === 'Bearer ' + TOK, String(auth(c)));
+
+  APP_BRIDGE_READY = true; SHOPIFY_ID_TOKEN = null; AUTH_TOKEN = TOK;
+  c = await callAsync('/api/insights?password=' + encodeURIComponent(PW));
+  ok('a null Shopify token does not blank out auth', auth(c) === 'Bearer ' + TOK, String(auth(c)));
+
+  console.log('\n-- non-API URLs are untouched in embedded mode too --');
+  SHOPIFY_ID_TOKEN = 'shopify.session.jwt';
+  c = await callAsync('/chat?shop=willow.myshopify.com');
+  ok('no Authorization header on a page load', !auth(c));
+  ok('the URL is unchanged', c.url === '/chat?shop=willow.myshopify.com', c.url);
+
+  EMBEDDED = false; APP_BRIDGE_READY = false; SHOPIFY_ID_TOKEN = null;
 
   console.log('\n' + (fail ? fail + ' FAILING' : 'all ' + pass + ' assertions passed'));
   process.exit(fail ? 1 : 0);
