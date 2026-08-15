@@ -174,6 +174,17 @@ mutation CreateSub($name: String!, $returnUrl: URL!, $trialDays: Int!, $test: Bo
 // derived from Shopify rather than taken from the client: `test: true` is
 // "never actually bill me", and a request body is not allowed to decide that.
 async function isTestStore(shop) {
+  // plan_name is not a reliable signal: a genuine development store reported
+  // "basic", which meant this returned false, the subscription was created as
+  // a REAL charge, and Shopify rejects real charges on dev stores — so the
+  // one place billing can be rehearsed without money was the one place it
+  // could not be created. Shop.plan.partnerDevelopment (GraphQL) is the
+  // boolean Shopify itself uses; the plan-name heuristic stays as fallback.
+  try {
+    const data = await graphql(shop, '{ shop { plan { partnerDevelopment } } }');
+    const plan = data && data.shop && data.shop.plan;
+    if (plan && typeof plan.partnerDevelopment === 'boolean') return plan.partnerDevelopment;
+  } catch (e) { /* fall through to REST */ }
   try {
     const data = await shopify.shopifyGet(shop, 'shop.json');
     const plan = String((data && data.shop && data.shop.plan_name) || '').toLowerCase();

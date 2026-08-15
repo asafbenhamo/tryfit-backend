@@ -60,6 +60,15 @@ const PROFILES = [
   { n: 5,  orders: [1, 2], daysAgo: [200, 340], label: 'dormant' }
 ];
 
+// Exit without tripping libuv. process.exit() while the pg pool still holds
+// open sockets fires "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"
+// on Windows — right after a REFUSED message, which makes a correct refusal
+// look like a crash. Drain the pool first.
+async function bail(code) {
+  try { await db.pool.end(); } catch (e) { /* already closed */ }
+  process.exit(code);
+}
+
 const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -79,7 +88,32 @@ async function shopifyPost(shop, endpoint, body) {
 }
 
 // Is this a store it is safe to invent people in?
+//
+// plan_name is NOT a reliable signal any more: a genuine development store —
+// created in Partners, wearing the "dev" badge in its own admin — reported
+// plan_name "basic" and was refused. The field Shopify itself uses is the
+// boolean Shop.plan.partnerDevelopment, GraphQL-only, so ask that first and
+// keep the plan-name heuristic as the fallback for anything that cannot
+// answer GraphQL.
 async function looksLikeDevStore(shop) {
+  try {
+    const token = await shopify.getFreshToken(shop);
+    if (token) {
+      const res = await fetch(`https://${shop}/admin/api/2026-01/graphql.json`, {
+        method: 'POST',
+        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: '{ shop { plan { partnerDevelopment displayName } } }' })
+      });
+      const data = await res.json().catch(() => null);
+      const plan = data && data.data && data.data.shop && data.data.shop.plan;
+      if (plan && typeof plan.partnerDevelopment === 'boolean') {
+        return {
+          ok: plan.partnerDevelopment,
+          plan: (plan.displayName || 'unknown') + (plan.partnerDevelopment ? ' (partner development)' : '')
+        };
+      }
+    }
+  } catch (e) { /* fall through to the REST heuristic */ }
   try {
     const d = await shopify.shopifyGet(shop, 'shop.json');
     const plan = String((d && d.shop && d.shop.plan_name) || '').toLowerCase();
@@ -237,7 +271,7 @@ async function spreadDatesLocally(shop, created) {
   await shopify.loadStores();
   if (!shopify.hasTokenForShop(shop)) {
     console.error(`REFUSED: no access token for ${shop}. Connect the app to it first.`);
-    process.exit(1);
+    await bail(1);
   }
 
   const dev = await looksLikeDevStore(shop);
@@ -246,7 +280,7 @@ async function spreadDatesLocally(shop, created) {
     console.error('\nREFUSED: that does not look like a development store.');
     console.error('Seeding a real shop puts invented people in a real customer list,');
     console.error('a real inbox, and real reports. Add --force only if you are certain.');
-    process.exit(1);
+    await bail(1);
   }
   if (!dev.ok && force) console.log('\n--force given on a non-development store. Proceeding.\n');
 
@@ -272,5 +306,5 @@ async function spreadDatesLocally(shop, created) {
 
   console.log('\nDone. Open the app and ask it how many customers you have.');
   console.log('If the numbers are still zero, the backfill has not finished — wait a minute and retry.');
-  process.exit(0);
-})().catch(e => { console.error('seed failed:', e.message); process.exit(2); });
+  await bail(0);
+})().catch(async e => { console.error('seed failed:', e.message); await bail(2); });
