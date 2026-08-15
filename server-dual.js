@@ -886,9 +886,31 @@ production data is limited to those who need it to operate the service.</p>
 </html>`);
 });
 
-app.use("/admin", adminRouter);
+// ===== LEGACY: virtual try-on =====
+//
+// The try-on product predates Smart Advisor and is a different app entirely.
+// Its three /api/tryon/* routes enforce a credit balance and, when it runs out,
+// answer HTTP 403 with "out of credits, contact us to renew the subscription" —
+// a SECOND paid entitlement collected outside Shopify's billing system, on
+// functionality Smart Advisor does not provide. Shopify forbids charging for app
+// functionality off-platform, and a reviewer finding two such channels is worse
+// than finding one.
+//
+// So it is off by default and the whole surface (routes, credits API, admin
+// router) is mounted only when someone deliberately turns it on. The code is
+// untouched and one environment variable brings it back.
+const TRYON_ENABLED = String(process.env.ENABLE_TRYON || "").toLowerCase() === "true";
+if (!TRYON_ENABLED) {
+  console.log("🚫 Legacy try-on disabled (set ENABLE_TRYON=true to restore)");
+}
+function tryonOnly(req, res, next) {
+  if (!TRYON_ENABLED) return res.status(404).json({ error: "Not found" });
+  next();
+}
 
-app.get("/api/credits/:shop", (req, res) => {
+if (TRYON_ENABLED) app.use("/admin", adminRouter);
+
+app.get("/api/credits/:shop", tryonOnly, (req, res) => {
   // Was unauthenticated: anyone could read any shop's plan and balance just by
   // guessing a myshopify domain. Callers may only read their own.
   const shop = resolveShop(req);
@@ -1340,10 +1362,69 @@ app.get("/api/wa-credits/balance", async (req, res) => {
     const shop = resolveShop(req);
     if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
     const balance = await creditsEngine.getBalance(shop);
-    res.json({ ok: true, balance, price_per_credit: creditsEngine.PRICE_PER_CREDIT_ILS });
+    const settings = await storeSettings.getSettings(shop).catch(() => ({}));
+    res.json({
+      ok: true, balance,
+      price_per_credit: creditsEngine.PRICE_PER_CREDIT_ILS,
+      // What the merchant can actually buy, so the screen is a real purchase
+      // and not an instruction to email us.
+      packs: billing.CREDIT_PACKS,
+      currency: settings.currency === "₪" ? "ILS" : "USD"
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: safeError(err) });
   }
+});
+
+// Buy WhatsApp credits — through Shopify, which is the only lawful way to
+// charge a Shopify merchant for app functionality. Returns the Shopify-hosted
+// approval URL; we never handle a payment method.
+app.post("/api/wa-credits/buy", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+  try {
+    const settings = await storeSettings.getSettings(shop).catch(() => ({}));
+    const r = await billing.startCreditPurchase(shop, {
+      credits: req.body && req.body.credits,
+      currency: settings.currency === "₪" ? "ILS" : "USD"
+    });
+    if (!r.ok) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: safeError(e) });
+  }
+});
+
+// Where Shopify returns the merchant after they approve (or decline) a credit
+// purchase. The credits are granted here, only once Shopify confirms the charge
+// is ACTIVE — and only once, however many times this page is reloaded.
+app.get("/billing/credits/confirmed", async (req, res) => {
+  const shop = String(req.query.shop || "").toLowerCase().trim();
+  const chargeId = String(req.query.charge_id || "").trim();
+  let granted = null, lang = "en";
+  try {
+    lang = (await storeSettings.getSettings(shop).catch(() => ({}))).language || "en";
+    // Shopify returns a numeric charge_id; the API works in GIDs.
+    const gid = chargeId.startsWith("gid://")
+      ? chargeId : `gid://shopify/AppPurchaseOneTime/${chargeId}`;
+    granted = await billing.finishCreditPurchase(shop, gid);
+  } catch (e) {
+    console.error("[billing] credits confirm:", e.message);
+  }
+  const he = lang === "he";
+  const good = granted && granted.ok;
+  res.set("Content-Type", "text/html; charset=utf-8").send(`<!doctype html>
+<html dir="${he ? "rtl" : "ltr"}" lang="${he ? "he" : "en"}"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Smart Advisor</title>
+<style>body{font-family:system-ui,sans-serif;max-width:520px;margin:12vh auto;padding:0 24px;text-align:center;color:#1a1d24}
+h1{font-size:22px}p{color:#5b6472;line-height:1.6}a{display:inline-block;margin-top:18px;padding:12px 22px;background:#0a6fe0;color:#fff;border-radius:10px;text-decoration:none}</style>
+<h1>${good ? (he ? "הקרדיטים נטענו ✅" : "Credits added") : (he ? "הרכישה לא הושלמה" : "Purchase not completed")}</h1>
+<p>${good
+  ? (he ? `${granted.credits} קרדיטים נוספו ליתרה שלך. הסוכן יכול לשלוח בוואטסאפ.`
+        : `${granted.credits} credits were added to your balance. The agent can now send on WhatsApp.`)
+  : (he ? "לא בוצע חיוב. אפשר לנסות שוב מתוך האפליקציה."
+        : "You were not charged. You can try again from inside the app.")}</p>
+<a href="/chat">${he ? "חזרה ליועץ" : "Back to the advisor"}</a>`);
 });
 
 // Admin/master: add credits to a store (manual top-up for now).
@@ -3482,7 +3563,7 @@ async function submitAndWait(modelImage, garmentUrl, category) {
   return await submitAndWaitFashn(modelImage, garmentUrl, category);
 }
 
-app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) => {
+app.post("/api/tryon/generate", tryonOnly, upload.single("model_image"), async (req, res) => {
   try {
     console.log("=== NEW TRY-ON REQUEST [" + BACKEND_MODE + "] ===");
     const ip = getRealIP(req);
@@ -3565,7 +3646,7 @@ app.post("/api/tryon/generate", upload.single("model_image"), async (req, res) =
   }
 });
 
-app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, res) => {
+app.post("/api/tryon/generate-multi", tryonOnly, upload.single("model_image"), async (req, res) => {
   try {
     console.log("=== MULTI-IMAGE TRY-ON [" + BACKEND_MODE + "] ===");
     const ip = getRealIP(req);
@@ -3629,7 +3710,7 @@ app.post("/api/tryon/generate-multi", upload.single("model_image"), async (req, 
   }
 });
 
-app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, res) => {
+app.post("/api/tryon/generate-chain", tryonOnly, upload.single("model_image"), async (req, res) => {
   try {
     console.log("=== CHAIN TRY-ON [" + BACKEND_MODE + "] ===");
     const ip = getRealIP(req);
@@ -3713,7 +3794,7 @@ app.post("/api/tryon/generate-chain", upload.single("model_image"), async (req, 
   }
 });
 
-app.get("/api/tryon/status/:id", async (req, res) => {
+app.get("/api/tryon/status/:id", tryonOnly, async (req, res) => {
   try {
     const predictionId = req.params.id;
     if (BACKEND_MODE === "runpod") {
@@ -3741,7 +3822,7 @@ app.get("/api/tryon/status/:id", async (req, res) => {
   }
 });
 
-app.post("/api/tryon/generate-video", async (req, res) => {
+app.post("/api/tryon/generate-video", tryonOnly, async (req, res) => {
   try {
     console.log("=== VIDEO GENERATION REQUEST ===");
     const { image_url } = req.body;
@@ -3775,7 +3856,7 @@ app.post("/api/tryon/generate-video", async (req, res) => {
   }
 });
 
-app.get("/api/tryon/video-status/:id", async (req, res) => {
+app.get("/api/tryon/video-status/:id", tryonOnly, async (req, res) => {
   try {
     const statusRes = await fetch(`https://api.fashn.ai/v1/status/${req.params.id}`, {
       headers: { Authorization: `Bearer ${process.env.FASHN_API_KEY}` },
@@ -3807,7 +3888,7 @@ const VIDEO_PROXY_HOSTS = new Set([
   "api.runpod.ai"
 ]);
 
-app.get("/api/tryon/video-proxy", async (req, res) => {
+app.get("/api/tryon/video-proxy", tryonOnly, async (req, res) => {
   try {
     const raw = req.query.url;
     if (!raw) return res.status(400).json({ error: "Missing url" });

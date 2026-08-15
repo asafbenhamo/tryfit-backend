@@ -208,6 +208,24 @@
     animation: fade 0.2s ease;
   }
   @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+  /* Credit packs. A row per pack: size, unit price, total — so the volume
+     discount is visible rather than implied. */
+  .credit-packs { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+  .credit-pack {
+    display: grid; grid-template-columns: auto 1fr auto; grid-template-rows: auto auto;
+    gap: 0 8px; align-items: baseline; width: 100%; text-align: start;
+    padding: 12px 14px; border: 1px solid var(--border, #e3e7ee); border-radius: 10px;
+    background: var(--panel, #fff); color: inherit; font: inherit; cursor: pointer;
+    transition: border-color .12s, background .12s;
+  }
+  .credit-pack:hover:not(:disabled) { border-color: #0a6fe0; background: rgba(10,111,224,.04); }
+  .credit-pack:focus-visible { outline: 2px solid #0a6fe0; outline-offset: 2px; }
+  .credit-pack.busy, .credit-pack:disabled { opacity: .55; cursor: default; }
+  .credit-pack .cp-n { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .credit-pack .cp-l { font-size: 13.5px; color: var(--text-dim, #6b7280); }
+  .credit-pack .cp-p { font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; grid-row: 1 / span 2; align-self: center; }
+  .credit-pack .cp-e { grid-column: 1 / span 2; font-size: 12.5px; color: var(--text-dim, #6b7280); }
+
   .log-box {
     background: #fff; border-radius: 18px; width: 100%; max-width: 520px;
     max-height: 80vh; display: flex; flex-direction: column; overflow: hidden;
@@ -973,6 +991,11 @@
       'credits.line1': 'כל קרדיט מאפשר שליחת הודעת WhatsApp אוטומטית אחת ללקוח.',
       'credits.balance': 'היתרה הנוכחית שלך: <strong>{n}</strong> קרדיטים.',
       'credits.contact': 'לרכישת קרדיטים נוספים, פנה למנהל המערכת. בקרוב תוכל לרכוש קרדיטים ישירות מכאן.',
+      'credits.messages': 'הודעות',
+      'credits.each': '{price} להודעה',
+      'credits.viaShopify': 'החיוב מתבצע דרך Shopify ומופיע בחשבונית של החנות. אנחנו לא רואים אמצעי תשלום.',
+      'credits.unavailable': 'רכישת קרדיטים לא זמינה כרגע לחנות הזו.',
+      'credits.buyFailed': 'הרכישה נכשלה. נסה שוב.',
       'credits.close': 'סגור',
       'credits.manageTitle': '💬 ניהול קרדיטים',
       'credits.loading': 'טוען...',
@@ -1452,6 +1475,11 @@
       'credits.line1': 'Each credit sends one automatic WhatsApp message to a customer.',
       'credits.balance': 'Your current balance: <strong>{n}</strong> credits.',
       'credits.contact': 'To buy more credits, contact your account manager. Buying credits directly from here is coming soon.',
+      'credits.messages': 'messages',
+      'credits.each': '{price} each',
+      'credits.viaShopify': 'Billed through Shopify and shown on your store invoice. We never see a payment method.',
+      'credits.unavailable': 'Credit purchases are not available for this store right now.',
+      'credits.buyFailed': 'The purchase could not be started. Please try again.',
       'credits.close': 'Close',
       'credits.manageTitle': '💬 Manage credits',
       'credits.loading': 'Loading...',
@@ -2410,31 +2438,75 @@
       const el = document.getElementById('creditsBalance');
       if (el) el.textContent = (d.balance || 0).toLocaleString();
       window._creditsBalance = d.balance || 0;
+      window._creditPacks = d.packs || [];
+      window._creditCurrency = d.currency || 'USD';
     } catch (e) { /* silent */ }
   }
 
-  // "Top up" — for now just instructs the merchant to contact us (no billing yet).
+  // Top up — a real purchase, through Shopify. This used to say "contact your
+  // account manager", which meant the merchant paid us outside Shopify's billing
+  // system for functionality inside a Shopify app. That is grounds for removal
+  // from the App Store, so it is now appPurchaseOneTime: the merchant approves
+  // on Shopify's own screen and it goes on the bill they already pay.
   function showBuyCredits() {
+    const packs = (window._creditPacks || []);
+    const cur = window._creditCurrency === 'ILS' ? '₪' : '$';
     let m = document.getElementById('buyCreditsModal');
     if (m) m.remove();
     m = document.createElement('div');
     m.id = 'buyCreditsModal';
     m.className = 'log-modal';
     m.style.display = 'flex';
+
+    const packRows = packs.map(p =>
+      '<button class="credit-pack" data-credits="' + p.credits + '">'
+      + '<span class="cp-n">' + p.credits.toLocaleString(loc()) + '</span>'
+      + '<span class="cp-l">' + esc(t('credits.messages')) + '</span>'
+      + '<span class="cp-p">' + cur + p.price.toLocaleString(loc()) + '</span>'
+      + '<span class="cp-e">' + esc(t('credits.each', { price: cur + (p.price / p.credits).toFixed(2) })) + '</span>'
+      + '</button>').join('');
+
     m.innerHTML =
-      '<div class="log-box" style="max-width:400px">'
+      '<div class="log-box" style="max-width:420px">'
       + '<div class="log-head"><span>' + esc(t('credits.title')) + '</span>'
       + '<button class="log-close" onclick="document.getElementById(\'buyCreditsModal\').remove()">✕</button></div>'
       + '<div class="log-body" style="text-align:start;line-height:1.7">'
       + '<p style="font-size:14px">' + esc(t('credits.line1')) + '</p>'
       + '<p style="font-size:14px;margin-top:8px">' + t('credits.balance', { n: (window._creditsBalance||0).toLocaleString(loc()) }) + '</p>'
-      + '<div style="background:#f8f9fc;border-radius:10px;padding:14px;margin-top:12px;font-size:13.5px;color:#555">'
-      + esc(t('credits.contact'))
-      + '</div>'
+      + (packRows
+          ? '<div class="credit-packs">' + packRows + '</div>'
+            + '<p class="set-help" style="margin-top:10px">' + esc(t('credits.viaShopify')) + '</p>'
+          : '<div style="background:var(--panel,#f8f9fc);border-radius:10px;padding:14px;margin-top:12px;font-size:13.5px">'
+            + esc(t('credits.unavailable')) + '</div>')
       + '<button onclick="document.getElementById(\'buyCreditsModal\').remove()" style="width:100%;padding:11px;border:none;border-radius:9px;background:#0a6fe0;color:#fff;font-weight:600;cursor:pointer;margin-top:14px">' + esc(t('credits.close')) + '</button>'
       + '</div></div>';
     document.body.appendChild(m);
     m.onclick = (e) => { if (e.target === m) m.remove(); };
+    m.querySelectorAll('.credit-pack').forEach(btn => {
+      btn.onclick = () => buyCredits(Number(btn.dataset.credits), btn);
+    });
+  }
+
+  async function buyCredits(credits, btn) {
+    if (btn) { btn.disabled = true; btn.classList.add('busy'); }
+    try {
+      const res = await fetch('/api/wa-credits/buy?password=' + encodeURIComponent(PASSWORD), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: PASSWORD, credits })
+      });
+      const r = await res.json();
+      if (!r.ok || !r.confirmationUrl) {
+        alert(r.error || t('credits.buyFailed'));
+        if (btn) { btn.disabled = false; btn.classList.remove('busy'); }
+        return;
+      }
+      // Shopify's own approval screen. Leaving the app is the point: we never
+      // see a payment method.
+      window.top.location.href = r.confirmationUrl;
+    } catch (e) {
+      alert(t('credits.buyFailed'));
+      if (btn) { btn.disabled = false; btn.classList.remove('busy'); }
+    }
   }
 
   // Manual opt-out: merchant enters a customer's email/phone to remove them from

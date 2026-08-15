@@ -401,6 +401,132 @@ async function recordCommission(shop, { actionId, attributedRevenue, currency, d
 }
 
 // ---------------------------------------------------------------------------
+// 3b. WHATSAPP CREDITS — a one-time purchase, through Shopify.
+//
+// WhatsApp messages cost real money per send, so they are pre-paid. That part is
+// fine. What was not fine is HOW: the merchant was told to contact us and we
+// topped the balance up by hand. Charging a Shopify merchant for app
+// functionality outside Shopify's billing system is grounds for removal from the
+// App Store — it is not a technicality, it is one of the rules reviewers check.
+//
+// appPurchaseOneTimeCreate is the right instrument: a single charge, approved by
+// the merchant on Shopify's own screen, billed to the account they already pay
+// Shopify with. We never see a card.
+//
+// The credit only lands after Shopify confirms the purchase is ACTIVE, and the
+// grant is keyed on the purchase id so a merchant who reloads the return URL
+// does not get topped up twice.
+// ---------------------------------------------------------------------------
+const CREATE_PURCHASE = `
+mutation CreatePurchase($name: String!, $price: MoneyInput!, $returnUrl: URL!, $test: Boolean!) {
+  appPurchaseOneTimeCreate(name: $name, price: $price, returnUrl: $returnUrl, test: $test) {
+    userErrors { field message }
+    confirmationUrl
+    appPurchaseOneTime { id status }
+  }
+}`;
+
+const READ_PURCHASE = `
+query ReadPurchase($id: ID!) {
+  node(id: $id) { ... on AppPurchaseOneTime { id status name test price { amount currencyCode } } }
+}`;
+
+// What a merchant can buy. Priced per credit with a volume discount, so the
+// screen is a real choice rather than a text box.
+const CREDIT_PACKS = [
+  { credits: 500,  price: 129 },
+  { credits: 2000, price: 449 },
+  { credits: 5000, price: 999 }
+];
+
+let purchaseTableReady = false;
+async function ensurePurchaseTable() {
+  if (purchaseTableReady) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS app_credit_purchases (
+      purchase_gid TEXT PRIMARY KEY,
+      shop_domain  TEXT NOT NULL,
+      credits      INTEGER NOT NULL,
+      amount       NUMERIC(12,2),
+      currency     TEXT,
+      status       TEXT DEFAULT 'pending',   -- pending | granted | declined
+      granted_at   TIMESTAMPTZ,
+      created_at   TIMESTAMPTZ DEFAULT NOW()
+    )`).catch(e => console.error('[billing] purchase table:', e.message));
+  await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_purch_shop ON app_credit_purchases(shop_domain, created_at DESC)`).catch(() => {});
+  purchaseTableReady = true;
+}
+
+async function startCreditPurchase(shop, { credits, currency } = {}) {
+  await ensurePurchaseTable();
+  const pack = CREDIT_PACKS.find(p => p.credits === Number(credits));
+  if (!pack) return { ok: false, error: 'unknown_pack' };
+
+  const cur = /^[A-Z]{3}$/.test(String(currency || '').toUpperCase())
+    ? String(currency).toUpperCase() : 'USD';
+  const returnUrl = `${publicBase()}/billing/credits/confirmed?shop=${encodeURIComponent(shop)}`;
+
+  const data = await graphql(shop, CREATE_PURCHASE, {
+    name: `${pack.credits} WhatsApp message credits`,
+    price: { amount: pack.price.toFixed(2), currencyCode: cur },
+    returnUrl,
+    test: await isTestStore(shop)
+  });
+  const r = data && data.appPurchaseOneTimeCreate;
+  if (!r) throw new Error('no appPurchaseOneTimeCreate in response');
+  if (r.userErrors && r.userErrors.length) {
+    throw new Error(r.userErrors.map(e => e.message).join('; '));
+  }
+  const p = r.appPurchaseOneTime || {};
+  await db.query(
+    `INSERT INTO app_credit_purchases (purchase_gid, shop_domain, credits, amount, currency, status)
+     VALUES ($1,$2,$3,$4,$5,'pending') ON CONFLICT (purchase_gid) DO NOTHING`,
+    [p.id, shop, pack.credits, pack.price, cur]
+  ).catch(e => console.error('[billing] record purchase:', e.message));
+
+  return { ok: true, confirmationUrl: r.confirmationUrl, purchase_gid: p.id, credits: pack.credits, amount: pack.price, currency: cur };
+}
+
+// Called when Shopify sends the merchant back, and again by the
+// app_purchases_one_time/update webhook. Idempotent: the grant happens once.
+async function finishCreditPurchase(shop, purchaseGid) {
+  await ensurePurchaseTable();
+  if (!purchaseGid) return { ok: false, error: 'no_purchase_id' };
+
+  const row = (await db.query(
+    `SELECT * FROM app_credit_purchases WHERE purchase_gid=$1 AND shop_domain=$2`,
+    [purchaseGid, shop]).catch(() => ({ rows: [] }))).rows[0];
+  if (!row) return { ok: false, error: 'unknown_purchase' };
+  if (row.status === 'granted') return { ok: true, already: true, credits: row.credits };
+
+  // Shopify is the source of truth for whether money actually moved.
+  let status = null;
+  try {
+    const d = await graphql(shop, READ_PURCHASE, { id: purchaseGid });
+    status = d && d.node && d.node.status;
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  if (status !== 'ACTIVE') {
+    await db.query(`UPDATE app_credit_purchases SET status='declined' WHERE purchase_gid=$1 AND status='pending'`,
+      [purchaseGid]).catch(() => {});
+    return { ok: false, error: 'not_active', status };
+  }
+
+  // Claim the grant BEFORE adding credits, so a double callback cannot double-credit.
+  const claim = await db.query(
+    `UPDATE app_credit_purchases SET status='granted', granted_at=NOW()
+      WHERE purchase_gid=$1 AND status <> 'granted' RETURNING credits`,
+    [purchaseGid]).catch(() => ({ rows: [] }));
+  if (!claim.rows[0]) return { ok: true, already: true, credits: row.credits };
+
+  const credits = require('./credits-engine');
+  await credits.addCredits(shop, claim.rows[0].credits, 'topup_paid', { purchase_gid: purchaseGid });
+  console.log(`💳 [billing] ${shop} bought ${claim.rows[0].credits} WhatsApp credits`);
+  return { ok: true, credits: claim.rows[0].credits };
+}
+
+// ---------------------------------------------------------------------------
 // 4. THE SWEEP. Find sales we credited but never billed, and bill them.
 //
 // This is what actually collects. It is driven off advisor_actions rather than
@@ -624,5 +750,6 @@ async function charges(shop, limit = 50) {
 module.exports = {
   ensureTable, startSubscription, getSubscription, recordCommission, charges, graphql,
   sweepUnbilled, sweepAll, reverseAction, isTestStore, orderMoneyState, publicBase,
+  startCreditPurchase, finishCreditPurchase, CREDIT_PACKS,
   COMMISSION_RATE, DEFAULT_CAPPED_AMOUNT, TRIAL_DAYS, MAX_ATTEMPTS, RETRY_AFTER_MIN, TERMINAL
 };
