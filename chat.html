@@ -1,14 +1,29 @@
 <!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
+<!--APP_BRIDGE-->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Smart Advisor</title>
-<!-- App Bridge. Must be the FIRST script on the page and must come from
-     Shopify's CDN — they check this, and a bundled copy is not supported.
-     data-api-key is filled in by the server-rendered value below.
-     Harmless when the page is opened standalone: the script simply finds no
-     host to attach to. -->
+<!-- The APP_BRIDGE marker comment above is replaced by the server with the
+     real App Bridge script tag, carrying this app's key. (Written without the
+     literal marker here: HTML comments do not nest, so repeating it would end
+     this comment early and spill the rest of the text onto the page.)
+
+     It has to be a STATIC tag, and the first script on the page. Loading it
+     dynamically — document.createElement('script') — is what the first attempt
+     did, and App Bridge refuses outright:
+
+       The script tag loading App Bridge has `async`
+       Uncaught Error: Shopify's App Bridge must be included as the first
+       script tag and must link to Shopify's CDN. Do not use async, defer or
+       type=module. Aborting.
+
+     A dynamically created script is async by default, so there is no way to
+     inject it and have it work. window.shopify stayed undefined, the embedded
+     sign-in could not get a session token, and the merchant was shown the
+     password screen inside the Shopify admin — the exact thing embedding was
+     built to remove. -->
 <script>
   // Boot the embedded experience only when Shopify actually opened us. `host`
   // is the parameter Shopify adds, and its absence means the merchant is on the
@@ -884,27 +899,29 @@
     return null;
   }
 
+  // App Bridge is already on the page — the server stamped a static <script>
+  // tag into <head> before anything else. It CANNOT be injected from here: a
+  // dynamically created script is async by default and App Bridge aborts on
+  // async, which is exactly what the first version of this did. The merchant
+  // got the password screen inside the Shopify admin and the only trace was one
+  // console error.
+  //
+  // So this waits for the global the tag defines, rather than creating it.
   async function bootAppBridge() {
     if (!EMBEDDED) return;
-    try {
-      const res = await fetch('/api/app-bridge-config');
-      const cfg = await res.json();
-      if (!cfg.ok || !cfg.api_key) {
-        console.warn('[app-bridge] no api key configured; staying standalone');
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      if (window.shopify && typeof window.shopify.idToken === 'function') {
+        APP_BRIDGE_READY = true;
         return;
       }
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://cdn.shopify.com/shopifycloud/app-bridge.js';
-        s.setAttribute('data-api-key', cfg.api_key);
-        s.onload = resolve;
-        s.onerror = () => reject(new Error('app-bridge failed to load'));
-        document.head.appendChild(s);
-      });
-      APP_BRIDGE_READY = true;
-    } catch (e) {
-      console.warn('[app-bridge]', e.message);
+      await new Promise(r => setTimeout(r, 100));
     }
+    // Say why, loudly. Falling back to the password gate silently is how this
+    // went unnoticed the first time.
+    console.error('[app-bridge] window.shopify never appeared. The app will ask for a password, '
+      + 'which is wrong inside the Shopify admin. Check that the App Bridge script tag is the '
+      + 'FIRST script in <head>, has no async/defer, and carries a valid data-api-key.');
   }
   let IS_MASTER = false;
   let history = [];

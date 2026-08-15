@@ -2569,6 +2569,31 @@ app.post("/api/transcribe", express.json({ limit: '15mb' }), async (req, res) =>
 // hosts add by default) shows the merchant a blank panel. It has to be the
 // shop from the request, not a wildcard, so one merchant's admin cannot frame
 // another merchant's session.
+// chat.html is served with the App Bridge tag rendered in, because App Bridge
+// must be a STATIC first script and refuses to run if injected dynamically:
+//
+//   Shopify's App Bridge must be included as the first <script> tag and must
+//   link to Shopify's CDN. Do not use async, defer or type=module. Aborting.
+//
+// So the page ships with a marker comment and the key is stamped in here. Read
+// once and cached: it changes only on deploy.
+let _chatHtml = null;
+function renderAppPage() {
+  if (_chatHtml) return _chatHtml;
+  const raw = require("fs").readFileSync(__dirname + "/chat.html", "utf8");
+  const key = shopifyClientId();
+  const tag = key
+    ? `<script src="https://cdn.shopify.com/shopifycloud/app-bridge.js" data-api-key="${key}"></script>`
+    : "<!-- App Bridge: no client id configured -->";
+  _chatHtml = raw.replace("<!--APP_BRIDGE-->", tag);
+  return _chatHtml;
+}
+
+function sendAppPage(req, res) {
+  embeddableHeaders(req, res);
+  res.set("Content-Type", "text/html; charset=utf-8").send(renderAppPage());
+}
+
 function embeddableHeaders(req, res) {
   const shop = String(req.query.shop || "").toLowerCase().trim();
   if (isValidShopDomain(shop)) {
@@ -2584,17 +2609,13 @@ function embeddableHeaders(req, res) {
   res.removeHeader("X-Frame-Options");
 }
 
-app.get("/chat", (req, res) => {
-  embeddableHeaders(req, res);
-  res.sendFile(__dirname + "/chat.html");
-});
+app.get("/chat", (req, res) => sendAppPage(req, res));
 
 // Shopify opens the app at its App URL with ?shop=&host=&embedded=1. Send that
 // straight to the same surface so there is one page to maintain.
 app.get("/", (req, res, next) => {
   if (!req.query.shop && !req.query.host) return next();
-  embeddableHeaders(req, res);
-  res.sendFile(__dirname + "/chat.html");
+  sendAppPage(req, res);
 });
 
 // The API key the front end needs to boot App Bridge. Public by design — it is
