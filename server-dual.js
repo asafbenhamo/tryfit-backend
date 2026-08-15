@@ -389,6 +389,40 @@ function shopifyAppSecret() {
   return process.env.SHOPIFY_API_SECRET || process.env.ADVISOR_SHOPIFY_SECRET || null;
 }
 
+// Every secret a webhook might legitimately be signed with, newest first.
+//
+// Moving to a different Shopify app changes the signing secret, but the stores
+// already installed on the OLD app keep sending webhooks signed with the OLD
+// one until each of them reinstalls. With a single secret those all fail HMAC
+// and are rejected — silently, from the merchant's side: orders and abandoned
+// checkouts simply stop arriving in real time, and nothing in the app says why.
+//
+// SHOPIFY_API_SECRET_PREVIOUS keeps those stores working through the move.
+// Remove it once every store has reinstalled; leaving it forever means an old
+// leaked secret stays valid, which is exactly what rotation is meant to end.
+function shopifyAppSecrets() {
+  return [
+    process.env.SHOPIFY_API_SECRET,
+    process.env.ADVISOR_SHOPIFY_SECRET,
+    process.env.SHOPIFY_API_SECRET_PREVIOUS
+  ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
+}
+
+// Is this body genuinely from Shopify? Timing-safe against every accepted
+// secret. Shared by all four webhook entry points, which previously each did
+// their own comparison and two of them used !== on base64 strings.
+function webhookHmacOk(rawBody, hmacHeader) {
+  if (!hmacHeader) return false;
+  let given;
+  try { given = Buffer.from(String(hmacHeader), "base64"); }
+  catch (e) { return false; }
+  for (const secret of shopifyAppSecrets()) {
+    const digest = crypto.createHmac("sha256", secret).update(rawBody).digest();
+    if (given.length === digest.length && crypto.timingSafeEqual(digest, given)) return true;
+  }
+  return false;
+}
+
 function verifyShopifyWebhook(req, res, next) {
   const hmacHeader = req.headers["x-shopify-hmac-sha256"];
   const secret = shopifyAppSecret();
@@ -403,12 +437,7 @@ function verifyShopifyWebhook(req, res, next) {
     ? req.body
     : Buffer.from(typeof req.body === "string" ? req.body : JSON.stringify(req.body || {}), "utf8");
 
-  const digest = crypto.createHmac("sha256", secret).update(rawBody).digest();
-  let given;
-  try { given = Buffer.from(String(hmacHeader), "base64"); }
-  catch (e) { return res.status(401).json({ error: "Unauthorized - Invalid HMAC" }); }
-
-  if (given.length !== digest.length || !crypto.timingSafeEqual(digest, given)) {
+  if (!webhookHmacOk(rawBody, hmacHeader)) {
     return res.status(401).json({ error: "Unauthorized - Invalid HMAC" });
   }
 
@@ -4579,14 +4608,15 @@ app.post("/webhooks/app/scopes_update", express.raw({ type: "*/*" }), verifyShop
 function handleCheckoutWebhook(req, res) {
   try {
     const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-    const secret = shopifyAppSecret();
     const rawBody = req.body;
 
-    if (!hmacHeader || !secret) {
+    if (!hmacHeader || !shopifyAppSecret()) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-    const hash = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
-    if (hash !== hmacHeader) {
+    // Shared helper: timing-safe, and accepts the previous app secret while
+    // stores migrate. This used to compare base64 strings with !==, which
+    // returns faster the earlier the first difference is.
+    if (!webhookHmacOk(rawBody, hmacHeader)) {
       console.log("⚠️  [Webhook] Checkout HMAC mismatch - rejected");
       return res.status(401).json({ error: "Invalid HMAC" });
     }
@@ -4633,11 +4663,9 @@ app.post("/webhooks/checkouts/update", express.raw({ type: "application/json" })
 function handleOrderWebhook(req, res) {
   try {
     const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-    const secret = shopifyAppSecret();
     const rawBody = req.body;
-    if (!hmacHeader || !secret) return res.status(401).json({ error: "Unauthorized" });
-    const hash = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
-    if (hash !== hmacHeader) {
+    if (!hmacHeader || !shopifyAppSecret()) return res.status(401).json({ error: "Unauthorized" });
+    if (!webhookHmacOk(rawBody, hmacHeader)) {
       console.log("⚠️  [Webhook] Order HMAC mismatch - rejected");
       return res.status(401).json({ error: "Invalid HMAC" });
     }
