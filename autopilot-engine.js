@@ -202,6 +202,11 @@ async function runForShop(shop, opts = {}) {
     // ---- what worked, and what the base looks like now -----------------------
     const stats = await policy.learn(shop);
     const scored = await rfmEngine.computeRFM(shop, { limit: 2000, lang: settings.language });
+    // The autopilot reads the customer base directly, not through ai-tools, so
+    // its access is logged here — same audit trail, different door in.
+    try {
+      require('./pcd-log').logAccess(shop, { actor: 'autopilot', purpose: 'rfm-scoring', count: (scored || []).length });
+    } catch (e) { /* the run must never fail because of its own audit */ }
     if (!scored || scored.length === 0) {
       await finishRun(runId, { status: 'skipped', details: { reason: 'no_customers' } });
       return { ok: true, skipped: 'no_customers' };

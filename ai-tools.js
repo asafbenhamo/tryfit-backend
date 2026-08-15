@@ -1060,28 +1060,36 @@ async function sendSms(shop, options = {}) {
   }
 };
 
+// The functions that return customers' PERSONAL DATA are exported through an
+// audit wrapper (see pcd-log.js): every call is logged with shop, tool name
+// and row count. Wrapping at the export site covers every caller — the chat
+// agent, the plan endpoints, the autopilot, and whatever is added next —
+// which is the property a per-call-site approach loses the day someone adds
+// an eleventh caller. Product/revenue tools carry no PII and go out bare.
+const { audited } = require('./pcd-log');
+
 module.exports = {
-  getAudienceCounts,
+  getAudienceCounts,                                          // counts only
   getCollections,
-  getTopCustomers,
-  getDormantCustomers,
-  getNeverPurchased,
-  getRepeatCustomers,
-  getCustomerProfile,
-  searchCustomers,
+  getTopCustomers: audited('getTopCustomers', getTopCustomers),
+  getDormantCustomers: audited('getDormantCustomers', getDormantCustomers),
+  getNeverPurchased: audited('getNeverPurchased', getNeverPurchased),
+  getRepeatCustomers: audited('getRepeatCustomers', getRepeatCustomers),
+  getCustomerProfile: audited('getCustomerProfile', getCustomerProfile),
+  searchCustomers: audited('searchCustomers', searchCustomers),
   getTopProducts,
   getRevenueStats,
   getTryFitInsights,
   generateWhatsAppMessage,
-  getCustomerPurchases,
+  getCustomerPurchases: audited('getCustomerPurchases', getCustomerPurchases),
   getStoreProducts,
-  getAbandonedCheckouts,
+  getAbandonedCheckouts: audited('getAbandonedCheckouts', getAbandonedCheckouts),
   getCrossSellData,
   getCampaignPerformance,
   getProductVariants,
-  getCustomerSizes,
+  getCustomerSizes: audited('getCustomerSizes', getCustomerSizes),
   getTodayActivity,
   getNewestProducts,
-  getRFMSegments,
-  sendSms
+  getRFMSegments: audited('getRFMSegments', getRFMSegments),
+  sendSms                                                     // logged in advisor_actions
 };
