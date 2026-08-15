@@ -1,20 +1,77 @@
-# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+# ============================================================================
+# Shopify app configuration — the file `shopify app deploy` publishes.
+#
+# `shopify app config link` generated this for a NEWLY CREATED app, so every
+# URL in it was Shopify's placeholder (shopify.dev/apps/default-app-home).
+# Deploying that would have pointed the app at Shopify's own demo server
+# instead of ours: the admin would load a stranger's page, and OAuth would try
+# to hand the authorization code to a host that has never heard of this store.
+# Corrected below, with the reason kept next to each so nobody "tidies" them
+# back to the defaults.
+# ============================================================================
 
 client_id = "d995a75ee3632995e51758b7dc40c4b5"
-name = "smart advisor2"
-application_url = "https://shopify.dev/apps/default-app-home"
+name = "Smart Advisor"
+handle = "smart-advisor2"
+
+# Where Shopify loads the app inside the admin. Was shopify.dev's demo page.
+# The app root serves the app when Shopify passes ?shop= and ?host=.
+application_url = "https://tryfit-backend-production.up.railway.app"
 embedded = true
 
-[build]
-automatically_update_urls_on_dev = true
-include_config_on_deploy = true
-
-[webhooks]
-api_version = "2026-10"
-
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 scopes = "read_checkouts,read_customers,read_discounts,read_fulfillments,read_inventory,read_locations,read_marketing_events,read_orders,read_price_rules,read_products,write_customers,write_discounts,write_draft_orders"
+optional_scopes = [ ]
+use_legacy_install_flow = false
 
 [auth]
-redirect_urls = [ "https://shopify.dev/apps/default-app-home/api/auth" ]
+# Was pointing at shopify.dev. Without the real callback here, OAuth cannot
+# complete: Shopify refuses to send the code to a URL that is not on this list.
+redirect_urls = [
+  "https://tryfit-backend-production.up.railway.app/auth/callback"
+]
+
+[webhooks]
+# Pinned to the version the server actually calls. The CLI defaulted to 2026-10;
+# every Shopify call in this codebase is 2026-01, and a webhook payload from a
+# different version can carry differently shaped fields than the handlers expect.
+api_version = "2026-01"
+
+  # The three Shopify requires of every app. All three are handled at one
+  # endpoint that verifies the HMAC over the raw body and fails closed.
+  # Declared here so a deploy sets them, rather than depending on someone
+  # pasting the same URL into three boxes and getting all three right.
+  [webhooks.privacy_compliance]
+  customer_data_request_url = "https://tryfit-backend-production.up.railway.app/webhooks/compliance"
+  customer_deletion_url = "https://tryfit-backend-production.up.railway.app/webhooks/compliance"
+  shop_deletion_url = "https://tryfit-backend-production.up.railway.app/webhooks/compliance"
+
+  # Also registered per-install by the OAuth callback. Declared here as well so
+  # a shop whose registration call failed at install time still reaches us —
+  # that loop swallows its errors, so a silent failure is possible.
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "https://tryfit-backend-production.up.railway.app/webhooks/app/uninstalled"
+
+  [[webhooks.subscriptions]]
+  topics = [ "orders/create" ]
+  uri = "https://tryfit-backend-production.up.railway.app/webhooks/orders/create"
+
+  [[webhooks.subscriptions]]
+  topics = [ "checkouts/create" ]
+  uri = "https://tryfit-backend-production.up.railway.app/webhooks/checkouts/create"
+
+  [[webhooks.subscriptions]]
+  topics = [ "checkouts/update" ]
+  uri = "https://tryfit-backend-production.up.railway.app/webhooks/checkouts/update"
+
+[pos]
+embedded = false
+
+[build]
+# automatically_update_urls_on_dev was left ON by the CLI. It rewrites
+# application_url and redirect_urls to a temporary tunnel every time
+# `shopify app dev` runs — which would silently point the LIVE app at a tunnel
+# that stops existing the moment the laptop closes.
+automatically_update_urls_on_dev = false
+include_config_on_deploy = true
