@@ -37,6 +37,7 @@ async function discountTitle(shop, key, vars) {
 const storeTime = require("./store-time");
 const sessionAuth = require("./session-auth");
 const shopifySessionToken = require("./shopify-session-token");
+const shopifyTokens = require("./shopify-tokens");
 const login2fa = require("./login-2fa");
 const popupEngine = require("./popup-engine");
 const { POPUP_SCRIPT } = require("./popup-script");
@@ -5023,20 +5024,32 @@ app.get("/auth/callback", async (req, res) => {
     }
     const shopDomain = shop.toLowerCase().trim();
 
-    // Exchange the temporary code for a permanent access token.
-    const tokenRes = await fetch(`https://${shopDomain}/admin/oauth/access_token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: ADVISOR_SHOPIFY_KEY,
-        client_secret: ADVISOR_SHOPIFY_SECRET,
-        code
-      })
-    });
-    const tokenData = await tokenRes.json();
-    if (!tokenData.access_token) {
-      console.error("[OAuth] token exchange failed:", JSON.stringify(tokenData).slice(0, 200));
+    // Exchange the temporary code for an EXPIRING offline access token.
+    //
+    // "Permanent" is what this used to ask for, and Shopify now refuses to
+    // honour those: every Admin API call comes back 403 with "Non-expiring
+    // access tokens are no longer accepted". Required for public apps created
+    // from 1 April 2026, and for all of them by 1 January 2027.
+    //
+    // What comes back is a pair: an access token good for an hour, and a
+    // refresh token good for 90 days that is renewed every time it is used. The
+    // refresh needs no merchant, which is the only reason the unattended work
+    // still functions. See shopify-tokens.js.
+    let tokens;
+    try {
+      tokens = await shopifyTokens.exchangeCode(shopDomain, {
+        code,
+        clientId: ADVISOR_SHOPIFY_KEY,
+        clientSecret: ADVISOR_SHOPIFY_SECRET
+      });
+    } catch (e) {
+      console.error("[OAuth] token exchange failed:", e.message);
       return res.status(400).send("קבלת ה-token נכשלה. נסה שוב.");
+    }
+    const tokenData = { access_token: tokens.access_token };
+    if (!tokens.expiring) {
+      console.warn(`[OAuth] ${shopDomain}: Shopify returned a NON-expiring token. ` +
+        "That still works today but is rejected for public apps from 2027-01-01.");
     }
 
     // Use the operator-chosen password if provided in the install link, else random.
@@ -5067,6 +5080,9 @@ app.get("/auth/callback", async (req, res) => {
       owner_email: ownerEmail,
       public_domain: shopInfo.domain || null
     });
+    // The refresh token and both deadlines. Without these the access token is
+    // useless in an hour and the store silently goes dark.
+    await shopify.saveTokens(shopDomain, tokens);
 
     // Per-shop defaults: brand from the real shop name, language by country,
     // currency accordingly, daily smart-outreach cap 500.

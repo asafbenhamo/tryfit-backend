@@ -155,6 +155,7 @@ let GRAPHQL_FAILS = 0;
 const shopifyStub = {
   hasTokenForShop: () => true,
   getTokenForShop: () => 'tok',
+  getFreshToken: async () => 'tok',
   shopifyGet: async (shop, path) => {
     const m = path.match(/^orders\/(\d+)\.json$/);
     if (m) return ORDERS[m[1]] ? { order: ORDERS[m[1]] } : {};

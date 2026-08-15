@@ -65,8 +65,8 @@ const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 async function shopifyPost(shop, endpoint, body) {
-  const token = shopify.getTokenForShop(shop);
-  if (!token) throw new Error(`no access token for ${shop} — is the app connected?`);
+  const token = await shopify.getFreshToken(shop);
+  if (!token) throw new Error(`no usable access token for ${shop} — reconnect the app`);
   const res = await fetch(`https://${shop}/admin/api/2026-01/${endpoint}`, {
     method: 'POST',
     headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },

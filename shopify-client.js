@@ -43,6 +43,11 @@ async function ensureStoreTable() {
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS wa_language TEXT DEFAULT 'he'`).catch(()=>{});
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS logo_url TEXT`).catch(()=>{});
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS owner_email TEXT`).catch(()=>{});
+    // Expiring offline access tokens. Shopify stopped accepting the permanent
+    // kind this app was built on; see shopify-tokens.js.
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS refresh_token TEXT`).catch(()=>{});
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS access_expires_at TIMESTAMPTZ`).catch(()=>{});
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS refresh_expires_at TIMESTAMPTZ`).catch(()=>{});
   } catch (err) {
     console.error('⚠️  [stores] ensureStoreTable failed:', err.message);
   }
@@ -52,7 +57,7 @@ async function ensureStoreTable() {
 async function loadStores() {
   try {
     await ensureStoreTable();
-    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at, d360_api_key, wa_language, logo_url, owner_email FROM advisor_stores WHERE active = TRUE`);
+    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at, d360_api_key, wa_language, logo_url, owner_email, refresh_token, access_expires_at, refresh_expires_at FROM advisor_stores WHERE active = TRUE`);
     storeCache.clear();
     for (const row of r.rows) {
       storeCache.set(row.shop_domain.toLowerCase().trim(), {
@@ -68,7 +73,10 @@ async function loadStores() {
         d360_api_key: vault.decrypt(row.d360_api_key),
         wa_language: row.wa_language || 'he',
         logo_url: row.logo_url || null,
-        owner_email: row.owner_email || null
+        owner_email: row.owner_email || null,
+        refresh_token: vault.decrypt(row.refresh_token),
+        access_expires_at: row.access_expires_at || null,
+        refresh_expires_at: row.refresh_expires_at || null
       });
     }
     console.log(`🏪 [stores] loaded ${storeCache.size} store(s) from DB`);
@@ -307,12 +315,130 @@ function hasTokenForShop(shopDomain) {
   return getTokenForShop(shopDomain) !== null;
 }
 
+// ---------------------------------------------------------------------------
+// EXPIRING TOKENS
+//
+// Shopify now rejects the permanent tokens this app was built on. Access tokens
+// live an hour; a refresh token (90 days, renewed on every use) buys a new pair
+// without the merchant present, which is what keeps the unattended work — the
+// morning run, the attribution scan, the billing sweep — possible at all.
+//
+// getTokenForShop stays synchronous because a dozen call sites and
+// hasTokenForShop depend on it. Everything that actually CALLS Shopify goes
+// through getFreshToken instead, which refreshes first when the token is close
+// to expiry.
+// ---------------------------------------------------------------------------
+const shopifyTokens = require('./shopify-tokens');
+
+async function getFreshToken(shopDomain) {
+  const shop = (shopDomain || '').toLowerCase().trim();
+  if (!shop) return null;
+
+  // The pilot store's env token is managed outside this table.
+  const envVar = SHOP_TOKEN_MAP[shop];
+  if (envVar && process.env[envVar]) return process.env[envVar];
+
+  const store = storeCache.get(shop);
+  if (!store || !store.token) return null;
+
+  // A legacy non-expiring token has no expiry and nothing to refresh with. It
+  // keeps working until Shopify's cutoff; upgradeShopToken() converts it.
+  if (!store.refresh_token || !store.access_expires_at) return store.token;
+
+  if (!shopifyTokens.isExpired(store.access_expires_at)) return store.token;
+
+  if (shopifyTokens.needsReconnect(store)) {
+    console.error(`[tokens] ${shop}: refresh token has expired — the merchant must reconnect`);
+    return null;
+  }
+
+  // One refresh per shop, however many callers noticed at once.
+  return shopifyTokens.once(shop, async () => {
+    try {
+      const fresh = await shopifyTokens.refresh(shop, {
+        refreshToken: store.refresh_token,
+        clientId: appClientId(),
+        clientSecret: appClientSecret()
+      });
+      await saveTokens(shop, fresh);
+      console.log(`[tokens] ${shop}: access token refreshed`);
+      return fresh.access_token;
+    } catch (e) {
+      if (e.needsReconnect) {
+        console.error(`[tokens] ${shop}: refresh rejected — the merchant must reconnect. ${e.message}`);
+        // Clear the deadline so we stop hammering Shopify on every request.
+        await db.query(
+          `UPDATE advisor_stores SET refresh_expires_at = NOW() WHERE shop_domain = $1`, [shop]
+        ).catch(() => {});
+        await loadStores();
+        return null;
+      }
+      console.error(`[tokens] ${shop}: refresh failed, using the existing token — ${e.message}`);
+      return store.token;   // transient; the call may still work
+    }
+  });
+}
+
+// The app's own credentials. Read the same names the server resolves, so a
+// migration to a new Shopify app does not leave this module on the old one.
+function appClientId() {
+  for (const n of ['ADVISOR_SHOPIFY_KEY2', 'ADVISOR_SHOPIFY_KEY', 'SHOPIFY_API_KEY']) {
+    if ((process.env[n] || '').trim()) return process.env[n].trim();
+  }
+  return null;
+}
+function appClientSecret() {
+  for (const n of ['SHOPIFY_API_SECRET2', 'ADVISOR_SHOPIFY_SECRET2', 'SHOPIFY_API_SECRET', 'ADVISOR_SHOPIFY_SECRET']) {
+    if ((process.env[n] || '').trim()) return process.env[n].trim();
+  }
+  return null;
+}
+
+// Persist a token pair. Encrypted, like every other credential here.
+async function saveTokens(shopDomain, t) {
+  const shop = (shopDomain || '').toLowerCase().trim();
+  await db.query(
+    `UPDATE advisor_stores
+        SET access_token = $2, refresh_token = $3,
+            access_expires_at = $4, refresh_expires_at = $5
+      WHERE shop_domain = $1`,
+    [shop, vault.encrypt(t.access_token), vault.encrypt(t.refresh_token || null),
+     t.access_expires_at, t.refresh_expires_at]
+  );
+  await loadStores();
+  return { ok: true };
+}
+
+// Convert a shop still holding a permanent token into an expiring pair, with no
+// merchant involvement. Shopify requires every public app to have done this by
+// 1 January 2027; doing it lazily means a store keeps working right up until it
+// is first touched after the change ships.
+async function upgradeShopToken(shopDomain) {
+  const shop = (shopDomain || '').toLowerCase().trim();
+  const store = storeCache.get(shop);
+  if (!store || !store.token) return { ok: false, error: 'no_token' };
+  if (store.refresh_token) return { ok: true, already: true };
+  try {
+    const fresh = await shopifyTokens.upgradeLegacyToken(shop, {
+      legacyToken: store.token,
+      clientId: appClientId(),
+      clientSecret: appClientSecret()
+    });
+    await saveTokens(shop, fresh);
+    console.log(`[tokens] ${shop}: upgraded to an expiring token`);
+    return { ok: true, upgraded: true };
+  } catch (e) {
+    console.error(`[tokens] ${shop}: upgrade failed — ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+}
+
 /**
  * Generic Shopify Admin API GET request.
  * Handles rate limiting, retries, and pagination.
  */
 async function shopifyGet(shopDomain, endpoint, retries = 3) {
-  const token = getTokenForShop(shopDomain);
+  const token = await getFreshToken(shopDomain);
   if (!token) {
     throw new Error(`No token configured for shop: ${shopDomain}`);
   }
@@ -789,7 +915,7 @@ async function getAllCustomers(shopDomain, onProgress = null) {
   const customers = [];
   let sinceId = 0;
   let page = 1;
-  const token = getTokenForShop(shopDomain);
+  const token = await getFreshToken(shopDomain);
   if (!token) throw new Error(`No token for ${shopDomain}`);
 
   while (true) {
@@ -844,7 +970,7 @@ async function getAllOrders(shopDomain, onProgress = null) {
   const orders = [];
   let sinceId = 0;
   let page = 1;
-  const token = getTokenForShop(shopDomain);
+  const token = await getFreshToken(shopDomain);
   if (!token) throw new Error(`No token for ${shopDomain}`);
 
   while (true) {
@@ -1001,7 +1127,7 @@ async function getAllProducts(shopDomain, onProgress = null) {
   const products = [];
   let sinceId = 0;
   let page = 1;
-  const token = getTokenForShop(shopDomain);
+  const token = await getFreshToken(shopDomain);
   if (!token) throw new Error(`No token for ${shopDomain}`);
 
   while (true) {
@@ -1149,7 +1275,7 @@ async function getAllAbandonedCheckouts(shopDomain, onProgress = null) {
   const checkouts = [];
   let sinceId = 0;
   let page = 1;
-  const token = getTokenForShop(shopDomain);
+  const token = await getFreshToken(shopDomain);
   if (!token) throw new Error(`No token for ${shopDomain}`);
 
   while (true) {
@@ -1305,7 +1431,7 @@ async function syncAbandonedCheckouts(shopDomain) {
 async function deleteDiscountCode(shopDomain, priceRuleId) {
   if (!priceRuleId || !hasTokenForShop(shopDomain)) return { ok: false };
   try {
-    const token = getTokenForShop(shopDomain);
+    const token = await getFreshToken(shopDomain);
     const base = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}`;
     const headers = { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' };
     await fetch(`${base}/price_rules/${priceRuleId}.json`, { method: 'DELETE', headers });
@@ -1319,7 +1445,7 @@ async function createDiscountCode(shopDomain, opts = {}) {
   if (!hasTokenForShop(shopDomain)) {
     return { ok: false, error: 'no_token' };
   }
-  const token = getTokenForShop(shopDomain);
+  const token = await getFreshToken(shopDomain);
   const base = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}`;
   const headers = { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' };
 
@@ -1457,7 +1583,7 @@ async function createDiscountCode(shopDomain, opts = {}) {
  */
 async function createDraftOrder(shopDomain, opts = {}) {
   if (!hasTokenForShop(shopDomain)) return { ok: false, error: 'no_token' };
-  const token = getTokenForShop(shopDomain);
+  const token = await getFreshToken(shopDomain);
   const base = `https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}`;
   const headers = { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' };
 
@@ -1515,6 +1641,9 @@ async function createDraftOrder(shopDomain, opts = {}) {
 
 module.exports = {
   shopifyGet,
+  getFreshToken,
+  saveTokens,
+  upgradeShopToken,
   hasTokenForShop,
   getTokenForShop,
   loadStores,

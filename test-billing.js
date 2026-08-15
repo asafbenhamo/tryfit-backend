@@ -58,7 +58,14 @@ const origLoad = Module._load;
 Module._load = function (request) {
   const base = request.replace(/^\.\//, '').replace(/\.js$/, '');
   if (base === 'database') return dbStub;
-  if (base === 'shopify-client') return { getTokenForShop: () => 'shpat_fake' };
+  // getFreshToken is what billing calls now — tokens expire hourly, so the
+  // client refreshes before every request. getTokenForShop is kept because
+  // hasTokenForShop still uses it.
+  if (base === 'shopify-client') return {
+    getTokenForShop: () => 'shpat_fake',
+    getFreshToken: async () => 'shpat_fake',
+    hasTokenForShop: () => true
+  };
   return origLoad.apply(this, arguments);
 };
 

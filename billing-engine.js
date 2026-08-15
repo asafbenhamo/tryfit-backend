@@ -126,8 +126,10 @@ const MAX_ATTEMPTS = 8;
 // GraphQL. The billing API is GraphQL-only; shopify-client only speaks REST.
 // ---------------------------------------------------------------------------
 async function graphql(shop, query, variables = {}) {
-  const token = shopify.getTokenForShop(shop);
-  if (!token) throw new Error(`no access token for ${shop}`);
+  // getFreshToken, not getTokenForShop: tokens expire hourly now and this is
+  // the client that raises charges, where a 403 is money not collected.
+  const token = await shopify.getFreshToken(shop);
+  if (!token) throw new Error(`no usable access token for ${shop} (may need reconnecting)`);
   const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
     method: 'POST',
     headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
