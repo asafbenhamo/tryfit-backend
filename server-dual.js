@@ -538,6 +538,34 @@ app.post("/api/settings", express.json(), async (req, res) => {
 // Is the AI actually reachable? A GET so it can be opened straight from a
 // browser when the chat "just doesn't answer" — it distinguishes a missing key
 // from an exhausted balance from a slow model, instead of leaving you guessing.
+// Is this deployment configured to keep secrets secret?
+//
+// crypto-vault falls back to storing PLAINTEXT when ENCRYPTION_KEY is missing —
+// deliberately, so a missing key does not take the app down. The cost of that
+// choice is that nothing downstream looks any different, and the one warning
+// scrolls past in a boot log nobody reads. Before connecting a real store, the
+// answer to "are its access token and password actually encrypted?" should be
+// checkable rather than assumed.
+//
+// Authenticated, and boolean only: "encryption is off" is useful to an attacker
+// and is not something to publish on a public endpoint.
+app.get("/api/health/security", (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  const vault = require("./crypto-vault");
+  const encryption = vault.isEnabled();
+  res.json({
+    ok: true,
+    encryption_at_rest: encryption,
+    // Said plainly, because the point of this endpoint is to be acted on.
+    warning: encryption ? null
+      : "ENCRYPTION_KEY is not set. Shopify access tokens and merchant passwords are being stored in plaintext. Set it in Railway before connecting a store with real customers.",
+    session_tokens_hashed: true,
+    webhooks_verified: !!shopifyAppSecret(),
+    two_step_login: true
+  });
+});
+
 app.get("/api/health/ai", async (req, res) => {
   const shop = resolveShop(req);
   if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
