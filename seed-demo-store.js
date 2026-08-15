@@ -73,12 +73,18 @@ const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function shopifyPost(shop, endpoint, body) {
+async function shopifyPost(shop, endpoint, body, method = 'POST') {
   const token = await shopify.getFreshToken(shop);
   if (!token) throw new Error(`no usable access token for ${shop} — reconnect the app`);
   const res = await fetch(`https://${shop}/admin/api/2026-01/${endpoint}`, {
-    method: 'POST',
-    headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+    method,
+    headers: {
+      'X-Shopify-Access-Token': token,
+      'Content-Type': 'application/json',
+      // Without an explicit Accept, Shopify answers 406 with an EMPTY body on
+      // some endpoints — an error that says nothing about what is wrong.
+      'Accept': 'application/json'
+    },
     body: JSON.stringify(body)
   });
   const text = await res.text();
@@ -126,6 +132,65 @@ async function looksLikeDevStore(shop) {
   }
 }
 
+// Remove what earlier runs left behind.
+//
+// Every failed run still creates rows: customers that succeeded before the
+// failure, and draft orders that were created but never completed. Run the
+// seeder three times and the store holds sixty customers and a hundred
+// dangling drafts, and the numbers the agent reports stop meaning anything.
+//
+// Only ever touches things tagged `seeded-demo`, which only this script
+// applies — a real customer is never in scope.
+async function clean(shop) {
+  console.log('\nRemoving data from earlier runs (tagged seeded-demo)...');
+  const token = await shopify.getFreshToken(shop);
+  const del = async (path) => {
+    const r = await fetch(`https://${shop}/admin/api/2026-01/${path}`, {
+      method: 'DELETE',
+      headers: { 'X-Shopify-Access-Token': token, 'Accept': 'application/json' }
+    });
+    return r.ok || r.status === 404;
+  };
+
+  let drafts = 0, custs = 0;
+  try {
+    // Dangling drafts first: a draft holding a customer blocks that customer's
+    // deletion, so the order matters.
+    const d = await shopify.shopifyGet(shop, 'draft_orders.json?limit=250&status=open');
+    for (const draft of (d.draft_orders || [])) {
+      if (!/seeded-demo/.test(draft.tags || '')) continue;
+      if (await del(`draft_orders/${draft.id}.json`)) drafts++;
+      await sleep(220);
+    }
+  } catch (e) { console.log('  drafts: ' + e.message.slice(0, 100)); }
+
+  try {
+    const c = await shopify.shopifyGet(shop, 'customers.json?limit=250');
+    for (const cust of (c.customers || [])) {
+      if (!/seeded-demo/.test(cust.tags || '')) continue;
+      if (await del(`customers/${cust.id}.json`)) custs++;
+      await sleep(220);
+    }
+  } catch (e) { console.log('  customers: ' + e.message.slice(0, 100)); }
+
+  // The local copies too, or the agent keeps reporting people who no longer
+  // exist in Shopify.
+  let localC = 0, localO = 0;
+  try {
+    const r1 = await db.query(
+      `DELETE FROM store_orders WHERE shop_domain=$1 AND shopify_customer_id IN (
+         SELECT shopify_customer_id FROM store_customers
+          WHERE shop_domain=$1 AND email LIKE '%@example.com') RETURNING id`, [shop]);
+    localO = r1.rows.length;
+    const r2 = await db.query(
+      `DELETE FROM store_customers WHERE shop_domain=$1 AND email LIKE '%@example.com' RETURNING id`, [shop]);
+    localC = r2.rows.length;
+  } catch (e) { console.log('  local: ' + e.message.slice(0, 100)); }
+
+  console.log(`Removed ${custs} customers and ${drafts} draft orders from Shopify, `
+    + `${localC} customers and ${localO} orders locally.`);
+}
+
 async function seed(shop, { customers = 20, force = false } = {}) {
   console.log(`\nSeeding ${shop}\n`);
 
@@ -136,8 +201,11 @@ async function seed(shop, { customers = 20, force = false } = {}) {
     for (let i = 0; i < profile.n; i++) {
       const first = pick(FIRST), last = pick(LAST);
       const email = `${first}.${last}${rnd(100, 999)}@example.com`.toLowerCase();
-      // Israeli mobile shape, so the SMS path has something valid to route.
-      const phone = '+9725' + rnd(0, 9) + String(rnd(1000000, 9999999));
+      // A REAL Israeli mobile prefix. '+9725' + any digit produced 51/56/57,
+      // which are not allocated, and Shopify refused the customer outright with
+      // 422 {"phone":["is invalid"]}. These are the prefixes actually in use.
+      const IL_PREFIX = ['50', '52', '53', '54', '55', '58'];
+      const phone = '+972' + pick(IL_PREFIX) + String(rnd(1000000, 9999999));
 
       let customer;
       try {
@@ -191,7 +259,10 @@ async function seed(shop, { customers = 20, force = false } = {}) {
               use_customer_default_address: false
             }
           });
-          await shopifyPost(shop, `draft_orders/${draft.draft_order.id}/complete.json`, {});
+          // PUT. Sending POST here returns 406 with no body, so every draft was
+          // created and none were ever turned into an order — the store filled up
+          // with drafts and the agent still had nothing to learn from.
+          await shopifyPost(shop, `draft_orders/${draft.draft_order.id}/complete.json`, {}, 'PUT');
           orderCount++;
         } catch (e) {
           console.log(`  order failed for ${email}: ${String(e.message).slice(0, 120)}`);
@@ -241,10 +312,15 @@ async function spreadDatesLocally(shop, created) {
   const confirmed = args.includes('--yes-write-to-this-store');
   const force = args.includes('--force');
   const skipDates = args.includes('--no-date-spread');
+  // --clean removes what earlier runs left; --clean-only stops after that.
+  const doClean = args.includes('--clean') || args.includes('--clean-only');
+  const cleanOnly = args.includes('--clean-only');
   const count = parseInt((args.find(a => a.startsWith('--customers=')) || '').split('=')[1], 10);
 
   if (!shop) {
     console.error('Usage: node seed-demo-store.js <shop.myshopify.com> --yes-write-to-this-store');
+    console.error('  --clean        remove data from earlier runs first');
+    console.error('  --clean-only   remove it and stop');
     process.exit(1);
   }
   if (PROTECTED.test(shop)) {
@@ -297,6 +373,9 @@ async function spreadDatesLocally(shop, created) {
     await bail(1);
   }
   if (!dev.ok && force) console.log('\n--force given on a non-development store. Proceeding.\n');
+
+  if (doClean) await clean(shop);
+  if (cleanOnly) { console.log('\nClean only — nothing seeded.'); await bail(0); }
 
   const created = await seed(shop, { customers: isNaN(count) ? 20 : count, force });
 
