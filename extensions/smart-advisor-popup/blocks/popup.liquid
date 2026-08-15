@@ -1,0 +1,44 @@
+{% comment %}
+  Smart Advisor — storefront signup popup.
+
+  This block loads one small script from the app. Everything the popup says and
+  does is configured in the Smart Advisor app rather than here, on purpose: the
+  merchant edits the wording in one place and sees it live, instead of hunting
+  through the theme editor and republishing.
+
+  `shop.permanent_domain` is used rather than `shop.domain` because the app
+  keys everything on the myshopify.com domain — a merchant may have several
+  custom domains, and they can change.
+
+  `defer` so it never blocks rendering: a signup panel must not slow down the
+  page it is asking someone to buy from.
+{% endcomment %}
+
+{% if block.settings.enabled %}
+  <script
+    src="{{ block.settings.app_url }}/popup.js?shop={{ shop.permanent_domain }}"
+    defer></script>
+{% endif %}
+
+{% schema %}
+{
+  "name": "Smart Advisor popup",
+  "target": "body",
+  "settings": [
+    {
+      "type": "checkbox",
+      "id": "enabled",
+      "label": "Show the signup popup",
+      "default": true,
+      "info": "Wording, timing and the offer are set inside the Smart Advisor app."
+    },
+    {
+      "type": "text",
+      "id": "app_url",
+      "label": "App URL",
+      "default": "https://tryfit-backend-production.up.railway.app",
+      "info": "Leave this as it is unless support asks you to change it."
+    }
+  ]
+}
+{% endschema %}

@@ -1,0 +1,17 @@
+# Theme app extension — how the popup gets onto the merchant's storefront.
+#
+# This is the supported way for an app to add something to a theme. The
+# alternative, editing theme.liquid through the Asset API, is what apps used to
+# do and it is now a review failure: it modifies files the merchant owns, breaks
+# on theme updates, and leaves debris behind when the app is uninstalled.
+#
+# An app embed block leaves the theme untouched. The merchant switches it on in
+# Online Store -> Themes -> Customize -> App embeds, and switching it off (or
+# uninstalling) removes it completely.
+
+api_version = "2026-01"
+
+[[extensions]]
+type = "theme"
+name = "Smart Advisor popup"
+handle = "smart-advisor-popup"

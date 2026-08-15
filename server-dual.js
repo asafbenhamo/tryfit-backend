@@ -38,6 +38,8 @@ const storeTime = require("./store-time");
 const sessionAuth = require("./session-auth");
 const shopifySessionToken = require("./shopify-session-token");
 const login2fa = require("./login-2fa");
+const popupEngine = require("./popup-engine");
+const { POPUP_SCRIPT } = require("./popup-script");
 const billing = require("./billing-engine");
 const policyEngine = require("./policy-engine");
 const autopilot = require("./autopilot-engine");
@@ -59,36 +61,54 @@ app.set("trust proxy", 1);
 // and some are embedded elsewhere: the tracked-click redirect, the unsubscribe
 // page, the privacy policy, health, and the webhook endpoints (which are called
 // server-to-server by Shopify and carry no browser origin anyway).
-const PUBLIC_CORS = /^\/(go\/|unsubscribe|privacy|terms|health|webhooks?\/|webhook\/)/;
+// The storefront popup is served to, and posts from, the MERCHANT'S OWN domain,
+// which is a different origin from ours and one we cannot enumerate in advance
+// (every shop has its own, plus myshopify.com, plus whatever custom domains they
+// add). So /popup.js and the public subscribe endpoint are genuinely open — they
+// hold no session, read nothing, and the only thing they accept is an email
+// address that the visitor typed on the merchant's own site.
+const PUBLIC_CORS = /^\/(go\/|unsubscribe|privacy|terms|health|popup|api\/public\/|webhooks?\/|webhook\/)/;
 const ALLOWED_ORIGINS = String(process.env.CORS_ORIGINS || "")
   .split(",").map(s => s.trim()).filter(Boolean);
 
-app.use(cors({
-  origin: function (origin, cb) {
-    // No Origin header at all: same-origin navigations, curl, and every
-    // server-to-server call. Never a cross-site browser request.
-    if (!origin) return cb(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    // Shopify's admin, for when the app is embedded there.
-    if (/^https:\/\/([a-z0-9-]+\.)?myshopify\.com$/i.test(origin)) return cb(null, true);
-    if (/^https:\/\/admin\.shopify\.com$/i.test(origin)) return cb(null, true);
-    // Our own origin.
-    try {
-      const base = billing.publicBase();
-      if (base && origin === base) return cb(null, true);
-    } catch (e) { /* fall through */ }
-    // Anything else gets no CORS headers, so the browser blocks the response.
-    // Not an error — an error here would break the public paths below.
-    return cb(null, false);
-  },
-  methods: ["GET", "POST", "OPTIONS", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning", "x-advisor-password", "x-advisor-token"]
+// The per-request form, because whether an origin is allowed depends on WHAT it
+// is asking for. Deciding by origin alone and then bolting the public paths on
+// in a later middleware does not work: cors() answers the OPTIONS preflight
+// itself, so by the time a later middleware runs, the browser has already been
+// told the request is not allowed. (Found by loading the popup on a pretend
+// storefront — the preflight failed on Content-Type, which is invisible until
+// something real makes a cross-origin POST.)
+app.use(cors((req, done) => {
+  const headers = ["Content-Type", "Authorization", "ngrok-skip-browser-warning",
+                   "x-advisor-password", "x-advisor-token"];
+  const methods = ["GET", "POST", "OPTIONS", "DELETE"];
+
+  // Genuinely public surfaces: the popup script and its subscribe endpoint run
+  // on the merchant's own domain, which we cannot enumerate; the rest hold no
+  // session and read nothing.
+  if (PUBLIC_CORS.test(req.path)) {
+    return done(null, { origin: true, methods, allowedHeaders: headers, maxAge: 600 });
+  }
+
+  return done(null, {
+    methods, allowedHeaders: headers,
+    origin: function (origin, cb) {
+      // No Origin header at all: same-origin navigations, curl, and every
+      // server-to-server call. Never a cross-site browser request.
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      // Shopify's admin, for when the app is embedded there.
+      if (/^https:\/\/([a-z0-9-]+\.)?myshopify\.com$/i.test(origin)) return cb(null, true);
+      if (/^https:\/\/admin\.shopify\.com$/i.test(origin)) return cb(null, true);
+      try {
+        const base = billing.publicBase();
+        if (base && origin === base) return cb(null, true);
+      } catch (e) { /* fall through */ }
+      // Anything else gets no CORS headers, so the browser blocks the response.
+      return cb(null, false);
+    }
+  });
 }));
-// The genuinely public, unauthenticated surfaces stay readable from anywhere.
-app.use((req, res, next) => {
-  if (PUBLIC_CORS.test(req.path)) res.set("Access-Control-Allow-Origin", "*");
-  next();
-});
 app.use((req, res, next) => {
   // Every one of these verifies an HMAC over the RAW request bytes, so they must
   // not be JSON-parsed here — express.raw is mounted on each route instead.
@@ -851,6 +871,151 @@ app.post("/api/autopilot/run-now", express.json(), async (req, res) => {
 // Still needs a lawyer's review before launch — the disclosures are accurate,
 // but accuracy is not the same as sufficiency in every jurisdiction.
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "support@smartadvisor.app";
+
+// ===========================================================================
+// STOREFRONT POPUP — the merchant's own site, not ours.
+//
+// /popup.js is a small self-contained script the merchant's theme loads. It
+// renders the signup panel, remembers who has already seen it, and posts the
+// address back here. No framework, no dependency, no tracking beyond what the
+// signup itself requires.
+// ===========================================================================
+function popupText(cfg, lang) {
+  const en = lang === "en";
+  return {
+    headline: cfg.headline || (en ? "Sign up for our newsletter" : "הצטרפו לרשימת התפוצה"),
+    subhead: cfg.subhead || (en
+      ? "Be the first to hear about new arrivals and offers"
+      : "היו הראשונים לשמוע על קולקציות חדשות והטבות"),
+    button: cfg.button_label || (en ? "Subscribe" : "הרשמה"),
+    email_ph: en ? "E-mail address" : "כתובת מייל",
+    woman: en ? "Woman" : "אישה",
+    man: en ? "Man" : "גבר",
+    consent: cfg.consent_text || (en
+      ? "I agree to receive marketing emails and accept the privacy policy."
+      : "אני מאשר/ת קבלת דיוור שיווקי ומסכים/ה למדיניות הפרטיות."),
+    success: cfg.success_text || (en ? "You're in. Check your inbox." : "נרשמת! בדקו את תיבת המייל."),
+    pending: en ? "Almost there — confirm from the email we just sent." : "כמעט סיימנו — אשרו במייל ששלחנו.",
+    invalid: en ? "That email does not look right." : "כתובת המייל לא נראית תקינה.",
+    failed: en ? "Something went wrong. Please try again." : "משהו השתבש. נסו שוב.",
+    close: en ? "Close" : "סגירה"
+  };
+}
+
+app.get("/popup.js", async (req, res) => {
+  const shop = String(req.query.shop || "").toLowerCase().trim();
+  res.set("Content-Type", "application/javascript; charset=utf-8");
+  // Short cache: the merchant changes the wording and expects to see it.
+  res.set("Cache-Control", "public, max-age=120");
+  if (!isValidShopDomain(shop)) return res.send("/* smart advisor: no shop */");
+
+  let cfg, lang = "en";
+  try {
+    cfg = await popupEngine.getConfig(shop);
+    lang = (await storeSettings.getSettings(shop).catch(() => ({}))).language || "en";
+  } catch (e) {
+    return res.send("/* smart advisor: unavailable */");
+  }
+  if (!cfg.enabled) return res.send("/* smart advisor: popup off */");
+
+  const T = popupText(cfg, lang);
+  const rtl = lang !== "en";
+  const base = billing.publicBase();
+  const payload = {
+    shop, base, rtl,
+    t: T,
+    image: cfg.image_url || null,
+    incentive: cfg.incentive || null,
+    askGender: !!cfg.ask_gender,
+    delay: Math.max(0, Number(cfg.delay_seconds) || 0) * 1000,
+    scrollPct: Math.max(0, Math.min(Number(cfg.show_after_scroll_pct) || 0, 100)),
+    freqDays: Math.max(0, Number(cfg.frequency_days) || 0)
+  };
+  res.send(POPUP_SCRIPT.replace("__CONFIG__", JSON.stringify(payload)));
+});
+
+// The public subscribe endpoint. Open by necessity — see PUBLIC_CORS above.
+app.post("/api/public/popup/subscribe", express.json({ limit: "4kb" }), async (req, res) => {
+  const shop = String((req.body && req.body.shop) || req.query.shop || "").toLowerCase().trim();
+  if (!isValidShopDomain(shop)) return res.status(400).json({ ok: false, error: "bad_shop" });
+  const ip = (req.headers["x-forwarded-for"] || req.ip || "").split(",")[0].trim();
+  try {
+    const r = await popupEngine.subscribe(shop, {
+      email: req.body && req.body.email,
+      gender: req.body && req.body.gender,
+      consentText: req.body && req.body.consent_text,
+      honeypot: req.body && req.body.company,   // the decoy field
+      sourceUrl: req.body && req.body.source_url,
+      ip, userAgent: req.headers["user-agent"]
+    });
+    if (!r.ok) {
+      const code = r.error === "invalid_email" ? 400 : (r.error === "rate_limited" ? 429 : 500);
+      return res.status(code).json(r);
+    }
+    // Double opt-in: send the confirmation before telling them anything.
+    if (r.status === "pending" && r.confirm_token) {
+      const settings = await storeSettings.getSettings(shop).catch(() => ({}));
+      const brand = settings.brand || shop.replace(".myshopify.com", "");
+      const url = `${billing.publicBase()}/popup/confirm?shop=${encodeURIComponent(shop)}&token=${encodeURIComponent(r.confirm_token)}`;
+      const en = settings.language === "en";
+      const body = en
+        ? `Please confirm you want to hear from ${brand}:\n\n${url}\n\nIf this was not you, ignore this email and nothing will happen.`
+        : `אשרו שאתם רוצים לקבל עדכונים מ-${brand}:\n\n${url}\n\nאם זה לא אתם, התעלמו מהמייל ולא יקרה כלום.`;
+      const html = mailer.buildHtmlEmail(body, {
+        brand, language: settings.language, to: req.body.email,
+        cta_url: url, cta_label: en ? "Confirm subscription" : "אישור הרשמה",
+        transactional: true
+      });
+      await mailer.sendEmail({
+        to: req.body.email, subject: en ? `Confirm your subscription to ${brand}` : `אישור הרשמה ל-${brand}`,
+        html, text: body, fromName: brand
+      }).catch(e => console.error("[popup] confirm mail:", e.message));
+    }
+    res.json({ ok: true, status: r.status, discount_code: r.discount_code || null });
+  } catch (e) {
+    console.error("[popup] subscribe:", e.message);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// Double opt-in confirmation link.
+app.get("/popup/confirm", async (req, res) => {
+  const shop = String(req.query.shop || "").toLowerCase().trim();
+  const r = await popupEngine.confirm(shop, req.query.token).catch(() => ({ ok: false }));
+  const lang = (await storeSettings.getSettings(shop).catch(() => ({}))).language || "en";
+  const en = lang === "en";
+  res.set("Content-Type", "text/html; charset=utf-8").send(`<!doctype html>
+<html dir="${en ? "ltr" : "rtl"}" lang="${en ? "en" : "he"}"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;max-width:460px;margin:14vh auto;padding:0 24px;text-align:center;color:#1a1d24}
+h1{font-size:22px}p{color:#5b6472;line-height:1.6}
+.code{display:inline-block;margin-top:14px;padding:10px 18px;background:#f0f4ff;color:#0a6fe0;border-radius:8px;font-weight:800;letter-spacing:1px}</style>
+<h1>${r.ok ? (en ? "You're subscribed" : "ההרשמה אושרה") : (en ? "This link is no longer valid" : "הקישור כבר לא בתוקף")}</h1>
+<p>${r.ok
+  ? (en ? "Thanks for confirming. You'll hear from us soon." : "תודה שאישרתם. נהיה בקשר בקרוב.")
+  : (en ? "It may have been used already, or it expired." : "ייתכן שכבר נעשה בו שימוש, או שפג תוקפו.")}</p>
+${r.ok && r.discount_code ? `<div class="code">${esc(r.discount_code)}</div>` : ""}`);
+});
+
+// ---- merchant-facing config + stats ----
+app.get("/api/popup", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+  try {
+    const [config, s] = await Promise.all([popupEngine.getConfig(shop), popupEngine.stats(shop)]);
+    res.json({ ok: true, config, stats: s, script_url: `${billing.publicBase()}/popup.js?shop=${encodeURIComponent(shop)}` });
+  } catch (e) { res.status(500).json({ ok: false, error: safeError(e) }); }
+});
+
+app.post("/api/popup", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+  try {
+    const config = await popupEngine.saveConfig(shop, req.body || {});
+    console.log(`[popup] ${shop} -> ${config.enabled ? "ON" : "off"}`);
+    res.json({ ok: true, config });
+  } catch (e) { res.status(500).json({ ok: false, error: safeError(e) }); }
+});
 
 // TERMS OF SERVICE.
 //

@@ -1387,6 +1387,18 @@
       'set.channelsTitle': 'איך הסוכן בוחר ערוץ',
       'set.channelOrder': 'וואטסאפ (אם נטען) ← SMS ← מייל',
       'set.channelHelp': 'לכל לקוחה נבחר הערוץ הזמין הראשון. למי שאין טלפון — מייל.',
+      'pop.label': '📬 חלון הרשמה בחנות',
+      'pop.on': 'מוצג למבקרים',
+      'pop.off': 'כבוי',
+      'pop.help': 'חלון קטן שמופיע למבקרים בחנות ומבקש מייל. זה מה שמגדיל את רשימת התפוצה שהסוכן פונה אליה — מתנועה שכבר יש לך.',
+      'pop.collected': 'נאספו {total} נרשמים · {month} בחודש האחרון',
+      'pop.headlinePh': 'כותרת (ברירת מחדל: הצטרפו לרשימת התפוצה)',
+      'pop.incentivePh': 'הטבה, למשל: 10% הנחה על ההזמנה הראשונה',
+      'pop.codePh': 'קוד קופון שיוצג אחרי ההרשמה',
+      'pop.codeHelp': 'הקוד חייב להיות קיים בשופיפיי. השאירו ריק אם אין הטבה.',
+      'pop.doubleOptIn': 'לדרוש אישור במייל לפני הוספה לרשימה',
+      'pop.doubleHelp': 'מקטין את מספר הנרשמים בערך בשליש, אבל נותן את ההוכחה החזקה ביותר להסכמה.',
+      'pop.install': 'להפעלה בחנות: בעורך הערכות של שופיפיי → הגדרות אפליקציה → הפעילו את Smart Advisor.',
       'set.todayUsed': 'היום: {used} מתוך {cap}',
       'set.dangerTitle': 'מצב הסוכן',
       'set.close': 'סגור',
@@ -1876,6 +1888,18 @@
       'set.channelsTitle': 'How the agent picks a channel',
       'set.channelOrder': 'WhatsApp (if funded) → SMS → email',
       'set.channelHelp': 'Each customer gets the first channel available to her. No phone on file means email.',
+      'pop.label': '📬 Storefront signup popup',
+      'pop.on': 'Showing to visitors',
+      'pop.off': 'Off',
+      'pop.help': 'A small panel that appears to visitors on your store and asks for an email. This is what grows the list the agent writes to — from traffic you already pay for.',
+      'pop.collected': '{total} subscribers collected · {month} in the last month',
+      'pop.headlinePh': 'Headline (default: Sign up for our newsletter)',
+      'pop.incentivePh': 'Incentive, e.g. 10% off your first order',
+      'pop.codePh': 'Discount code shown after signing up',
+      'pop.codeHelp': 'The code must already exist in Shopify. Leave empty if there is no offer.',
+      'pop.doubleOptIn': 'Require email confirmation before adding to the list',
+      'pop.doubleHelp': 'Costs roughly a third of signups, and gives you the strongest possible proof of consent.',
+      'pop.install': 'To switch it on in your store: Shopify theme editor -> App embeds -> enable Smart Advisor.',
       'set.todayUsed': 'Today: {used} of {cap}',
       'set.dangerTitle': 'Agent mode',
       'set.close': 'Close',
@@ -3376,10 +3400,12 @@
 
     let s = null, today = null, credits = 0;
     try {
-      const [setRes, chRes] = await Promise.all([
+      const [setRes, chRes, popRes] = await Promise.all([
         fetch('/api/settings?password=' + encodeURIComponent(PASSWORD)).then(r => r.json()),
-        fetch('/api/channels?password=' + encodeURIComponent(PASSWORD)).then(r => r.json()).catch(() => null)
+        fetch('/api/channels?password=' + encodeURIComponent(PASSWORD)).then(r => r.json()).catch(() => null),
+        fetch('/api/popup?password=' + encodeURIComponent(PASSWORD)).then(r => r.json()).catch(() => null)
       ]);
+      window._popup = popRes && popRes.ok ? popRes : null;
       if (!setRes || !setRes.ok) throw new Error('load failed');
       s = setRes.settings; today = setRes.today;
       credits = (chRes && chRes.credits) || 0;
@@ -3445,6 +3471,37 @@
       + '<div class="set-note info" dir="ltr" style="text-align:center;font-weight:600">' + esc(t('set.channelOrder')) + '</div>'
       + '<div class="set-help">' + esc(t('set.channelHelp')) + '</div></div>'
 
+      // --- storefront popup -----------------------------------------------
+      // The thing that GROWS the list the agent writes to. Everything else in
+      // this app works the existing customer base; this is the only part that
+      // adds to it, from traffic the merchant already pays for.
+      + (function () {
+          const P = window._popup;
+          if (!P) return '';
+          const c = P.config || {}, st = P.stats || {};
+          const on = c.enabled === true;
+          return '<div class="set-row"><div class="set-label">' + esc(t('pop.label')) + '</div>'
+            + '<div class="set-toggle"><button class="set-switch' + (on ? ' on' : '') + '" id="setPopSwitch" '
+            + 'aria-pressed="' + (on ? 'true' : 'false') + '"></button>'
+            + '<span id="setPopState">' + esc(t(on ? 'pop.on' : 'pop.off')) + '</span></div>'
+            + '<div class="set-help">' + esc(t('pop.help')) + '</div>'
+            + '<div class="set-note ' + (st.subscribed > 0 ? 'good' : 'info') + '">'
+            + esc(t('pop.collected', { total: st.subscribed || 0, month: st.month || 0 })) + '</div>'
+            + '<input class="set-input" id="setPopHead" type="text" maxlength="120" '
+            + 'placeholder="' + esc(t('pop.headlinePh')) + '" value="' + esc(c.headline || '') + '">'
+            + '<input class="set-input" id="setPopInc" type="text" maxlength="120" style="margin-top:8px" '
+            + 'placeholder="' + esc(t('pop.incentivePh')) + '" value="' + esc(c.incentive || '') + '">'
+            + '<input class="set-input" id="setPopCode" type="text" maxlength="40" dir="ltr" style="margin-top:8px" '
+            + 'placeholder="' + esc(t('pop.codePh')) + '" value="' + esc(c.discount_code || '') + '">'
+            + '<div class="set-help">' + esc(t('pop.codeHelp')) + '</div>'
+            + '<div class="set-toggle" style="margin-top:10px"><input type="checkbox" id="setPopDoi"'
+            + (c.double_opt_in ? ' checked' : '') + '><label for="setPopDoi" style="font-size:13.5px">'
+            + esc(t('pop.doubleOptIn')) + '</label></div>'
+            + '<div class="set-help">' + esc(t('pop.doubleHelp')) + '</div>'
+            + '<div class="set-note info" style="margin-top:10px">' + esc(t('pop.install')) + '</div>'
+            + '</div>';
+        })()
+
       + '<button class="set-save" id="setSaveBtn">' + esc(t('set.save')) + '</button>'
       + '<div id="setMsg" style="font-size:13px;min-height:18px;margin-top:8px;text-align:center"></div>';
 
@@ -3456,6 +3513,17 @@
       sw.classList.toggle('on', waNext);
       sw.setAttribute('aria-pressed', waNext ? 'true' : 'false');
       document.getElementById('setWaState').textContent = t(waNext ? 'set.waOn' : 'set.waOff');
+    };
+
+    // Same pattern as WhatsApp: local until Save, so a stray tap does not
+    // suddenly start showing a popup to every visitor on a live store.
+    let popNext = !!(window._popup && window._popup.config && window._popup.config.enabled);
+    const psw = document.getElementById('setPopSwitch');
+    if (psw) psw.onclick = () => {
+      popNext = !popNext;
+      psw.classList.toggle('on', popNext);
+      psw.setAttribute('aria-pressed', popNext ? 'true' : 'false');
+      document.getElementById('setPopState').textContent = t(popNext ? 'pop.on' : 'pop.off');
     };
 
     document.getElementById('setSaveBtn').onclick = async () => {
@@ -3479,6 +3547,25 @@
         });
         const d = await res.json();
         if (!d.ok) { msg.style.color = '#d33'; msg.textContent = d.error || t('set.error'); btn.disabled = false; btn.textContent = t('set.save'); return; }
+
+        // The popup lives in its own store, so it saves separately. A failure
+        // here must not silently look like the whole save failed.
+        if (document.getElementById('setPopSwitch')) {
+          const pv = (id) => { const el = document.getElementById(id); return el ? (el.value || '').trim() || null : null; };
+          const doi = document.getElementById('setPopDoi');
+          await fetch('/api/popup?password=' + encodeURIComponent(PASSWORD), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              password: PASSWORD,
+              enabled: popNext,
+              headline: pv('setPopHead'),
+              incentive: pv('setPopInc'),
+              discount_code: pv('setPopCode'),
+              double_opt_in: !!(doi && doi.checked)
+            })
+          }).then(r => r.json()).catch(() => null);
+        }
+
         msg.style.color = '#16a34a'; msg.textContent = t('set.saved');
         btn.textContent = t('set.save');
         // The language may have just changed — repaint everything, and refresh
