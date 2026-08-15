@@ -55,9 +55,23 @@ const DEFAULTS = {
   ask_gender: false,        // the Pull&Bear pattern: Woman / Man
   delay_seconds: 6,
   show_after_scroll_pct: 0, // 0 = time-based only
-  frequency_days: 14,       // do not ask the same visitor again for N days
+  // How long before the same visitor is asked again. 0 = every visit, which is
+  // the default: the merchant wants everyone who walks in to be asked, and a
+  // first-time visitor is exactly who this is for.
+  //
+  // Someone who has already SUBSCRIBED is still never asked again, whatever
+  // this is set to. That is not a frequency question — re-asking a person for
+  // an address they just gave you reads as broken, and they complain to the
+  // merchant, not to us.
+  frequency_days: 0,
   double_opt_in: false,
-  consent_text: null        // exactly what the visitor agrees to; stored per signup
+  consent_text: null,       // exactly what the visitor agrees to; stored per signup
+  // Where the visitor can read what happens to their address. The defaults are
+  // relative, so they resolve on the MERCHANT'S own domain — a shopper should be
+  // reading the policy of the store they are giving their email to, not ours.
+  // /policies/privacy-policy is Shopify's standard path and exists on every store.
+  privacy_url: '/policies/privacy-policy',
+  accessibility_url: null   // no standard path; shown only if the merchant sets one
 };
 
 let tableReady = false;

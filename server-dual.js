@@ -894,6 +894,13 @@ function popupText(cfg, lang) {
     consent: cfg.consent_text || (en
       ? "I agree to receive marketing emails and accept the privacy policy."
       : "אני מאשר/ת קבלת דיוור שיווקי ומסכים/ה למדיניות הפרטיות."),
+    privacy: en ? "Privacy policy" : "מדיניות פרטיות",
+    accessibility: en ? "Accessibility statement" : "הצהרת נגישות",
+    // Said plainly, next to the box they are ticking, rather than buried in a
+    // policy page nobody opens.
+    dataNote: en
+      ? "We store your email address so this store can send you marketing. You can unsubscribe from any message."
+      : "כתובת המייל נשמרת כדי שהחנות תוכל לשלוח לך דיוור שיווקי. אפשר להסיר את עצמך מכל הודעה.",
     success: cfg.success_text || (en ? "You're in. Check your inbox." : "נרשמת! בדקו את תיבת המייל."),
     pending: en ? "Almost there — confirm from the email we just sent." : "כמעט סיימנו — אשרו במייל ששלחנו.",
     invalid: en ? "That email does not look right." : "כתובת המייל לא נראית תקינה.",
@@ -927,6 +934,8 @@ app.get("/popup.js", async (req, res) => {
     image: cfg.image_url || null,
     incentive: cfg.incentive || null,
     askGender: !!cfg.ask_gender,
+    privacyUrl: cfg.privacy_url || null,
+    accessibilityUrl: cfg.accessibility_url || null,
     delay: Math.max(0, Number(cfg.delay_seconds) || 0) * 1000,
     scrollPct: Math.max(0, Math.min(Number(cfg.show_after_scroll_pct) || 0, 100)),
     freqDays: Math.max(0, Number(cfg.frequency_days) || 0)

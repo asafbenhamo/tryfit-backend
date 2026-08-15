@@ -194,6 +194,33 @@ const reset = () => { SUBS = []; SETTINGS = {}; CUSTOMERS = []; };
   const cfg5 = await popup.saveConfig(SHOP, { headline: 'x'.repeat(900) });
   ok('a huge headline is truncated', cfg5.headline.length <= 400, String(cfg5.headline.length));
 
+  console.log('\n-- who the popup is shown to --');
+  reset();
+  const fresh2 = await popup.getConfig('brand-new-2.myshopify.com');
+  ok('by default it is shown on EVERY visit', fresh2.frequency_days === 0, String(fresh2.frequency_days));
+  const f1 = await popup.saveConfig(SHOP, { frequency_days: 7 });
+  ok('the merchant can space it out', f1.frequency_days === 7, String(f1.frequency_days));
+  const f2 = await popup.saveConfig(SHOP, { frequency_days: 0 });
+  ok('and put it back to every visit', f2.frequency_days === 0, String(f2.frequency_days));
+
+  console.log('\n-- the links at the foot of the popup --');
+  const dflt = await popup.getConfig('links-default.myshopify.com');
+  ok('privacy defaults to the store\'s own Shopify policy page',
+     dflt.privacy_url === '/policies/privacy-policy', String(dflt.privacy_url));
+  // Relative matters: the script runs on the MERCHANT'S domain, so a relative
+  // path resolves to their policy. An absolute one would send a shopper to us.
+  ok('the default is RELATIVE, so it resolves on their domain and not ours',
+     dflt.privacy_url.charAt(0) === '/', dflt.privacy_url);
+  ok('accessibility has no default, because there is no standard path',
+     dflt.accessibility_url === null, String(dflt.accessibility_url));
+  const withLinks = await popup.saveConfig(SHOP, {
+    privacy_url: '/policies/privacy-policy', accessibility_url: '/pages/accessibility'
+  });
+  ok('both can be set', withLinks.privacy_url === '/policies/privacy-policy'
+     && withLinks.accessibility_url === '/pages/accessibility', JSON.stringify(withLinks.accessibility_url));
+  const cleared = await popup.saveConfig(SHOP, { accessibility_url: '' });
+  ok('and cleared, to show no link at all', cleared.accessibility_url === null, String(cleared.accessibility_url));
+
   console.log('\n-- a signup with no shop goes nowhere --');
   ok('empty shop is refused', (await popup.subscribe('', { email: 'a@b.com' })).ok === false);
 

@@ -24,11 +24,16 @@ const POPUP_SCRIPT = `(function(){
 
   var KEY = "sa_popup_" + C.shop;
   function seenRecently() {
-    if (!C.freqDays) return false;
     try {
       var v = localStorage.getItem(KEY);
+      // Already subscribed: never ask again, whatever the frequency is set to.
+      // That is not a frequency question. Asking a person for the address they
+      // just gave you reads as broken, and they complain to the merchant.
+      if (v === "done") return true;
+      // freqDays 0 means every visit — which is the point: the popup exists to
+      // catch first-time visitors, and most people arrive once.
+      if (!C.freqDays) return false;
       if (!v) return false;
-      if (v === "done") return true;            // already subscribed: never again
       return (Date.now() - Number(v)) < C.freqDays * 86400000;
     } catch (e) { return false; }               // private mode: show it, once
   }
@@ -68,6 +73,13 @@ const POPUP_SCRIPT = `(function(){
         "font-size:24px;line-height:1;color:#6b7280;cursor:pointer;padding:6px}",
       ".sa-pop .sa-msg{margin-top:14px;font-size:13.5px;min-height:18px}",
       ".sa-pop .sa-msg.sa-err{color:#b4342c}",
+      ".sa-pop .sa-note{margin:10px 0 0;font-size:12px;line-height:1.5;color:#6b7280;text-align:",
+        (C.rtl ? "right" : "left"), "}",
+      ".sa-pop .sa-links{margin:8px 0 0;font-size:12px;color:#6b7280;text-align:",
+        (C.rtl ? "right" : "left"), "}",
+      ".sa-pop .sa-links a{color:#4b5563;text-decoration:underline}",
+      ".sa-pop .sa-links a:focus-visible,.sa-pop .sa-x:focus-visible,",
+        ".sa-pop button.sa-go:focus-visible,.sa-pop input:focus-visible{outline:2px solid #16181d;outline-offset:2px}",
       ".sa-pop .sa-hp{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}",
       ".sa-pop .sa-code{display:inline-block;margin-top:12px;padding:10px 18px;background:#f2f5ff;",
         "color:#0a4fd0;font-weight:800;letter-spacing:1px;border-radius:3px}",
@@ -138,9 +150,38 @@ const POPUP_SCRIPT = `(function(){
 
     var cons = document.createElement("label"); cons.className = "sa-consent";
     var cb = document.createElement("input"); cb.type = "checkbox";
+    cb.id = "sa-consent-cb";
+    cons.setAttribute("for", "sa-consent-cb");
     cons.appendChild(cb);
     cons.appendChild(document.createTextNode(C.t.consent));
     body.appendChild(cons);
+
+    // What actually happens to the address, in one sentence, next to the box
+    // being ticked — plus the policies. A person deciding whether to hand over
+    // their email should not have to go looking for either.
+    var note = document.createElement("p");
+    note.className = "sa-note";
+    note.textContent = C.t.dataNote;
+    body.appendChild(note);
+
+    if (C.privacyUrl || C.accessibilityUrl) {
+      var links = document.createElement("p");
+      links.className = "sa-links";
+      var added = 0;
+      [[C.privacyUrl, C.t.privacy], [C.accessibilityUrl, C.t.accessibility]].forEach(function (pair) {
+        if (!pair[0]) return;
+        if (added++) links.appendChild(document.createTextNode(" · "));
+        var a = document.createElement("a");
+        a.href = pair[0];
+        a.textContent = pair[1];
+        // The popup sits over the page; these open beside it so a half-filled
+        // form is not thrown away by navigating.
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        links.appendChild(a);
+      });
+      body.appendChild(links);
+    }
 
     var go = document.createElement("button");
     go.className = "sa-go"; go.type = "button"; go.textContent = C.t.button;
@@ -169,7 +210,26 @@ const POPUP_SCRIPT = `(function(){
       document.removeEventListener("keydown", onKey);
       try { if (lastFocus && lastFocus.focus) lastFocus.focus(); } catch (e) {}
     }
-    function onKey(e) { if (e.key === "Escape") close(); }
+    // Keyboard users must be able to get out, and must not be able to tab
+    // BEHIND the panel into a page they cannot see. A modal without this is a
+    // trap in the other direction: focus wanders off into the storefront while
+    // the overlay still covers it, and a screen-reader user has no idea where
+    // they are.
+    function focusables() {
+      return Array.prototype.filter.call(
+        el.pop.querySelectorAll('a[href],button:not([disabled]),input:not([type=hidden]):not([disabled])'),
+        function (n) { return n.offsetParent !== null || n === document.activeElement; }
+      );
+    }
+    function onKey(e) {
+      if (e.key === "Escape") { close(); return; }
+      if (e.key !== "Tab") return;
+      var f = focusables();
+      if (!f.length) return;
+      var first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
     document.addEventListener("keydown", onKey);
     el.close.addEventListener("click", close);
     el.wrap.addEventListener("click", function (e) { if (e.target === el.wrap) close(); });

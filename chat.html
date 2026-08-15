@@ -1399,6 +1399,15 @@
       'pop.doubleOptIn': 'לדרוש אישור במייל לפני הוספה לרשימה',
       'pop.doubleHelp': 'מקטין את מספר הנרשמים בערך בשליש, אבל נותן את ההוכחה החזקה ביותר להסכמה.',
       'pop.install': 'להפעלה בחנות: בעורך הערכות של שופיפיי → הגדרות אפליקציה → הפעילו את Smart Advisor.',
+      'pop.freqLabel': 'למי להציג',
+      'pop.freqEvery': 'לכל מבקר, בכל כניסה',
+      'pop.freqDay': 'פעם ביום לאותו מבקר',
+      'pop.freqWeek': 'פעם בשבוע לאותו מבקר',
+      'pop.freqMonth': 'פעם בחודש לאותו מבקר',
+      'pop.freqHelp': 'מי שכבר נרשם לא יראה את החלון שוב, בכל מצב.',
+      'pop.linksLabel': 'קישורים בתחתית החלון',
+      'pop.accPh': '/pages/accessibility (הצהרת נגישות)',
+      'pop.linksHelp': 'כתובות בחנות שלך. ברירת המחדל היא עמוד מדיניות הפרטיות של שופיפיי. השאירו ריק כדי לא להציג קישור.',
       'set.todayUsed': 'היום: {used} מתוך {cap}',
       'set.dangerTitle': 'מצב הסוכן',
       'set.close': 'סגור',
@@ -1900,6 +1909,15 @@
       'pop.doubleOptIn': 'Require email confirmation before adding to the list',
       'pop.doubleHelp': 'Costs roughly a third of signups, and gives you the strongest possible proof of consent.',
       'pop.install': 'To switch it on in your store: Shopify theme editor -> App embeds -> enable Smart Advisor.',
+      'pop.freqLabel': 'Who sees it',
+      'pop.freqEvery': 'Every visitor, every visit',
+      'pop.freqDay': 'Once a day per visitor',
+      'pop.freqWeek': 'Once a week per visitor',
+      'pop.freqMonth': 'Once a month per visitor',
+      'pop.freqHelp': 'Anyone who has already subscribed is never shown it again, whichever you pick.',
+      'pop.linksLabel': 'Links at the foot of the popup',
+      'pop.accPh': '/pages/accessibility (accessibility statement)',
+      'pop.linksHelp': 'Addresses on your own store. The default is the Shopify privacy policy page. Leave empty to show no link.',
       'set.todayUsed': 'Today: {used} of {cap}',
       'set.dangerTitle': 'Agent mode',
       'set.close': 'Close',
@@ -3494,7 +3512,20 @@
             + '<input class="set-input" id="setPopCode" type="text" maxlength="40" dir="ltr" style="margin-top:8px" '
             + 'placeholder="' + esc(t('pop.codePh')) + '" value="' + esc(c.discount_code || '') + '">'
             + '<div class="set-help">' + esc(t('pop.codeHelp')) + '</div>'
-            + '<div class="set-toggle" style="margin-top:10px"><input type="checkbox" id="setPopDoi"'
+            + '<div class="set-label" style="margin-top:14px">' + esc(t('pop.freqLabel')) + '</div>'
+            + '<select class="set-select" id="setPopFreq">'
+            + [[0, 'pop.freqEvery'], [1, 'pop.freqDay'], [7, 'pop.freqWeek'], [30, 'pop.freqMonth']].map(function (o) {
+                return '<option value="' + o[0] + '"' + (Number(c.frequency_days) === o[0] ? ' selected' : '') + '>'
+                     + esc(t(o[1])) + '</option>';
+              }).join('')
+            + '</select><div class="set-help">' + esc(t('pop.freqHelp')) + '</div>'
+            + '<div class="set-label" style="margin-top:14px">' + esc(t('pop.linksLabel')) + '</div>'
+            + '<input class="set-input" id="setPopPriv" type="text" dir="ltr" maxlength="300" '
+            + 'placeholder="/policies/privacy-policy" value="' + esc(c.privacy_url || '') + '">'
+            + '<input class="set-input" id="setPopAcc" type="text" dir="ltr" maxlength="300" style="margin-top:8px" '
+            + 'placeholder="' + esc(t('pop.accPh')) + '" value="' + esc(c.accessibility_url || '') + '">'
+            + '<div class="set-help">' + esc(t('pop.linksHelp')) + '</div>'
+            + '<div class="set-toggle" style="margin-top:14px"><input type="checkbox" id="setPopDoi"'
             + (c.double_opt_in ? ' checked' : '') + '><label for="setPopDoi" style="font-size:13.5px">'
             + esc(t('pop.doubleOptIn')) + '</label></div>'
             + '<div class="set-help">' + esc(t('pop.doubleHelp')) + '</div>'
@@ -3561,6 +3592,9 @@
               headline: pv('setPopHead'),
               incentive: pv('setPopInc'),
               discount_code: pv('setPopCode'),
+              frequency_days: parseInt((document.getElementById('setPopFreq') || {}).value, 10) || 0,
+              privacy_url: pv('setPopPriv'),
+              accessibility_url: pv('setPopAcc'),
               double_opt_in: !!(doi && doi.checked)
             })
           }).then(r => r.json()).catch(() => null);
