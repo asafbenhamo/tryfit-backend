@@ -545,6 +545,11 @@
     font-family: 'Heebo', sans-serif;
   }
   .gate .err { color: var(--danger); font-size: 13px; min-height: 16px; }
+  .gate .code-hint { font-size: 13.5px; color: var(--text-dim); margin: 0 0 4px; line-height: 1.55; }
+  .gate #gateCode { letter-spacing: .35em; text-align: center; font-size: 20px; font-weight: 600;
+                    font-variant-numeric: tabular-nums; }
+  .gate .linkish { background: none; color: var(--text-dim); font-weight: 500; font-size: 13px;
+                   padding: 6px; text-decoration: underline; }
 
   @media (max-width: 768px) {
     .sidebar {
@@ -746,8 +751,19 @@
   <div class="gate" id="gate">
     <h2 id="gateTitle" data-i18n="app.title">Smart Advisor</h2>
     <p data-i18n="app.tagline">Your smart business assistant</p>
-    <input type="password" id="gatePass" data-i18n-ph="gate.pass" placeholder="Access password" autocomplete="off">
-    <button onclick="unlock()" data-i18n="gate.enter">Sign in</button>
+    <input type="email" id="gateEmail" data-i18n-ph="gate.email" placeholder="Email address" autocomplete="username" inputmode="email">
+    <input type="password" id="gatePass" data-i18n-ph="gate.pass" placeholder="Access password" autocomplete="current-password">
+    <button id="gateBtn" onclick="unlock()" data-i18n="gate.enter">Sign in</button>
+    <!-- Step two: the code that was emailed. Hidden until the password checks
+         out, because showing it earlier would tell anyone at the login screen
+         that this account exists. -->
+    <div id="gateCodeStep" style="display:none">
+      <p id="gateCodeHint" class="code-hint"></p>
+      <input type="text" id="gateCode" data-i18n-ph="gate.codePh" placeholder="6-digit code"
+             inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+      <button id="gateCodeBtn" onclick="submitCode()" data-i18n="gate.verify">Verify</button>
+      <button onclick="backToPassword()" class="linkish" data-i18n="gate.back">Back</button>
+    </div>
     <div class="err" id="gateErr"></div>
     <div id="storePicker" style="display:none;margin-top:18px">
       <p style="margin-bottom:10px;font-weight:600" data-i18n="gate.pickStore">Choose a store:</p>
@@ -915,6 +931,11 @@
       'gate.serverStale': 'השרת לא עודכן (חסר /api/auth/login). דחוף את server-dual.js',
       'gate.badResponse': 'תשובת שרת לא תקינה (קוד {code})',
       'gate.wrongPass': 'סיסמה שגויה',
+      'gate.email': 'כתובת מייל',
+      'gate.codePh': 'קוד בן 6 ספרות',
+      'gate.verify': 'אמת קוד',
+      'gate.codeSent': 'שלחנו קוד בן 6 ספרות אל {email}. הקוד תקף ל-{minutes} דקות.',
+      'gate.badCode': 'הקוד שגוי.',
       'gate.loginError': 'שגיאה בהתחברות: {msg}',
       'gate.noStores': 'אין חנויות רשומות עדיין.',
       'gate.manageCredits': '💬 ניהול קרדיטים',
@@ -1399,6 +1420,11 @@
       'gate.serverStale': 'Server is out of date (missing /api/auth/login). Push server-dual.js',
       'gate.badResponse': 'Invalid server response (code {code})',
       'gate.wrongPass': 'Wrong password',
+      'gate.email': 'Email address',
+      'gate.codePh': '6-digit code',
+      'gate.verify': 'Verify',
+      'gate.codeSent': 'We sent a 6-digit code to {email}. It expires in {minutes} minutes.',
+      'gate.badCode': 'That code is not right.',
       'gate.loginError': 'Sign-in error: {msg}',
       'gate.noStores': 'No stores registered yet.',
       'gate.manageCredits': '💬 Manage credits',
@@ -2675,20 +2701,35 @@
     };
   }
 
+  // The challenge id from step one. Not a credential on its own — it is useless
+  // without the code that went to the merchant's inbox.
+  let PENDING_CHALLENGE = '';
+
   async function unlock() {
     const pass = $('gatePass').value.trim();
+    const email = ($('gateEmail') ? $('gateEmail').value : '').trim();
     if (!pass) { $('gateErr').textContent = t('gate.needPass'); return; }
     $('gateErr').textContent = '';
+    const btn = $('gateBtn'); if (btn) btn.disabled = true;
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: pass })
+        body: JSON.stringify({ password: pass, email })
       });
       if (res.status === 404) { $('gateErr').textContent = t('gate.serverStale'); return; }
       let data;
       try { data = await res.json(); }
       catch (e) { $('gateErr').textContent = t('gate.badResponse', { code: res.status }); return; }
       if (!data.ok) { $('gateErr').textContent = data.error || t('gate.wrongPass'); return; }
+
+      // Step two. No session yet — the server sent a code and is waiting for it.
+      if (data.needs_code) {
+        PASSWORD = pass;
+        PENDING_CHALLENGE = data.challenge || '';
+        showCodeStep(data.email_hint || '', data.ttl_minutes || 10);
+        return;
+      }
+
       PASSWORD = pass;
       // Prefer the token from here on. PASSWORD is kept only so a server that
       // has not yet been redeployed still authenticates.
@@ -2706,6 +2747,78 @@
       }
     } catch (err) {
       $('gateErr').textContent = t('gate.loginError', { msg: (err.message || '') });
+    } finally {
+      const b = $('gateBtn'); if (b) b.disabled = false;
+    }
+  }
+
+  function showCodeStep(hint, minutes) {
+    $('gateEmail').style.display = 'none';
+    $('gatePass').style.display = 'none';
+    $('gateBtn').style.display = 'none';
+    $('gateCodeStep').style.display = 'block';
+    $('gateCodeHint').textContent = t('gate.codeSent', { email: hint, minutes: minutes });
+    $('gateErr').textContent = '';
+    const f = $('gateCode');
+    f.value = '';
+    f.focus();
+    // Six digits is the whole code, so submit as soon as they are typed rather
+    // than making someone reach for a button.
+    f.oninput = () => {
+      f.value = f.value.replace(/\D/g, '').slice(0, 6);
+      if (f.value.length === 6) submitCode();
+    };
+    f.onkeydown = (e) => { if (e.key === 'Enter') submitCode(); };
+  }
+
+  function backToPassword() {
+    PENDING_CHALLENGE = '';
+    $('gateCodeStep').style.display = 'none';
+    $('gateEmail').style.display = '';
+    $('gatePass').style.display = '';
+    $('gateBtn').style.display = '';
+    $('gateErr').textContent = '';
+    $('gatePass').value = '';
+    $('gatePass').focus();
+  }
+
+  async function submitCode() {
+    const code = $('gateCode').value.trim();
+    if (code.length < 6 || !PENDING_CHALLENGE) return;
+    const btn = $('gateCodeBtn'); if (btn) btn.disabled = true;
+    $('gateErr').textContent = '';
+    try {
+      const res = await fetch('/api/auth/verify', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ challenge: PENDING_CHALLENGE, code })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data.ok) {
+        $('gateErr').textContent = data.error || t('gate.badCode');
+        $('gateCode').value = '';
+        $('gateCode').focus();
+        // A dead challenge means starting over, not retyping into a void.
+        if (data.reason === 'expired' || data.reason === 'too_many_attempts') {
+          PENDING_CHALLENGE = '';
+          setTimeout(backToPassword, 1800);
+        }
+        return;
+      }
+      AUTH_TOKEN = data.token || '';
+      PENDING_CHALLENGE = '';
+      if (data.mode === 'master') {
+        IS_MASTER = true;
+        $('gateCodeStep').style.display = 'none';
+        showStorePicker(data.stores || []);
+      } else {
+        SELECTED_SHOP = '';
+        if (data.terms_accepted === false) showTermsGate(data.name || '');
+        else enterAdvisor(data.name || '', data.shop || '');
+      }
+    } catch (err) {
+      $('gateErr').textContent = t('gate.loginError', { msg: (err.message || '') });
+    } finally {
+      const b = $('gateCodeBtn'); if (b) b.disabled = false;
     }
   }
 

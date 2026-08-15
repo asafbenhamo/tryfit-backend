@@ -37,6 +37,7 @@ async function discountTitle(shop, key, vars) {
 const storeTime = require("./store-time");
 const sessionAuth = require("./session-auth");
 const shopifySessionToken = require("./shopify-session-token");
+const login2fa = require("./login-2fa");
 const billing = require("./billing-engine");
 const policyEngine = require("./policy-engine");
 const autopilot = require("./autopilot-engine");
@@ -1140,6 +1141,26 @@ function ownerEmailFor(shop) {
   return (s && s.owner_email) || null;
 }
 
+// Which store does this login email belong to? Used by the two-step login so
+// the email picks the store and the password is then checked against that one
+// store — rather than the password alone deciding, which would resolve two
+// stores sharing a password to whichever happened to be listed first.
+//
+// Returns null for an unknown address, and the caller must answer identically
+// for "no such email" and "wrong password" so this cannot be used to discover
+// which stores use the product.
+function shopForEmail(email) {
+  const addr = String(email || "").toLowerCase().trim();
+  if (!addr) return null;
+  try {
+    for (const s of shopify.listStores()) {
+      const owner = ownerEmailFor(s.shop_domain);
+      if (owner && String(owner).toLowerCase().trim() === addr) return s.shop_domain;
+    }
+  } catch (e) { /* fall through */ }
+  return null;
+}
+
 // Send ONE sample copy of a campaign email to the store owner, so they see exactly
 // what their customers receive. Best-effort; never blocks the campaign.
 async function sendOwnerSample(shop, { subject, html, text }) {
@@ -1442,6 +1463,55 @@ app.post("/api/auth/login", express.json(), async (req, res) => {
   try {
     const pw = (req.body && req.body.password) || "";
     if (!pw) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
+    const loginEmail = String((req.body && req.body.email) || "").toLowerCase().trim();
+
+    // ---- Step 1 of two-step login ------------------------------------------
+    // Send a code to the address on file and hand back a challenge, NOT a
+    // session. Whoever has the password still has to read the mailbox.
+    //
+    // An account with no email on file cannot be sent a code. Refusing would
+    // lock that merchant out permanently through no fault of their own, so it
+    // falls through to the old single-step login — and says so in the log,
+    // because a silent downgrade of an auth control is how they rot.
+    const startChallenge = async ({ shop, isMaster, email }) => {
+      if (!email) {
+        console.warn(`[2fa] ${isMaster ? "master" : shop} has no email on file — signing in with the password alone`);
+        return null;
+      }
+      const ch = await login2fa.issue({
+        shop: shop || null, isMaster: !!isMaster, email,
+        ip, userAgent: req.headers["user-agent"]
+      });
+      if (!ch.ok) {
+        if (ch.error === "too_many_requests") {
+          return res.status(429).json({ ok: false, error: "נשלחו יותר מדי קודים לכתובת הזו. נסה שוב בעוד שעה." });
+        }
+        return null;   // could not issue -> fall through to the old path
+      }
+      const settings = shop ? await storeSettings.getSettings(shop).catch(() => ({})) : {};
+      const body = login2fa.codeEmail(ch.code, {
+        brand: settings.brand, language: settings.language
+      });
+      const html = mailer.buildHtmlEmail(body.text, {
+        brand: settings.brand || "Smart Advisor",
+        language: settings.language, to: ch.email, transactional: true
+      });
+      const sent = await mailer.sendEmail({
+        to: ch.email, subject: body.subject, html, text: body.text,
+        fromName: settings.brand || "Smart Advisor"
+      }).catch(e => ({ ok: false, error: e.message }));
+
+      if (!sent.ok) {
+        // We cannot deliver the code, so requiring it would lock them out.
+        console.error(`[2fa] could not email a code to ${login2fa.maskEmail(ch.email)}: ${sent.error}`);
+        return null;
+      }
+      console.log(`[2fa] code sent to ${login2fa.maskEmail(ch.email)} for ${isMaster ? "master" : shop}`);
+      return res.json({
+        ok: true, needs_code: true, challenge: ch.id,
+        email_hint: ch.masked, ttl_minutes: ch.ttl_minutes
+      });
+    };
 
     // safeEqual, not ===. Every other credential check in this file already
     // uses it; this one branch compared the PLATFORM super-admin password with
@@ -1449,6 +1519,10 @@ app.post("/api/auth/login", express.json(), async (req, res) => {
     // character is and hands an attacker the password one character at a time.
     if (MASTER_PASSWORD && sessionAuth.safeEqual(pw, MASTER_PASSWORD)) {
       loginRecordSuccess(ip);
+      // The platform admin is the account that most needs a second step: it can
+      // act on every store. MASTER_2FA_EMAIL is where its code goes.
+      const sentMaster = await startChallenge({ shop: null, isMaster: true, email: process.env.MASTER_2FA_EMAIL });
+      if (sentMaster) return sentMaster;
       let stores = [];
       try {
         stores = shopify.listStores().map(s => {
@@ -1468,15 +1542,33 @@ app.post("/api/auth/login", express.json(), async (req, res) => {
     // 770's existing password
     if (ADMIN_PASSWORD && sessionAuth.safeEqual(pw, ADMIN_PASSWORD)) {
       loginRecordSuccess(ip);
+      const sentAdmin = await startChallenge({ shop: DEFAULT_SHOP, email: ownerEmailFor(DEFAULT_SHOP) });
+      if (sentAdmin) return sentAdmin;
       const sess = await sessionAuth.create(DEFAULT_SHOP, { ip, userAgent: req.headers["user-agent"] });
       return res.json({ ok: true, mode: "store", shop: DEFAULT_SHOP, name: "770", terms_accepted: true,
         token: sess.token, expires_at: sess.expires_at });
     }
 
-    // Per-store password
-    const shop = resolveShop(req);
+    // Per-store password.
+    //
+    // The merchant now types an email as well. When they do, the email picks the
+    // store and the password is checked against THAT store — so two stores that
+    // happen to share a password no longer resolve to whichever comes first.
+    // Without an email we fall back to the old behaviour, where the password
+    // alone identifies the store, so existing installs keep working.
+    let shop = null;
+    if (loginEmail) {
+      shop = shopForEmail(loginEmail);
+      if (shop) {
+        const cfgE = shopify.getStore(shop);
+        if (!cfgE || !cfgE.password || !sessionAuth.safeEqual(pw, cfgE.password)) shop = null;
+      }
+    }
+    if (!shop) shop = resolveShop(req);
     if (shop) {
       loginRecordSuccess(ip);
+      const sentStore = await startChallenge({ shop, email: ownerEmailFor(shop) });
+      if (sentStore) return sentStore;
       const cfg = shopify.getStore(shop);
       const sess = await sessionAuth.create(shop, { ip, userAgent: req.headers["user-agent"] });
       return res.json({
@@ -1492,6 +1584,70 @@ app.post("/api/auth/login", express.json(), async (req, res) => {
   } catch (err) {
     console.error("auth/login error:", err.message);
     return res.status(500).json({ ok: false, error: "שגיאת שרת בהתחברות" });
+  }
+});
+
+// ===========================================================================
+// STEP 2 OF LOGIN — the code that arrived by email.
+//
+// /api/auth/login (above) no longer returns a session when the account has an
+// email on file. It returns a challenge id, and nothing that authenticates
+// anything. The session is minted HERE, and only for someone who also read the
+// mailbox.
+// ===========================================================================
+app.post("/api/auth/verify", express.json(), async (req, res) => {
+  const ip = (req.headers["x-forwarded-for"] || req.ip || "unknown").split(",")[0].trim();
+  // The same limiter as the password step: a six-digit code is cheap to guess
+  // if guesses are free. login2fa caps attempts per challenge; this caps them
+  // per source across challenges.
+  const gate = loginRateCheck(ip);
+  if (!gate.allowed) {
+    return res.status(429).json({ ok: false, error: `יותר מדי ניסיונות. נסה שוב בעוד ${gate.retryMin} דקות.` });
+  }
+  try {
+    const challenge = (req.body && req.body.challenge) || "";
+    const code = (req.body && req.body.code) || "";
+    const r = await login2fa.verify(challenge, code);
+
+    if (!r.ok) {
+      loginRecordFail(ip);
+      const msg = {
+        expired: "הקוד פג תוקף. התחבר שוב כדי לקבל קוד חדש.",
+        too_many_attempts: "יותר מדי ניסיונות. התחבר שוב כדי לקבל קוד חדש.",
+        wrong_code: "הקוד שגוי.",
+        invalid: "הקוד שגוי."
+      }[r.error] || "הקוד שגוי.";
+      return res.status(401).json({ ok: false, error: msg, reason: r.error, attempts_left: r.attempts_left });
+    }
+
+    loginRecordSuccess(ip);
+
+    if (r.is_master) {
+      let stores = [];
+      try {
+        stores = shopify.listStores().map(s => {
+          const cfg = shopify.getStore(s.shop_domain);
+          return {
+            shop_domain: s.shop_domain,
+            name: (cfg && cfg.name) || (s.shop_domain === DEFAULT_SHOP ? "770" : s.shop_domain.replace(".myshopify.com", ""))
+          };
+        });
+      } catch (e) { stores = [{ shop_domain: DEFAULT_SHOP, name: "770" }]; }
+      const sess = await sessionAuth.create(null, { isMaster: true, ip, userAgent: req.headers["user-agent"] });
+      return res.json({ ok: true, mode: "master", stores, token: sess.token, expires_at: sess.expires_at });
+    }
+
+    const cfg = shopify.getStore(r.shop);
+    const sess = await sessionAuth.create(r.shop, { ip, userAgent: req.headers["user-agent"] });
+    return res.json({
+      ok: true, mode: "store", shop: r.shop,
+      name: (cfg && cfg.name) || String(r.shop).replace(".myshopify.com", ""),
+      terms_accepted: shopify.hasAcceptedTerms(r.shop),
+      token: sess.token, expires_at: sess.expires_at
+    });
+  } catch (err) {
+    console.error("auth/verify error:", err.message);
+    return res.status(500).json({ ok: false, error: "שגיאת שרת באימות" });
   }
 });
 
