@@ -4896,23 +4896,31 @@ const APP_BASE_URL = "https://tryfit-backend-production.up.railway.app";
 // and cannot be replayed for a different shop.
 const OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
 
+// The separator is "|" and NOT ".", which is the whole reason this comment
+// exists. A shop domain contains dots — "omer2-vgakvxso.myshopify.com" — so
+// splitting the payload on "." produced six fields instead of four, the length
+// check rejected it, and EVERY install died at the callback with "state לא
+// תקין". "|" cannot appear in a myshopify domain, in a timestamp, in hex, or
+// in base64url, so the four fields stay four.
+const OAUTH_STATE_SEP = "|";
+
 function makeOAuthState(shop) {
   const nonce = crypto.randomBytes(8).toString("hex");
-  const payload = `${shop}.${Date.now()}.${nonce}`;
+  const payload = [shop, Date.now(), nonce].join(OAUTH_STATE_SEP);
   const sig = crypto.createHmac("sha256", ADVISOR_SHOPIFY_SECRET || "oauth")
     .update(payload, "utf8").digest("base64url").slice(0, 32);
-  return Buffer.from(`${payload}.${sig}`, "utf8").toString("base64url");
+  return Buffer.from(payload + OAUTH_STATE_SEP + sig, "utf8").toString("base64url");
 }
 
 // Returns the shop the state was issued for, or null.
 function readOAuthState(state) {
   try {
     const raw = Buffer.from(String(state || ""), "base64url").toString("utf8");
-    const parts = raw.split(".");
+    const parts = raw.split(OAUTH_STATE_SEP);
     if (parts.length !== 4) return null;
     const [shop, ts, nonce, sig] = parts;
     const expect = crypto.createHmac("sha256", ADVISOR_SHOPIFY_SECRET || "oauth")
-      .update(`${shop}.${ts}.${nonce}`, "utf8").digest("base64url").slice(0, 32);
+      .update([shop, ts, nonce].join(OAUTH_STATE_SEP), "utf8").digest("base64url").slice(0, 32);
     if (!sessionAuth.safeEqual(sig, expect)) return null;
     if (!Number(ts) || Date.now() - Number(ts) > OAUTH_STATE_TTL_MS) return null;
     return shop;
