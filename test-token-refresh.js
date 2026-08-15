@@ -47,7 +47,7 @@ const freshPair = (n) => ({
   CALLS = []; NEXT = freshPair(1);
   let t = await tokens.exchangeCode(SHOP, Object.assign({ code: 'abc' }, creds));
   ok('it posts to the shop\'s token endpoint', CALLS[0].url === `https://${SHOP}/admin/oauth/access_token`, CALLS[0].url);
-  ok('and asks for expiring explicitly', CALLS[0].body.expiring === true, JSON.stringify(CALLS[0].body.expiring));
+  ok('and asks for expiring explicitly, as the docs spell it', CALLS[0].body.expiring === 1, JSON.stringify(CALLS[0].body.expiring));
   ok('the code is sent', CALLS[0].body.code === 'abc');
   ok('an access token comes back', t.access_token === 'atk_1');
   ok('and a refresh token', t.refresh_token === 'rtk_1');
@@ -112,7 +112,7 @@ const freshPair = (n) => ({
      CALLS[0].body.subject_token_type);
   ok('it requests an offline token back',
      CALLS[0].body.requested_token_type === 'urn:shopify:params:oauth:token-type:offline-access-token');
-  ok('and asks for expiring', CALLS[0].body.expiring === true);
+  ok('and asks for expiring', CALLS[0].body.expiring === 1);
   ok('the result is a refreshable pair', up.access_token === 'atk_3' && up.refresh_token === 'rtk_3');
 
   console.log('\n-- a refresh stampede must not spend the token twice --');

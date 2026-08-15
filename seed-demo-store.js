@@ -253,8 +253,20 @@ async function spreadDatesLocally(shop, created) {
   const created = await seed(shop, { customers: isNaN(count) ? 20 : count, force });
 
   if (created.length && !skipDates) {
-    console.log('\nWaiting 20s for the backfill to pull these in...');
-    await sleep(20000);
+    // Run the backfill OURSELVES rather than hoping one happens. The install-time
+    // backfill ran before this data existed, and the orders/create webhook is
+    // parked pending Protected Customer Data approval — so without this pull,
+    // nothing seeded here would ever reach the local database, and the date
+    // spread below would have no rows to work on.
+    console.log('\nPulling the seeded data into the local database (full backfill)...');
+    try {
+      await shopify.backfillEntireShop(shop, (p) => {
+        if (p && p.phase) console.log('  ' + p.phase);
+      });
+    } catch (e) {
+      console.log('  backfill failed (' + e.message + ') — waiting 20s and continuing anyway');
+      await sleep(20000);
+    }
     await spreadDatesLocally(shop, created);
   }
 

@@ -330,6 +330,10 @@ function hasTokenForShop(shopDomain) {
 // ---------------------------------------------------------------------------
 const shopifyTokens = require('./shopify-tokens');
 
+// Shops whose legacy-token upgrade was already attempted this process. See the
+// legacy branch in getFreshToken for why a failure must not be retried per call.
+const legacyUpgradeTried = new Set();
+
 async function getFreshToken(shopDomain) {
   const shop = (shopDomain || '').toLowerCase().trim();
   if (!shop) return null;
@@ -341,9 +345,26 @@ async function getFreshToken(shopDomain) {
   const store = storeCache.get(shop);
   if (!store || !store.token) return null;
 
-  // A legacy non-expiring token has no expiry and nothing to refresh with. It
-  // keeps working until Shopify's cutoff; upgradeShopToken() converts it.
-  if (!store.refresh_token || !store.access_expires_at) return store.token;
+  // A legacy non-expiring token: upgrade it IN PLACE, the first time it is
+  // used. For a store installed on the NEW app this is not optional — Shopify
+  // rejects its legacy token outright, so without the upgrade every call 403s
+  // until someone reinstalls by hand. Exactly that happened with the first
+  // demo store: install completed, token stored, and the app was blind.
+  //
+  // One attempt per shop per process. A store whose token belongs to the OLD
+  // app fails this exchange (the token was issued to different credentials) —
+  // that is expected, it falls back to its legacy token, which pre-cutoff apps
+  // may still use. Retrying that on every call would hammer Shopify for a
+  // failure that cannot change until the store moves to the new app.
+  if (!store.refresh_token || !store.access_expires_at) {
+    if (legacyUpgradeTried.has(shop)) return store.token;
+    return shopifyTokens.once(shop, async () => {
+      legacyUpgradeTried.add(shop);
+      const up = await upgradeShopToken(shop);
+      const fresh = storeCache.get(shop);
+      return (up.ok && fresh && fresh.token) ? fresh.token : store.token;
+    });
+  }
 
   if (!shopifyTokens.isExpired(store.access_expires_at)) return store.token;
 

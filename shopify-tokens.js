@@ -46,7 +46,7 @@ function tokenUrl(shop) {
 }
 
 // Exchange an authorization code for an EXPIRING offline token pair.
-// `expiring: true` is the entire difference from what this app did before.
+// `expiring: 1` is the entire difference from what this app did before.
 async function exchangeCode(shop, { code, clientId, clientSecret }) {
   const res = await fetch(tokenUrl(shop), {
     method: 'POST',
@@ -55,7 +55,7 @@ async function exchangeCode(shop, { code, clientId, clientSecret }) {
       client_id: clientId,
       client_secret: clientSecret,
       code,
-      expiring: true
+      expiring: 1
     })
   });
   const data = await res.json().catch(() => ({}));
@@ -103,7 +103,7 @@ async function upgradeLegacyToken(shop, { legacyToken, clientId, clientSecret })
       subject_token: legacyToken,
       subject_token_type: 'urn:shopify:params:oauth:token-type:offline-access-token',
       requested_token_type: 'urn:shopify:params:oauth:token-type:offline-access-token',
-      expiring: true
+      expiring: 1
     })
   });
   const data = await res.json().catch(() => ({}));
