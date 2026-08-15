@@ -794,7 +794,7 @@ we act as a <strong>data processor</strong> on their instructions.</p>
 <tr><td>Order history: dates, amounts, products purchased</td><td>To segment customers by recency, frequency and value, and to reference what someone actually bought</td></tr>
 <tr><td>Abandoned checkouts</td><td>To offer to recover the cart</td></tr>
 <tr><td>Product catalogue and inventory</td><td>To recommend products and flag stock issues</td></tr>
-<tr><td>Marketing consent status</td><td>To avoid contacting anyone who has not consented or who opted out</td></tr>
+<tr><td>Marketing consent status</td><td>To skip anyone who declined marketing in the store, in addition to our own opt-out list</td></tr>
 </table>
 <p>We do <strong>not</strong> receive or store payment card details. Shopify never exposes them to apps.</p>
 
@@ -820,6 +820,10 @@ we act as a <strong>data processor</strong> on their instructions.</p>
 The merchant is responsible for having obtained consent on the channel used. We enforce
 opt-outs, restrict sending to legal hours in the store's own timezone, and cap the number
 of messages per store per day.</p>
+<p>We also skip any customer whose Shopify record says they declined marketing. Where Shopify
+has no consent value recorded &mdash; common for customers imported from before a store began
+tracking it &mdash; we treat that as unknown rather than as a refusal, and the merchant remains
+responsible for the lawful basis on which those customers are contacted.</p>
 
 <h2>Rights of the merchant's customers</h2>
 <p>Requests to access, correct or delete personal data should go to the store you purchased

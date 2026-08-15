@@ -285,9 +285,13 @@ async function runCampaign(id, shop, segment, template, channels) {
       // Only auto-append the "קוד אישי" + validity lines when WE generated a personal
       // code. When the merchant supplied their own fixed code, the code already lives
       // in the body text they wrote — never add a second one.
+      // These two lines are appended to EVERY message, so hardcoding them in
+      // Hebrew put Hebrew at the bottom of every English store's campaign.
       if (finalCode && !fixedCode) {
-        if (!body.includes(finalCode)) body += `\n\nקוד אישי: ${finalCode}`;
-        if (!body.includes('48 שעות')) body += `\nהקוד תקף ל-48 שעות בלבד ⏰`;
+        const codeLabel = IS_EN ? 'Your code' : 'קוד אישי';
+        const validLine = IS_EN ? 'Valid for 48 hours only' : 'הקוד תקף ל-48 שעות בלבד';
+        if (!body.includes(finalCode)) body += `\n\n${codeLabel}: ${finalCode}`;
+        if (!body.includes('48')) body += `\n${validLine} ⏰`;
       }
 
       // Base URL for tracking links. Be defensive: strip any accidental
@@ -367,7 +371,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           const hour = bestHours[(contact.email || '').toLowerCase()] || 11;
           await mq.enqueue(shop, {
             channel: 'email', email: contact.email, phone: contact.phone, name: cust.name || null,
-            subject: template.subject || ('הודעה מ-' + BRAND),
+            subject: template.subject || (IS_EN ? ('A message from ' + BRAND) : ('הודעה מ-' + BRAND)),
             message: fullBody, send_at: await mq.computeSendAt(shop, hour), kind: 'timed',
             campaign_id: id, segment: c.segment_key || null
           }).then(() => { c.queued++; didSomething = true; })
@@ -378,7 +382,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           // opt-out against the pilot store -- so this merchant keeps mailing someone
           // who asked them to stop, with this merchant as sender of record.
           const html = mailer.buildHtmlEmail(fullBody, { brand: BRAND, language: settings.language, to: contact.email, shop });
-          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || ('הודעה מ-' + BRAND), html, text: fullBody, fromName: BRAND });
+          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || (IS_EN ? ('A message from ' + BRAND) : ('הודעה מ-' + BRAND)), html, text: fullBody, fromName: BRAND });
           if (sent.ok) { c.sent++; didSomething = true; }
           else { c.log.push({ customer: cust.email, failed: sent.error }); }
         }
@@ -395,11 +399,19 @@ async function runCampaign(id, shop, segment, template, channels) {
         if (fuChannel) {
           const firstName = (cust.name || '').split(' ')[0];
           const fuPct = Math.min(pct + 5, 25);
-          const fuProduct = cust.last_product ? `ראינו שאהבת את ${cust.last_product} — ` : '';
-          const fuBody = `היי${firstName ? ' ' + firstName : ''} 💜 רק תזכורת קטנה — ${fuProduct}ההטבה שלך עדיין מחכה.\nקוד חדש בשבילך (${fuPct}%): {COUPON}\nתקף ל-48 שעות ⏰\n🛍️ למימוש:\n{LINK}`;
+          // The entire follow-up was a fixed Hebrew string, and follow-ups
+          // default ON — so three days after ANY campaign, a US store's
+          // customers received a Hebrew SMS.
+          const fuProduct = cust.last_product
+            ? (IS_EN ? `we saw you loved the ${cust.last_product} — ` : `ראינו שאהבת את ${cust.last_product} — `)
+            : '';
+          const hi = firstName ? ' ' + firstName : '';
+          const fuBody = IS_EN
+            ? `Hi${hi} — just a quick reminder: ${fuProduct}your offer is still waiting.\nA new code for you (${fuPct}%): {COUPON}\nValid for 48 hours\nShop here:\n{LINK}`
+            : `היי${hi} 💜 רק תזכורת קטנה — ${fuProduct}ההטבה שלך עדיין מחכה.\nקוד חדש בשבילך (${fuPct}%): {COUPON}\nתקף ל-48 שעות ⏰\n🛍️ למימוש:\n{LINK}`;
           await mq.enqueue(shop, {
             channel: fuChannel, phone: contact.phone, email: contact.email, name: cust.name || null,
-            subject: 'שמרנו לך את זה 💜',
+            subject: IS_EN ? 'We saved this for you' : 'שמרנו לך את זה 💜',
             message: fuBody, send_at: await mq.computeSendAt(shop, 11, 3), kind: 'followup', step: 2,
             campaign_id: id, segment: c.segment_key || null,
             coupon_pct: fuPct, coupon_days: 2

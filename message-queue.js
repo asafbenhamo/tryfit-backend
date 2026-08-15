@@ -257,6 +257,24 @@ async function processDue(limit = 60) {
         if (m.channel === 'sms' && m.phone && smsSender.isConfigured()) {
           const r = await smsSender.sendOne(m.shop_domain, { phone: m.phone, message: body });
           ok = r.ok; err = r.error || null;
+          // Some SMS failures are permanent facts about the number or the shop,
+          // not bad luck: the provider does not reach this country, or the shop
+          // has no approved sender id. Retrying those three times reaches nobody
+          // and then writes the customer off. Drop to email instead — the same
+          // thing the WhatsApp path already does when credits run out.
+          if (!ok && (r.error === 'invalid_phone' || r.error === 'no_sender_id') && m.email) {
+            await db.query(`UPDATE scheduled_messages SET channel='email' WHERE id=$1`, [m.id]).catch(() => {});
+            console.log(`[queue] #${m.id} sms -> email (${r.error})`);
+            m.channel = 'email';
+            const qs = await storeSettings.getSettings(m.shop_domain).catch(() => ({}));
+            const bn = qs.brand || '770';
+            const fallbackHtml = mailer.buildHtmlEmail(body, { brand: bn, language: qs.language, to: m.email, shop: m.shop_domain });
+            const fr = await mailer.sendEmail({
+              to: m.email, subject: m.subject || ((qs.language === 'en' ? 'A message from ' : 'הודעה מ-') + bn),
+              html: fallbackHtml, text: body, fromName: bn
+            });
+            ok = fr.ok; err = fr.error || null;
+          }
         } else if (m.channel === 'email' && m.email) {
           const qset = await storeSettings.getSettings(m.shop_domain).catch(() => ({}));
           const brand = qset.brand || '770';

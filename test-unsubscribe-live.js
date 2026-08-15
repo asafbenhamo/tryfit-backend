@@ -22,7 +22,9 @@ const path = require('path');
 let pass = 0, fail = 0;
 const ok = (n, c, x) => { if (c) { pass++; console.log('  ok   ' + n); } else { fail++; console.log('  FAIL ' + n + (x ? '  -> ' + x : '')); } };
 
-const PORT = 3993;
+// A fixed port collides when suites run back to back and the previous
+// listener has not been reaped yet, which surfaces as 'server never came up'.
+const PORT = Number(process.env.TEST_PORT || (39000 + (process.pid % 900)));
 const BASE = 'http://127.0.0.1:' + PORT;
 
 // The server runs in a CHILD process, not this one. Booting express in-process

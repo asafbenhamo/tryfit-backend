@@ -87,8 +87,18 @@ function pickForCustomer(customer, available) {
   }
 
   if (available.sms) {
-    if (phone) return { channel: 'sms', reason: 'preferred_sms', considered };
-    considered.push('sms: no phone');
+    // Having a phone is not the same as the provider being able to text it.
+    // TextMe reaches Israeli mobiles only, so a US or UK number picked SMS here,
+    // failed at send time, was retried three times and then written off — while
+    // the customer's perfectly good email address sat one branch below.
+    // Guarded: routing decides who gets contacted at all, so a missing helper
+    // must degrade to the old behaviour rather than throw and abort the whole run.
+    const reachable = (typeof smsSender.canReach === 'function')
+      ? smsSender.canReach(customer.phone) : true;
+    if (phone && reachable) {
+      return { channel: 'sms', reason: 'preferred_sms', considered };
+    }
+    considered.push(phone ? 'sms: provider cannot reach this number' : 'sms: no phone');
   } else if (available.why && available.why.sms) {
     considered.push('sms: ' + available.why.sms);
   }

@@ -97,6 +97,32 @@ async function isInCooldown(shop, { email, phone } = {}, days = COOLDOWN_DAYS) {
 }
 
 // ---------- The single gate every send must pass ----------
+// Did this customer explicitly decline marketing in the merchant's own store?
+//
+// Deliberately narrow: it answers true ONLY for a stored FALSE. A missing row,
+// a NULL, or a database error all answer false (do not block), because failing
+// this check closed would silently stop every send for a shop whose customers
+// predate consent tracking — and a compliance control that turns the product
+// off without saying so gets ripped out rather than fixed.
+async function hasDeclinedMarketing(shop, { email, phone } = {}) {
+  if (!email && !phone) return false;
+  try {
+    const r = await db.query(
+      `SELECT 1 FROM store_customers
+        WHERE shop_domain = $1
+          AND marketing_consent IS FALSE
+          AND ( ($2::text <> '' AND LOWER(email) = LOWER($2))
+             OR ($3::text <> '' AND regexp_replace(COALESCE(phone,''),'[^0-9]','','g')
+                                    = regexp_replace($3,'[^0-9]','','g')) )
+        FETCH FIRST 1 ROWS ONLY`,
+      [shop, email || '', phone || '']);
+    return r.rows.length > 0;
+  } catch (e) {
+    console.error('[compliance] hasDeclinedMarketing:', e.message);
+    return false;
+  }
+}
+
 // Returns { allowed: bool, reason, detail, warning? }
 // HARD blocks (allowed:false): outside working hours, opted-out (legal).
 // SOFT warning (allowed:true + warning): recently contacted - merchant may override.
@@ -123,7 +149,27 @@ async function canContactCustomer(shop, { email, phone } = {}, opts = {}) {
       detail: 'הלקוחה ביקשה לא לקבל הודעות. ההודעה לא נשלחה (חובה חוקית).'
     };
   }
-  // 3. Cooldown - SOFT warning only. The send is ALLOWED; we just flag it so the
+  // 3. Marketing consent - hard block when the customer explicitly declined.
+  //
+  //    We have stored Shopify's marketing_consent since the first backfill and
+  //    the privacy policy told merchants we use it, but NO send path ever read
+  //    it: someone who ticked "no marketing" in the store's own checkout was
+  //    messaged anyway, with the merchant as sender of record.
+  //
+  //    Only an explicit FALSE blocks. Unknown (NULL) does not, because most
+  //    shops have customers imported from before they tracked consent, and
+  //    treating "we never asked" as "they said no" would silence the app for
+  //    an entire customer base. That distinction is now stated in the privacy
+  //    policy rather than papered over.
+  if (!opts.ignoreConsent && await hasDeclinedMarketing(shop, { email, phone })) {
+    return {
+      allowed: false,
+      reason: 'no_marketing_consent',
+      detail: 'הלקוחה לא אישרה קבלת דיוור שיווקי בחנות. ההודעה לא נשלחה.'
+    };
+  }
+
+  // 4. Cooldown - SOFT warning only. The send is ALLOWED; we just flag it so the
   //    merchant knows we reached out recently and can decide. Never blocks.
   if (!opts.ignoreCooldown && await isInCooldown(shop, { email, phone }, opts.cooldownDays || COOLDOWN_DAYS)) {
     return {
@@ -142,6 +188,7 @@ module.exports = {
   workingHoursStatus,
   isOptedOut,
   addOptOut,
+  hasDeclinedMarketing,
   isInCooldown,
   canContactCustomer
 };

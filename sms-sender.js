@@ -25,6 +25,19 @@ function isConfigured() {
 }
 
 // Normalize an Israeli phone to TextMe's accepted format (05XXXXXXXX).
+//
+// TextMe is an Israeli provider and only reaches Israeli mobiles. That is a real
+// limit of the provider, not something normalisation can fix by accepting more
+// formats — a +1 number handed to TextMe is not delivered, it is rejected.
+//
+// What was wrong was the layers ABOVE this one. The settings screen lets any
+// shop enter a sender id, which switched SMS on; the router then sent every
+// phone-owning customer down this path; and the queue treated the resulting
+// invalid_phone as a transient failure, retried it three times and marked it
+// failed. Those customers were never reached by ANY channel, even though most
+// of them had a perfectly good email address — and they still counted against
+// the shop's daily budget. canReach() below lets the router skip SMS for a
+// number this provider cannot deliver to and fall through to email instead.
 function normalizePhone(raw) {
   if (!raw) return null;
   let p = String(raw).replace(/[^0-9]/g, '');
@@ -34,7 +47,14 @@ function normalizePhone(raw) {
   if (/^05\d{8}$/.test(p)) return p;
   // Sometimes stored without leading 0 (5XXXXXXXX).
   if (/^5\d{8}$/.test(p)) return '0' + p;
-  return null; // invalid / not a mobile
+  return null; // invalid, not a mobile, or outside this provider's reach
+}
+
+// Can the configured SMS provider actually deliver to this number? Asked BEFORE
+// choosing SMS, so an unreachable number costs nothing and falls through to a
+// channel that works.
+function canReach(phone) {
+  return normalizePhone(phone) !== null;
 }
 
 // Send one SMS. Returns { ok, id?, error? }.
@@ -145,4 +165,4 @@ async function getBalance() {
   }
 }
 
-module.exports = { isConfigured, normalizePhone, sendOne, sendBatch, getBalance };
+module.exports = { isConfigured, normalizePhone, sendOne, sendBatch, getBalance, canReach };

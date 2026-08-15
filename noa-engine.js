@@ -18,6 +18,7 @@
 const db = require('./database');
 const compliance = require('./compliance');
 const smsSender = require('./sms-sender');
+const storeSettings = require('./store-settings');
 
 let tableReady = false;
 async function ensureTable() {
@@ -96,13 +97,40 @@ async function draftReply(shop, ctx, customerText) {
   let MODEL = 'claude-sonnet-5';
   try { MODEL = require('./ai-brain').MODEL || MODEL; } catch (e) { /* default */ }
 
-  const prompt = `את נועה, נציגת שירות של חנות אופנה ישראלית (770). לקוחה ענתה להודעת SMS של החנות.
+  // The store, in ITS OWN words. This prompt used to hardcode "an Israeli
+  // fashion store (770)" and sevenseventy.co.il for every tenant, and rule 3
+  // forced the reply into Hebrew — so a customer of any other merchant who
+  // texted back got a Hebrew reply, signed by a store they had never bought
+  // from, linking a competitor's website.
+  const settings = await storeSettings.getSettings(shop).catch(() => ({}));
+  const brand = settings.brand || String(shop || '').replace('.myshopify.com', '');
+  const isEn = settings.language === 'en';
+  let siteUrl = '';
+  try { siteUrl = require('./shopify-client').getPublicDomain(shop) || ''; } catch (e) { /* optional */ }
+
+  const prompt = isEn ? `You are Noa, a customer service rep for ${brand}. A customer has replied to an SMS from the store.
+
+What you know (this is ALL of it — do not invent anything beyond it):
+- Customer name: ${ctx.name || 'unknown'}
+- Recent purchases: ${ctx.last_products.join(', ') || 'unknown'}
+- The last personal coupon code sent to her: ${ctx.coupon || 'none'}
+- Store website: ${siteUrl || 'unknown'}
+
+Her message: "${customerText}"
+
+Binding rules:
+1. Answer ONLY if the answer is in the information above (e.g. what is my code, what did I buy). Never invent sizes, stock, prices or delivery times — you have no access to them.
+2. If you cannot answer confidently from that information, reply with exactly: HANDOFF
+3. If you can: one or two warm sentences in English, max 180 characters, no links, at most one emoji.
+4. If she is interested in buying, mention her personal code if she has one.
+
+Reply with the message text only, or the word HANDOFF.` : `את נועה, נציגת שירות של ${brand}. לקוחה ענתה להודעת SMS של החנות.
 
 מה ידוע (זה כל המידע — אסור להמציא מעבר לו):
 - שם הלקוחה: ${ctx.name || 'לא ידוע'}
 - קניות אחרונות: ${ctx.last_products.join(', ') || 'לא ידוע'}
 - קוד קופון אישי אחרון שנשלח לה: ${ctx.coupon || 'אין'}
-- אתר החנות: sevenseventy.co.il
+- אתר החנות: ${siteUrl || 'לא ידוע'}
 
 הודעת הלקוחה: "${customerText}"
 
@@ -141,7 +169,13 @@ async function handleInbound(shop, rawBody) {
   // ---- 1. Opt-out keywords: honor immediately, everywhere (incl. Flashy push) ----
   if (OPTOUT_RE.test(text)) {
     // Confirm to the customer FIRST (after opt-out the gate would block us), then remove.
-    try { await smsSender.sendOne(shop, { phone: norm, message: 'הוסרת מרשימת התפוצה שלנו. תודה ולהתראות 💜' }); } catch (e) { /* ok */ }
+    // Confirmed in the STORE's language. A customer of a US shop who texts STOP
+    // used to get the confirmation in Hebrew.
+    const stopEn = (await storeSettings.getSettings(shop).catch(() => ({}))).language === 'en';
+    const stopMsg = stopEn
+      ? "You've been removed from our list. Thanks, and take care."
+      : 'הוסרת מרשימת התפוצה שלנו. תודה ולהתראות 💜';
+    try { await smsSender.sendOne(shop, { phone: norm, message: stopMsg }); } catch (e) { /* ok */ }
     try {
       const flashySync = require('./flashy-sync');
       await flashySync.optOutEverywhere(shop, { phone: norm, reason: 'sms_reply_stop' });
@@ -168,7 +202,11 @@ async function handleInbound(shop, rawBody) {
   }
 
   // Handoff: tell the customer a human will answer, alert the merchant loudly.
-  const holdMsg = `היי${ctx.name ? ' ' + ctx.name.split(' ')[0] : ''}! קיבלנו את ההודעה שלך 💜 בעל החנות יחזור אלייך ממש בקרוב.`;
+  const holdEn = (await storeSettings.getSettings(shop).catch(() => ({}))).language === 'en';
+  const first = ctx.name ? ' ' + ctx.name.split(' ')[0] : '';
+  const holdMsg = holdEn
+    ? `Hi${first}! We got your message and the store will get back to you very soon.`
+    : `היי${first}! קיבלנו את ההודעה שלך 💜 בעל החנות יחזור אלייך ממש בקרוב.`;
   await smsSender.sendOne(shop, { phone: norm, message: holdMsg }).catch(() => {});
   await log(shop, norm, text, holdMsg, 'merchant_needed', ctx.name);
   if (pushEngine) pushEngine.sendToShop(shop, {

@@ -175,10 +175,22 @@ async function optOutEverywhere(shop, { email, phone, reason } = {}) {
     local = { ok: false, error: err.message };
   }
 
-  // 2. Best-effort push to Flashy (never throws, never blocks).
+  // 2. Best-effort push to Flashy — but ONLY for the shop that owns this Flashy
+  //    account.
+  //
+  //    There is one global FLASHY_API_KEY and one global list, belonging to the
+  //    pilot merchant. This pushed on every opt-out from every shop, so a
+  //    customer of merchant B who unsubscribed had their email handed to a
+  //    different merchant's mailing-list account — disclosing one store's
+  //    customer to another, on the one action where the person had just asked
+  //    to be left alone.
   let flashy = { ok: false, reason: 'not_configured' };
   if (isConfigured()) {
-    flashy = await pushUnsubscribe({ email, phone });
+    if (shop && shop !== shopDomain()) {
+      flashy = { ok: false, reason: 'not_this_shops_account' };
+    } else {
+      flashy = await pushUnsubscribe({ email, phone });
+    }
   }
 
   return { ok: true, local, flashy };

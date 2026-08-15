@@ -81,7 +81,12 @@ Module._load = function (request) {
       const m = {}; (emails || []).forEach((e, i) => { if (e) m[String(e).toLowerCase()] = 14 + (i % 3); });
       return m;
     } };
-    case 'sms-sender': return { isConfigured: () => SMS_ON, sendOne: async () => ({ ok: true }) };
+    case 'sms-sender': return { isConfigured: () => SMS_ON, sendOne: async () => ({ ok: true }),
+      // The router asks whether the provider can actually reach a number
+      // before choosing SMS. The stub answers for Israeli mobiles, which is
+      // what this suite's fixtures use.
+      canReach: (ph) => /^0?5\d{8}$|^(\+?972)5\d{8}$/.test(String(ph||'').replace(/[^0-9+]/g,'')),
+      normalizePhone: (ph) => String(ph||'') };
     case 'mailer': return { isConfigured: () => EMAIL_ON, sendEmail: async () => ({ ok: true }), buildHtmlEmail: () => '<p>x</p>' };
     case 'whatsapp-sender': return { isConfigured: () => WA_CONFIGURED, sendTemplate: async () => ({ ok: true }) };
     case 'credits-engine': return { getBalance: async () => WA_CREDITS };
@@ -95,12 +100,17 @@ const autopilot = require('./autopilot-engine.js');
 
 // ---- fixtures ------------------------------------------------------------
 // `phoneRate` = share of customers who have a phone number on file.
-function makeCustomers(n, segment, withProduct, phoneRate = 0) {
+function makeCustomers(n, segment, withProduct, phoneRate = 0, intl = false) {
   const out = [];
   for (let i = 0; i < n; i++) {
     out.push({
       name: 'Customer ' + i, email: 'c' + i + '@example.com',
-      phone: (i / n) < phoneRate ? '+1212555' + String(1000 + i) : '',
+      // Israeli mobiles by default: the configured SMS provider (TextMe) only
+      // reaches those, and the router now checks before choosing SMS. Pass
+      // intl:true to model a customer the provider cannot text.
+      phone: (i / n) < phoneRate
+        ? (intl ? '+1212555' + String(1000 + i) : '05' + String(10000000 + i).slice(0, 8))
+        : '',
       monetary: 400 + i, segment, segment_label: segment,
       last_product: withProduct ? 'Linen Dress' : null, priority: 1
     });
@@ -262,8 +272,18 @@ function freeze(iso) {
   CUSTOMERS = makeCustomers(100, 'at_risk', true, 0.6);   // 60% have a phone
   r = await autopilot.runForShop('s.myshopify.com');
   let chans = byChannel();
-  ok('customers with a phone got SMS', (chans.sms || 0) === 60, JSON.stringify(chans));
+  ok('customers with a reachable phone got SMS', (chans.sms || 0) === 60, JSON.stringify(chans));
   ok('customers without a phone got email', (chans.email || 0) === 40, JSON.stringify(chans));
+
+  // The SMS provider is Israeli. A phone it cannot reach must fall through to
+  // email rather than be chosen, fail, retry three times and be written off --
+  // which is what happened to every non-Israeli customer of every store.
+  reset();
+  CUSTOMERS = makeCustomers(100, 'at_risk', true, 1.0, true);   // all US numbers
+  r = await autopilot.runForShop('s.myshopify.com');
+  chans = byChannel();
+  ok('a number the provider cannot reach is NOT sent by SMS', !chans.sms, JSON.stringify(chans));
+  ok('those customers get email instead of nothing', (chans.email || 0) === 100, JSON.stringify(chans));
   ok('nobody got WhatsApp (not enabled)', !chans.whatsapp, JSON.stringify(chans));
 
   console.log('\n-- email carries everyone when SMS is unavailable --');
