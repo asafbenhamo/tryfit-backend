@@ -209,6 +209,31 @@ async function spreadDatesLocally(shop, created) {
     process.exit(1);
   }
 
+  // Railway's copy button appends the variable's NAME to its value, so the URL
+  // arrives as ".../railway-DATABASE_PUBLIC_URL". Postgres then reports
+  // 'database "railway-DATABASE_PUBLIC_URL" does not exist', which is accurate
+  // and tells you nothing about the cause. Caught twice in a row here; say what
+  // it actually is.
+  const dbUrl = process.env.DATABASE_URL || '';
+  if (!dbUrl) {
+    console.error('REFUSED: DATABASE_URL is not set. Copy DATABASE_PUBLIC_URL from the Postgres');
+    console.error('service in Railway (not the app service, and not the internal .railway.internal one).');
+    process.exit(1);
+  }
+  if (/-DATABASE_(PUBLIC_)?URL$|-Railway$/i.test(dbUrl)) {
+    console.error('REFUSED: DATABASE_URL has the variable NAME stuck on the end:');
+    console.error('  ...' + dbUrl.slice(-45));
+    console.error("Railway's copy button does that. Delete everything after the database name");
+    console.error('(the URL should end in "/railway") and run it again.');
+    process.exit(1);
+  }
+  if (/\.railway\.internal/.test(dbUrl)) {
+    console.error('REFUSED: that is the INTERNAL database host, which only resolves inside');
+    console.error("Railway's own network. From a laptop you need DATABASE_PUBLIC_URL, which");
+    console.error('looks like postgresql://...@something.proxy.rlwy.net:PORT/railway');
+    process.exit(1);
+  }
+
   await shopify.loadStores();
   if (!shopify.hasTokenForShop(shop)) {
     console.error(`REFUSED: no access token for ${shop}. Connect the app to it first.`);
