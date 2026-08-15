@@ -153,7 +153,21 @@ async function seed(shop, { customers = 20, force = false } = {}) {
         });
         customer = r.customer;
       } catch (e) {
-        console.log(`  skip ${email}: ${String(e.message).slice(0, 120)}`);
+        const msg = String(e.message);
+        // One protected-customer-data refusal means they will ALL refuse: the
+        // app has not declared PCD access in the dashboard. Printing nineteen
+        // more identical 403s and then "Done" made a hard blocker read like a
+        // successful run with some skips.
+        if (/protected customer data/i.test(msg)) {
+          console.error('\nSTOPPED: Shopify refuses customer data until access is DECLARED for this app.');
+          console.error('A dashboard setting, not a review — dev stores work immediately after:');
+          console.error('  Dev Dashboard -> the app -> API access -> Protected customer data access');
+          console.error('  -> select "Protected customer data", tick Name / Email / Phone / Address,');
+          console.error('  -> one-line reason each, Save.');
+          console.error('Only a public App Store listing needs the full review.');
+          await bail(1);
+        }
+        console.log(`  skip ${email}: ${msg.slice(0, 120)}`);
         continue;
       }
 
@@ -285,6 +299,13 @@ async function spreadDatesLocally(shop, created) {
   if (!dev.ok && force) console.log('\n--force given on a non-development store. Proceeding.\n');
 
   const created = await seed(shop, { customers: isNaN(count) ? 20 : count, force });
+
+  // A run that created nothing is a failure, whatever the reason — saying
+  // "Done" after 0 customers is how the PCD blocker got read as success.
+  if (!created.length) {
+    console.error('\nFAILED: nothing was created. Fix the errors above and run again.');
+    await bail(1);
+  }
 
   if (created.length && !skipDates) {
     // Run the backfill OURSELVES rather than hoping one happens. The install-time
