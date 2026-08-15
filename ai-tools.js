@@ -1013,7 +1013,10 @@ async function sendSms(shop, options = {}) {
         amount_ils: isFixed ? parseFloat(options.coupon_ils) : null,
         code: `${namePart}${amt}${suffix}`,
         days_valid: options.coupon_days ? parseInt(options.coupon_days) : 2,
-        title: `יועץ SMS: ${options.customer_name || phone}`
+        // Shown in the merchant's own Shopify Discounts list — their language.
+        title: require('./server-i18n').st(
+          (await require('./store-settings').getSettings(shop).catch(() => ({}))).language,
+          'disc.sms', { who: options.customer_name || phone })
       });
       if (!c.ok) return { ok: false, error: 'יצירת הקופון נכשלה: ' + (c.error || 'לא ידוע') };
       couponCode = c.code;

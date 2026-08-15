@@ -85,7 +85,21 @@ const STRINGS = {
     'ins.move.personalized_cart': 'עגלה מותאמת אישית',
     'ins.move.winback': 'win-back',
     'ins.move.campaign': 'קמפיין',
-    'ins.move.agent': 'פעולות הסוכן'
+    'ins.move.agent': 'פעולות הסוכן',
+
+    // --- Discount titles written into the MERCHANT'S OWN Shopify admin ---
+    // These show up in their Discounts list, so an English store was reading
+    // Hebrew inside its own Shopify dashboard.
+    'disc.campaign': 'קמפיין {type} - {who}',
+    'disc.followup': 'רצף המשך: {who}',
+    'disc.auto': 'יועץ אוטומטי: {who}',
+    'disc.advisor': 'יועץ: {type} - {who}',
+    'disc.cart': 'יועץ: עגלה מותאמת - {who}',
+    'disc.sms': 'יועץ SMS: {who}',
+
+    // --- Push notifications to the merchant ---
+    'push.saleTitle': '🎉 מכירה חדשה בזכות היועץ!',
+    'push.saleBody': 'לקוחה השלימה רכישה של {amount}. היועץ סגר עוד עסקה.'
   },
 
   en: {
@@ -154,7 +168,18 @@ const STRINGS = {
     'ins.move.personalized_cart': 'Personalized cart',
     'ins.move.winback': 'Win-back',
     'ins.move.campaign': 'Campaign',
-    'ins.move.agent': 'Agent actions'
+    'ins.move.agent': 'Agent actions',
+
+    // --- Discount titles written into the MERCHANT'S OWN Shopify admin ---
+    'disc.campaign': 'Campaign {type} - {who}',
+    'disc.followup': 'Follow-up: {who}',
+    'disc.auto': 'Smart Advisor (auto): {who}',
+    'disc.advisor': 'Smart Advisor: {type} - {who}',
+    'disc.cart': 'Smart Advisor: personal cart - {who}',
+    'disc.sms': 'Smart Advisor SMS: {who}',
+
+    'push.saleTitle': 'New sale, thanks to the agent',
+    'push.saleBody': 'A customer completed a purchase of {amount}. The agent closed another one.'
   }
 };
 

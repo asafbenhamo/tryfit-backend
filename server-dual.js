@@ -24,6 +24,16 @@ const smsSender = require("./sms-sender");
 const messageQueue = require("./message-queue");
 const noaEngine = require("./noa-engine");
 const storeSettings = require("./store-settings");
+const serverI18n = require("./server-i18n");
+
+// A discount code's title is not internal bookkeeping — it is what the merchant
+// reads in their OWN Shopify Discounts list. These were fixed Hebrew strings, so
+// an English-speaking store found rows titled "יועץ אוטומטי: Dana" inside their
+// own dashboard.
+async function discountTitle(shop, key, vars) {
+  const set = await storeSettings.getSettings(shop).catch(() => ({}));
+  return serverI18n.st(set.language, key, vars);
+}
 const storeTime = require("./store-time");
 const sessionAuth = require("./session-auth");
 const billing = require("./billing-engine");
@@ -1398,7 +1408,7 @@ app.post("/api/campaign/send-auto", express.json(), async (req, res) => {
           amount_ils: amount_ils || null,
           code: `${namePart}${percentage || Math.round(amount_ils) || ''}${suffix}`,
           days_valid, combine,
-          title: `יועץ אוטומטי: ${name}`
+          title: await discountTitle(shop, 'disc.auto', { who: name })
         });
         if (cc.ok) coupon = cc.code;
       } catch (e) {}
@@ -2666,7 +2676,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
         combine: coupon_combine === false ? false : true,
         code: finalCode,
         days_valid: coupon_days || 2,
-        title: `יועץ: ${action_type || 'campaign'} - ${customer_name || email || ''}`
+        title: await discountTitle(shop, 'disc.advisor', { type: action_type || 'campaign', who: customer_name || email || '' })
       });
       // If the code already exists (created recently, still valid), Shopify returns
       // "must be unique". Instead of failing, retry once with a random suffix so the
@@ -2679,7 +2689,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
           combine: coupon_combine === false ? false : true,
           code: retryCode,
           days_valid: coupon_days || 2,
-          title: `יועץ: ${action_type || 'campaign'} - ${customer_name || email || ''}`
+          title: await discountTitle(shop, 'disc.advisor', { type: action_type || 'campaign', who: customer_name || email || '' })
         });
       }
       if (!c.ok) {
@@ -2815,7 +2825,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
         percentage: discount_percentage,
         code: `${namePart}${discount_percentage}${suffix}`,
         days_valid: 2,
-        title: `יועץ: עגלה מותאמת - ${customer_name || email || ''}`
+        title: await discountTitle(shop, 'disc.cart', { who: customer_name || email || '' })
       });
       if (c.ok) cartCoupon = c.code;
     }
@@ -2951,7 +2961,7 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
             code: `${namePart}${discount}${suffix}`,
             days_valid: 2,
             combine: true,
-            title: `יועץ: עגלה מותאמת - ${customer_name || email || ''}`
+            title: await discountTitle(shop, 'disc.cart', { who: customer_name || email || '' })
           });
           if (c.ok) cartCoupon = c.code;
         }
@@ -3998,10 +4008,13 @@ function handleOrderWebhook(req, res) {
           try {
             const push = require('./push-engine');
             if (push.isConfigured()) {
-              const amt = Math.round(r.amount || 0).toLocaleString();
+              // The merchant's own language and currency — see the twin of this
+              // block in attribution-engine.
+              const set = await storeSettings.getSettings(shopDomain).catch(() => ({}));
+              const amt = (set.currency || '₪') + Math.round(r.amount || 0).toLocaleString();
               await push.sendToShop(shopDomain, {
-                title: '🎉 מכירה חדשה בזכות היועץ!',
-                body: `לקוחה השלימה רכישה של ${amt}₪. היועץ סגר עוד עסקה.`,
+                title: serverI18n.st(set.language, 'push.saleTitle'),
+                body: serverI18n.st(set.language, 'push.saleBody', { amount: amt }),
                 tag: 'conversion', url: '/chat'
               });
             }

@@ -20,6 +20,7 @@ const compliance = require('./compliance');
 const smsSender = require('./sms-sender');
 const mailer = require('./mailer');
 const storeTime = require('./store-time');
+const { st } = require('./server-i18n');
 
 let tableReady = false;
 async function ensureTable() {
@@ -186,7 +187,8 @@ async function processDue(limit = 60) {
           percentage: m.coupon_pct,
           code: `${namePart}${m.coupon_pct}${Math.floor(Math.random() * 900 + 100)}`,
           days_valid: m.coupon_days || 2,
-          title: `רצף המשך: ${m.name || m.email || m.phone}`
+          title: st((await storeSettings.getSettings(m.shop_domain).catch(() => ({}))).language,
+                    'disc.followup', { who: m.name || m.email || m.phone })
         });
         if (c.ok) {
           let actionId = null;

@@ -17,6 +17,7 @@ const shopify = require('./shopify-client');
 const mailer = require('./mailer');
 const compliance = require('./compliance');
 const policyEngine = require('./policy-engine');
+const { st } = require('./server-i18n');
 
 const MAX_PER_CAMPAIGN = 50000;    // hard technical ceiling (UI confirms above 500)
 const SEND_DELAY_MS = 600;         // small pace between customers
@@ -268,7 +269,9 @@ async function runCampaign(id, shop, segment, template, channels) {
           min_subtotal: minSubtotal,           // valid only above this spend
           buy_quantity: buyQty, get_quantity: getQty, // for 3+1 style
           free_shipping: couponType === 'free_shipping',
-          title: `קמפיין ${c.campaign_type} - ${cust.name || cust.email || ''}`
+          // Written into the merchant's OWN Shopify Discounts list, so it
+          // follows their language, not ours.
+          title: st(settings.language, 'disc.campaign', { type: c.campaign_type, who: cust.name || cust.email || '' })
         });
         finalCode = coupon.ok ? coupon.code : null;
       }

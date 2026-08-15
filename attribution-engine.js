@@ -266,10 +266,15 @@ async function runAttribution(shopDomain = SHOP) {
         try {
           const push = require('./push-engine');
           if (push.isConfigured()) {
-            const amt = Math.round(r.amount || 0).toLocaleString();
+            // In the merchant's language and currency. This was a fixed Hebrew
+            // string with a ₪ sign, pushed to the phone of every merchant on the
+            // platform regardless of where they trade.
+            const { st } = require('./server-i18n');
+            const set = await require('./store-settings').getSettings(shopDomain).catch(() => ({}));
+            const amt = (set.currency || '₪') + Math.round(r.amount || 0).toLocaleString();
             await push.sendToShop(shopDomain, {
-              title: '🎉 מכירה חדשה בזכות היועץ!',
-              body: `לקוחה השלימה רכישה של ${amt}₪. היועץ סגר עוד עסקה.`,
+              title: st(set.language, 'push.saleTitle'),
+              body: st(set.language, 'push.saleBody', { amount: amt }),
               tag: 'conversion',
               url: '/'
             });
