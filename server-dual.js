@@ -385,9 +385,73 @@ function getShopFromRequest(req) {
 // two names, and if only the first was configured every webhook silently failed
 // verification. (That is the "checkout HMAC mismatch" in the logs.) Resolve once,
 // accept either name.
-function shopifyAppSecret() {
-  return process.env.SHOPIFY_API_SECRET || process.env.ADVISOR_SHOPIFY_SECRET || null;
+// ===========================================================================
+// APP CREDENTIALS — resolved in exactly one place.
+//
+// Several environment variable names now mean "this app's client id" or "this
+// app's secret". That is not an accident and it is not free: this codebase
+// already carried SHOPIFY_API_SECRET *and* ADVISOR_SHOPIFY_SECRET for the same
+// value, and the two-names-one-secret split is what produced the long-standing
+// "Checkout HMAC mismatch" — some code read one name, some read the other, and
+// signatures failed with nothing anywhere saying why.
+//
+// So rather than sprinkle `|| process.env.X2` through the file, every name is
+// resolved here, once, with a fixed precedence, and boot logs WHICH name won.
+// The question "which variable is actually in effect?" now has an answer you
+// can read instead of deduce.
+//
+// The `2` names win, because they are the ones set when moving to a new Shopify
+// app — and that gives the migration a useful property for free: if
+// SHOPIFY_API_SECRET2 is set, then plain SHOPIFY_API_SECRET is by definition
+// the OLD app's secret, so it is accepted for verifying webhooks from stores
+// that have not reinstalled yet, without anyone having to name it separately.
+// ===========================================================================
+const CLIENT_ID_NAMES = ["ADVISOR_SHOPIFY_KEY2", "ADVISOR_SHOPIFY_KEY", "SHOPIFY_API_KEY"];
+const SECRET_NAMES = ["SHOPIFY_API_SECRET2", "ADVISOR_SHOPIFY_SECRET2", "SHOPIFY_API_SECRET", "ADVISOR_SHOPIFY_SECRET"];
+
+function resolveEnv(names) {
+  const set = names.filter(n => (process.env[n] || "").trim());
+  if (!set.length) return { name: null, value: null, others: [] };
+  return {
+    name: set[0],
+    value: process.env[set[0]].trim(),
+    // Every other name that also holds a value — the ones NOT in effect.
+    others: set.slice(1)
+  };
 }
+
+function shopifyAppSecret() {
+  return resolveEnv(SECRET_NAMES).value;
+}
+
+function shopifyClientId() {
+  return resolveEnv(CLIENT_ID_NAMES).value;
+}
+
+// Say out loud, once, which names are in effect and which are being ignored.
+// A value sitting in a variable nobody reads is the failure this whole block
+// exists to prevent, and it is invisible without this.
+(function reportCredentialNames() {
+  const id = resolveEnv(CLIENT_ID_NAMES);
+  const sec = resolveEnv(SECRET_NAMES);
+  if (id.name) {
+    console.log(`🔑 client id from ${id.name}` + (id.others.length ? ` (ignoring: ${id.others.join(", ")})` : ""));
+  }
+  if (sec.name) {
+    console.log(`🔑 app secret from ${sec.name}` + (sec.others.length ? ` (also accepted for old webhooks: ${sec.others.join(", ")})` : ""));
+  }
+  // Two names holding DIFFERENT values is the exact shape of the old bug.
+  // During a migration it is expected and fine; any other time it means one of
+  // them is stale and something is reading the wrong one.
+  for (const [label, r] of [["client id", id], ["app secret", sec]]) {
+    for (const other of r.others) {
+      if (process.env[other].trim() !== r.value) {
+        console.warn(`⚠️  ${label}: ${other} holds a DIFFERENT value than ${r.name}. ` +
+          `${r.name} is the one in effect. Expected during an app migration; otherwise one of them is stale.`);
+      }
+    }
+  }
+})();
 
 // Every secret a webhook might legitimately be signed with, newest first.
 //
@@ -401,11 +465,10 @@ function shopifyAppSecret() {
 // Remove it once every store has reinstalled; leaving it forever means an old
 // leaked secret stays valid, which is exactly what rotation is meant to end.
 function shopifyAppSecrets() {
-  return [
-    process.env.SHOPIFY_API_SECRET,
-    process.env.ADVISOR_SHOPIFY_SECRET,
-    process.env.SHOPIFY_API_SECRET_PREVIOUS
-  ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
+  return SECRET_NAMES.concat(["SHOPIFY_API_SECRET_PREVIOUS"])
+    .map(n => (process.env[n] || "").trim())
+    .filter(Boolean)
+    .filter((v, i, a) => a.indexOf(v) === i);
 }
 
 // Is this body genuinely from Shopify? Timing-safe against every accepted
@@ -1342,7 +1405,7 @@ const MASTER_PASSWORD = process.env.MASTER_PASSWORD || null;
 (function assertSecrets() {
   const missing = [];
   if (!ADMIN_PASSWORD) missing.push("ADMIN_PASSWORD");
-  if (!process.env.SHOPIFY_API_SECRET && !process.env.ADVISOR_SHOPIFY_SECRET) missing.push("SHOPIFY_API_SECRET or ADVISOR_SHOPIFY_SECRET (webhook verification)");
+  if (!shopifyAppSecret()) missing.push("an app secret (one of: " + SECRET_NAMES.join(", ") + ") for webhook verification");
   if (missing.length) {
     console.error("FATAL: missing required secrets: " + missing.join(", "));
     console.error("Set them in the environment. There are no defaults by design.");
@@ -4811,8 +4874,10 @@ app.get("/admin/add-store", async (req, res) => {
 //   ADVISOR_SHOPIFY_KEY     = the Smart Advisor app's Client ID
 //   ADVISOR_SHOPIFY_SECRET  = the Smart Advisor app's Client secret
 // ============================================================
-const ADVISOR_SHOPIFY_KEY = process.env.ADVISOR_SHOPIFY_KEY || "";
-const ADVISOR_SHOPIFY_SECRET = process.env.ADVISOR_SHOPIFY_SECRET || "";
+// Both go through the single resolver above, so OAuth and webhook
+// verification can never end up reading different variables.
+const ADVISOR_SHOPIFY_KEY = shopifyClientId() || "";
+const ADVISOR_SHOPIFY_SECRET = shopifyAppSecret() || "";
 const OAUTH_SCOPES = "read_customers,write_customers,read_orders,read_products,read_inventory,read_checkouts,read_fulfillments,read_locations,read_price_rules,read_discounts,read_marketing_events,write_discounts,write_draft_orders";
 const APP_BASE_URL = "https://tryfit-backend-production.up.railway.app";
 // OAuth state — CSRF protection for the install flow.
