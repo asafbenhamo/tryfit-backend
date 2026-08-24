@@ -59,7 +59,9 @@ function isConfigured(shop) {
  */
 function canReach(phone, shop, opts = {}) {
   const p = providerFor(shop);
-  return p.canReach(phone, opts);
+  // The shop travels with the question: reachability now depends on that shop's
+  // own Twilio account, not the platform's.
+  return p.canReach(phone, { ...opts, shop });
 }
 
 function normalizePhone(phone, shop, opts = {}) {

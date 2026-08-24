@@ -668,7 +668,11 @@ app.get("/api/sms/coverage", async (req, res) => {
     }
 
     const sum = (a) => a.reduce((t, x) => t + x.customers, 0);
-    const haveNumber = !!(twilio.messagingServiceSid() || process.env.TWILIO_FROM_NUMBER);
+    // Asked of THIS shop's Twilio identity, not the platform's. A merchant with
+    // their own subaccount is covered by their own registered number; one
+    // without is not covered by somebody else's.
+    const acct = twilio.accountFor(shop);
+    const haveNumber = !!(acct.messagingServiceSid || process.env.TWILIO_FROM_NUMBER);
 
     res.json({
       ok: true,
@@ -677,7 +681,15 @@ app.get("/api/sms/coverage", async (req, res) => {
       // Where the merchant's own name is what the customer sees.
       name_shown: { customers: sum(byName), countries: byName },
       // Where carriers forbid a name. Reachable only from a registered number.
-      number_required: { customers: sum(byNumber), countries: byNumber, we_have_one: haveNumber },
+      number_required: {
+        customers: sum(byNumber), countries: byNumber,
+        we_have_one: haveNumber,
+        // Whether that number is the shop's own or the platform's, because a
+        // shared number means these customers see a sender that is not this
+        // merchant — and one merchant's bad behaviour gets it filtered for all.
+        own_account: acct.own,
+        status: (shopify.getStore(shop) || {}).us_sms_status || null
+      },
       // Country not recorded on the customer — usually an older import.
       unknown: { customers: sum(unknown), countries: unknown }
     });

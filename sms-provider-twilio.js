@@ -98,8 +98,9 @@ function countryFromTimezone(tz) {
   return null;
 }
 
-function isConfigured() {
-  return !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN);
+function isConfigured(shop) {
+  const a = accountFor(shop);
+  return !!(a.sid && a.token);
 }
 
 /**
@@ -166,6 +167,7 @@ function allowsAlphaSender(e164) {
  * off — which is what used to happen to every non-Israeli customer.
  */
 function canReach(phone, opts = {}) {
+  const shop = opts.shop || null;
   const to = normalizePhone(phone, opts);
   if (!to) return false;
   // A destination that forbids alphanumeric senders is only reachable if we
@@ -174,12 +176,57 @@ function canReach(phone, opts = {}) {
   // A destination that forbids a shop-name sender is reachable only if we hold
   // something else to send from: a Messaging Service pool, or a number. Saying
   // "reachable" and then failing at send time is the trap this replaces.
-  if (!allowsAlphaSender(to) && !fromNumber() && !messagingServiceSid()) return false;
+  if (!allowsAlphaSender(to) && !fromNumber() && !messagingServiceSid(shop)) return false;
   return true;
 }
 
 function fromNumber() {
   return process.env.TWILIO_FROM_NUMBER || null;
+}
+
+/**
+ * The Twilio identity to send this shop's message under.
+ *
+ * A shop with its own subaccount sends as itself: its own numbers, its own
+ * 10DLC registration, its own carrier reputation. That matters at App Store
+ * scale in both directions — a merchant is not represented by a stranger's
+ * number, and a merchant who gets a number filtered does not take every other
+ * merchant down with them.
+ *
+ * Subaccounts authenticate with the PLATFORM auth token, so the common case
+ * stores no per-shop secret at all. A token is present only for a merchant on
+ * their own Twilio account.
+ *
+ * Falls back to the platform account, so nothing breaks before a shop is
+ * provisioned — and `own` says which it was, because the answer changes what we
+ * are allowed to promise the merchant.
+ */
+function accountFor(shop) {
+  const platform = {
+    sid: process.env.TWILIO_ACCOUNT_SID || null,
+    token: process.env.TWILIO_AUTH_TOKEN || null,
+    messagingServiceSid: process.env.TWILIO_MESSAGING_SERVICE_SID || null,
+    own: false
+  };
+  if (!shop) return platform;
+  try {
+    const store = require('./shopify-client').getStore(shop);
+    if (store && store.twilio_subaccount_sid) {
+      return {
+        sid: store.twilio_subaccount_sid,
+        // Their own token if they brought their own account, otherwise ours —
+        // which is how a subaccount under our account is authenticated.
+        token: store.twilio_auth_token || platform.token,
+        messagingServiceSid: store.twilio_messaging_service_sid || null,
+        own: true
+      };
+    }
+    // A shop can also have only its own Messaging Service under our account.
+    if (store && store.twilio_messaging_service_sid) {
+      return { ...platform, messagingServiceSid: store.twilio_messaging_service_sid, own: true };
+    }
+  } catch (e) { /* fall back to the platform account */ }
+  return platform;
 }
 
 // A Messaging Service is a POOL of senders — an alphanumeric id, a UK long code,
@@ -190,8 +237,8 @@ function fromNumber() {
 // number in the console asks which country the NUMBER lives in; it does not
 // decide who you may text. Destinations are governed by the account's
 // Geo Permissions, and the sender for each destination is what the pool solves.
-function messagingServiceSid() {
-  return process.env.TWILIO_MESSAGING_SERVICE_SID || null;
+function messagingServiceSid(shop) {
+  return accountFor(shop).messagingServiceSid;
 }
 
 // The Twilio errors whose cause is a setting, not a bug. Without this the
@@ -226,7 +273,8 @@ const TWILIO_CODES = {
 };
 
 async function send(shop, { phone, message, sender, country, optOutUrl }) {
-  if (!isConfigured()) return { ok: false, error: 'not_configured' };
+  const account = accountFor(shop);
+  if (!account.sid || !account.token) return { ok: false, error: 'not_configured' };
 
   const to = normalizePhone(phone, { country });
   if (!to) return { ok: false, error: 'invalid_phone' };
@@ -246,7 +294,7 @@ async function send(shop, { phone, message, sender, country, optOutUrl }) {
   if (sender && allowsAlphaSender(to)) {
     // Most of the world: the shop's own name, no number needed anywhere.
     from = String(sender).slice(0, 11);
-  } else if (messagingServiceSid()) {
+  } else if (account.messagingServiceSid) {
     // The US, Canada and the rest of the no-name list. Let Twilio choose a
     // compliant sender from the pool rather than guessing at one here.
     useService = true;
@@ -278,14 +326,14 @@ async function send(shop, { phone, message, sender, country, optOutUrl }) {
   // forbids a name fell back to a single number or was refused. The pool is the
   // whole point: it is what lets one account reach many countries.
   if (useService) {
-    form.set('MessagingServiceSid', messagingServiceSid());
+    form.set('MessagingServiceSid', account.messagingServiceSid);
   } else {
     form.set('From', from);
   }
 
   try {
-    const sid = process.env.TWILIO_ACCOUNT_SID;
-    const auth = Buffer.from(`${sid}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+    const sid = account.sid;
+    const auth = Buffer.from(`${sid}:${account.token}`).toString('base64');
     const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`, {
       method: 'POST',
       headers: {
@@ -331,6 +379,6 @@ async function getBalance() {
 
 module.exports = {
   NAME, isConfigured, normalizePhone, canReach, send, getBalance,
-  allowsAlphaSender, countryOf, countryFromTimezone, messagingServiceSid,
+  allowsAlphaSender, countryOf, countryFromTimezone, messagingServiceSid, accountFor,
   TWILIO_CODES, NO_ALPHA_SENDER, DIAL_CODES
 };

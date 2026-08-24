@@ -204,6 +204,58 @@ console.log('\n-- and Twilio refuses to send a marketing text without one --');
   }
   ok('every isConfigured/canReach call names the shop', blind.length === 0, blind.join(', '));
 
+  // -------------------------------------------------------------------------
+  // ONE MERCHANT IS NEVER SENT AS ANOTHER
+  //
+  // At App Store scale the platform holds one Twilio account, and a single
+  // shared US number under it would mean every merchant's American customers
+  // receiving texts from the same sender. That is the shared-identity problem
+  // refused everywhere else here — and carrier reputation attaches to the
+  // sender, so one bad actor getting filtered takes every other merchant with
+  // them.
+  // -------------------------------------------------------------------------
+  console.log('\n-- each shop sends under its own Twilio identity --');
+  const Module = require('module');
+  const origLoad = Module._load;
+  const STORES = {
+    'willow.myshopify.com': { twilio_subaccount_sid: 'ACwillow', twilio_messaging_service_sid: 'MGwillow', twilio_auth_token: null },
+    'own.myshopify.com':    { twilio_subaccount_sid: 'ACtheirs', twilio_messaging_service_sid: 'MGtheirs', twilio_auth_token: 'theirtoken' },
+    'plain.myshopify.com':  {}
+  };
+  Module._load = function (rq) {
+    if (String(rq).replace(/^\.\//, '').replace(/\.js$/, '') === 'shopify-client') {
+      return { getStore: (d) => STORES[d] || null };
+    }
+    return origLoad.apply(this, arguments);
+  };
+  delete require.cache[require.resolve('./sms-provider-twilio')];
+  const tw2 = require('./sms-provider-twilio');
+  process.env.TWILIO_ACCOUNT_SID = 'ACplatform';
+  process.env.TWILIO_AUTH_TOKEN = 'platformtok';
+  process.env.TWILIO_MESSAGING_SERVICE_SID = 'MGplatform';
+
+  let acct = tw2.accountFor('willow.myshopify.com');
+  ok('a shop with a subaccount sends under its own account',
+     acct.sid === 'ACwillow' && acct.own === true, JSON.stringify(acct));
+  ok('a subaccount authenticates with the platform token, so no per-shop secret is stored',
+     acct.token === 'platformtok');
+  ok('it uses its own sender pool, not the platform one', acct.messagingServiceSid === 'MGwillow');
+
+  acct = tw2.accountFor('own.myshopify.com');
+  ok('a merchant on their OWN Twilio account uses their own token',
+     acct.token === 'theirtoken' && acct.sid === 'ACtheirs');
+
+  acct = tw2.accountFor('plain.myshopify.com');
+  ok('an unprovisioned shop falls back to the platform, so nothing breaks first',
+     acct.sid === 'ACplatform');
+  ok('and is reported as NOT its own, because that changes what we may promise',
+     acct.own === false);
+
+  ok('reachability is asked of the shop own account',
+     tw2.canReach('+14155552671', { shop: 'willow.myshopify.com' }) === true);
+
+  Module._load = origLoad;
+
   console.log(`\n${fail === 0 ? 'all' : pass + ' of ' + (pass + fail)} ${pass} assertions passed${fail ? `, ${fail} FAILED` : ''}`);
   process.exit(fail === 0 ? 0 : 1);
 })();

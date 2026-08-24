@@ -43,6 +43,30 @@ async function ensureStoreTable() {
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS wa_language TEXT DEFAULT 'he'`).catch(()=>{});
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS logo_url TEXT`).catch(()=>{});
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS owner_email TEXT`).catch(()=>{});
+    // PER-SHOP TWILIO.
+    //
+    // The platform holds one Twilio account, and one sender under it would mean
+    // every merchant's American customers receiving texts from the same number.
+    // That is the shared-identity problem this codebase refuses everywhere else:
+    // sms-sender will not borrow another shop's alphanumeric sender, and it must
+    // not borrow another shop's number either. One bad actor also gets a shared
+    // number filtered by US carriers, and takes every other merchant down with
+    // it — reputation is attached to the sender, not to us.
+    //
+    // A Twilio SUBACCOUNT per merchant is the answer: its own numbers, its own
+    // 10DLC registration, its own reputation and usage. Authentication uses the
+    // PLATFORM auth token with the subaccount SID, so there is no per-shop
+    // secret to store for the common case.
+    //
+    // twilio_auth_token exists only for a merchant who brings their own Twilio
+    // account rather than living under ours. It is a real secret, so it is
+    // encrypted like every other one here.
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS twilio_subaccount_sid TEXT`).catch(()=>{});
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS twilio_messaging_service_sid TEXT`).catch(()=>{});
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS twilio_auth_token TEXT`).catch(()=>{});
+    // Where the merchant stands with the carriers. Null means never started.
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS sms_sender_status TEXT`).catch(()=>{});
+    await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS us_sms_status TEXT`).catch(()=>{});
     // Expiring offline access tokens. Shopify stopped accepting the permanent
     // kind this app was built on; see shopify-tokens.js.
     await db.query(`ALTER TABLE advisor_stores ADD COLUMN IF NOT EXISTS refresh_token TEXT`).catch(()=>{});
@@ -57,7 +81,7 @@ async function ensureStoreTable() {
 async function loadStores() {
   try {
     await ensureStoreTable();
-    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at, d360_api_key, wa_language, logo_url, owner_email, refresh_token, access_expires_at, refresh_expires_at FROM advisor_stores WHERE active = TRUE`);
+    const r = await db.query(`SELECT shop_domain, access_token, advisor_password, display_name, public_domain, active, terms_accepted_at, d360_api_key, wa_language, logo_url, owner_email, refresh_token, access_expires_at, refresh_expires_at, twilio_subaccount_sid, twilio_messaging_service_sid, twilio_auth_token, sms_sender_status, us_sms_status FROM advisor_stores WHERE active = TRUE`);
     storeCache.clear();
     for (const row of r.rows) {
       storeCache.set(row.shop_domain.toLowerCase().trim(), {
@@ -74,6 +98,11 @@ async function loadStores() {
         wa_language: row.wa_language || 'he',
         logo_url: row.logo_url || null,
         owner_email: row.owner_email || null,
+        twilio_subaccount_sid: row.twilio_subaccount_sid || null,
+        twilio_messaging_service_sid: row.twilio_messaging_service_sid || null,
+        twilio_auth_token: vault.decrypt(row.twilio_auth_token),
+        sms_sender_status: row.sms_sender_status || null,
+        us_sms_status: row.us_sms_status || null,
         refresh_token: vault.decrypt(row.refresh_token),
         access_expires_at: row.access_expires_at || null,
         refresh_expires_at: row.refresh_expires_at || null
@@ -224,6 +253,33 @@ async function setWhatsAppConfig(shopDomain, { d360_api_key, wa_language }) {
          wa_language  = COALESCE($3, wa_language)
      WHERE shop_domain = $1`,
     [domain, vault.encrypt(d360_api_key || null), wa_language || null]
+  );
+  await loadStores();
+  return { ok: true };
+}
+
+// A shop's own Twilio identity.
+//
+// subaccount_sid + messaging_service_sid are identifiers, not secrets, and are
+// stored as they are. auth_token is only present for a merchant on their own
+// Twilio account, and is encrypted.
+async function setTwilioConfig(shopDomain, {
+  twilio_subaccount_sid, twilio_messaging_service_sid, twilio_auth_token,
+  sms_sender_status, us_sms_status
+}) {
+  const domain = (shopDomain || '').toLowerCase().trim();
+  await ensureStoreTable();
+  await db.query(
+    `UPDATE advisor_stores
+     SET twilio_subaccount_sid        = COALESCE($2, twilio_subaccount_sid),
+         twilio_messaging_service_sid = COALESCE($3, twilio_messaging_service_sid),
+         twilio_auth_token            = COALESCE($4, twilio_auth_token),
+         sms_sender_status            = COALESCE($5, sms_sender_status),
+         us_sms_status                = COALESCE($6, us_sms_status)
+     WHERE shop_domain = $1`,
+    [domain, twilio_subaccount_sid || null, twilio_messaging_service_sid || null,
+     twilio_auth_token ? vault.encrypt(twilio_auth_token) : null,
+     sms_sender_status || null, us_sms_status || null]
   );
   await loadStores();
   return { ok: true };
@@ -1757,7 +1813,7 @@ async function createDraftOrder(shopDomain, opts = {}) {
   }
 }
 
-module.exports = {
+module.exports = { setTwilioConfig,
   shopifyGet,
   getFreshToken,
   saveTokens,
