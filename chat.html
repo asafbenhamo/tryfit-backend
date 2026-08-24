@@ -1013,6 +1013,9 @@
       'reconnect.title': 'צריך לחבר מחדש',
       'reconnect.body': 'האפליקציה מותקנת ב-{store}, אבל לא קיבלנו הרשאת גישה לנתוני החנות — ולכן אי אפשר לקרוא לקוחות והזמנות. חיבור מחדש לוקח כמה שניות ולא מוחק כלום.',
       'reconnect.cta': 'חבר מחדש',
+      'reconnect.scopeTitle': 'צריך אישור נוסף',
+      'reconnect.scopeBody': 'האפליקציה מחוברת ל-{store}, אבל Shopify עוד לא אישרה הרשאה אחת שהיא צריכה כדי לעבוד — בלעדיה יצירת קופון לקמפיין תיכשל. אישור לוקח קליק אחד ולא מוחק כלום.',
+      'reconnect.scopeCta': 'אשר את ההרשאות',
       'embedFail.title': 'לא הצלחנו לזהות אותך',
       'embedFail.body': 'פתחת את האפליקציה מתוך הניהול של Shopify, אז אין צורך בסיסמה — Shopify כבר יודעת מי אתה. הפעם החיבור לא הושלם. רענון בדרך כלל פותר את זה.',
       'embedFail.retry': 'רענן',
@@ -1532,6 +1535,9 @@
       'reconnect.title': 'Reconnect needed',
       'reconnect.body': 'The app is installed on {store}, but we never received access to the store data, so it cannot read customers or orders. Reconnecting takes a few seconds and deletes nothing.',
       'reconnect.cta': 'Reconnect',
+      'reconnect.scopeTitle': 'One more approval needed',
+      'reconnect.scopeBody': 'The app is connected to {store}, but Shopify has not yet approved a permission it needs — without it, creating a campaign coupon will fail. Approving takes one click and deletes nothing.',
+      'reconnect.scopeCta': 'Approve permissions',
       'embedFail.title': "We could not identify you",
       'embedFail.body': "You opened the app from inside your Shopify admin, so no password is needed — Shopify already knows who you are. This time the handshake did not complete. A refresh usually fixes it.",
       'embedFail.retry': 'Refresh',
@@ -2202,20 +2208,34 @@
       // one button that fixes it, instead of letting every action fail with
       // "access denied" and leaving the merchant to guess.
       if (d.connected === false) { showReconnect(d.name || '', d.reconnect_url); return true; }
+      // Connected, but Shopify never granted something the app needs. Say it
+      // here, on the way in, where one click fixes it — not three screens later
+      // in the middle of sending, where the only thing the merchant sees is
+      // Shopify's raw 403 about a scope name.
+      if (d.missing_scopes && d.missing_scopes.length) {
+        showReconnect(d.name || '', d.reconnect_url, d.missing_scopes);
+        return true;
+      }
       if (d.terms_accepted === false) showTermsGate(d.name || '');
       else enterAdvisor(d.name || '', d.shop);
       return true;
     } catch (e) { return false; }
   }
 
-  function showReconnect(storeName, url) {
+  function showReconnect(storeName, url, missingScopes) {
     const g = $('gate');
     if (!g) return;
     window.__showGate__();
+    const short = Array.isArray(missingScopes) && missingScopes.length;
     g.innerHTML =
-      '<h2>' + esc(t('reconnect.title')) + '</h2>'
-      + '<p>' + esc(t('reconnect.body', { store: storeName || '' })) + '</p>'
-      + '<button id="reconnectBtn">' + esc(t('reconnect.cta')) + '</button>'
+      '<h2>' + esc(t(short ? 'reconnect.scopeTitle' : 'reconnect.title')) + '</h2>'
+      + '<p>' + esc(short
+          ? t('reconnect.scopeBody', { store: storeName || '' })
+          : t('reconnect.body', { store: storeName || '' })) + '</p>'
+      // Name the permissions. "Reconnect to grant permissions" with no list is
+      // a request for blind trust; the merchant is about to approve these.
+      + (short ? '<p class="code-hint">' + esc(missingScopes.join(', ')) + '</p>' : '')
+      + '<button id="reconnectBtn">' + esc(t(short ? 'reconnect.scopeCta' : 'reconnect.cta')) + '</button>'
       + '<div class="err" id="gateErr"></div>';
     document.getElementById('reconnectBtn').onclick = () => {
       // Must break out of the admin iframe: Shopify's consent screen refuses to

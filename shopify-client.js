@@ -1074,6 +1074,46 @@ async function getAllOrders(shopDomain, onProgress = null) {
 /**
  * THE BIG ONE - Backfill the entire shop.
  */
+// Which permissions did this shop actually grant?
+//
+// Asking is the only way to know. The app can be installed, hold a valid token,
+// answer every read correctly, and still be missing one write scope — and the
+// first sign of it is a 403 from Shopify in the middle of the action the
+// merchant came to perform. That is what happened with write_price_rules: the
+// campaign was written, the channels were picked, and the coupon step failed
+// with a raw API error.
+//
+// Cached briefly because /api/whoami runs on every app load and this must not
+// add a Shopify round-trip to each one. Short enough that reconnecting shows up
+// as fixed within the minute.
+const scopeCache = new Map();
+const SCOPE_TTL_MS = 60 * 1000;
+
+async function grantedScopes(shopDomain, { force = false } = {}) {
+  const domain = String(shopDomain || '').toLowerCase().trim();
+  if (!domain) return null;
+  const hit = scopeCache.get(domain);
+  if (!force && hit && Date.now() - hit.at < SCOPE_TTL_MS) return hit.scopes;
+  try {
+    const token = await getFreshToken(domain);
+    if (!token) return null;
+    const res = await fetch(`https://${domain}/admin/oauth/access_scopes.json`, {
+      headers: { 'X-Shopify-Access-Token': token, 'Accept': 'application/json' }
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const scopes = (data && Array.isArray(data.access_scopes))
+      ? data.access_scopes.map(s => s && s.handle).filter(Boolean)
+      : null;
+    if (scopes) scopeCache.set(domain, { at: Date.now(), scopes });
+    return scopes;
+  } catch (e) {
+    // Never let this break a page load. Unknown is reported as unknown, and the
+    // caller treats unknown as "do not nag" rather than "definitely broken".
+    return null;
+  }
+}
+
 async function backfillEntireShop(shopDomain, onProgress = null) {
   if (!hasTokenForShop(shopDomain)) {
     return { success: false, reason: 'no_token' };
@@ -1752,6 +1792,7 @@ module.exports = {
   getAllOrders,
   backfillEntireShop,
   ensureShopRow,
+  grantedScopes,
   getAllProducts,
   saveStoreProduct,
   syncProducts,

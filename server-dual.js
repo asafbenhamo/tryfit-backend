@@ -38,6 +38,7 @@ const storeTime = require("./store-time");
 const sessionAuth = require("./session-auth");
 const shopifySessionToken = require("./shopify-session-token");
 const publicUrl = require("./base-url");
+const shopifyScopes = require("./shopify-scopes");
 const shopifyTokens = require("./shopify-tokens");
 const login2fa = require("./login-2fa");
 const popupEngine = require("./popup-engine");
@@ -746,7 +747,7 @@ app.post("/api/auth/setup", express.json(), async (req, res) => {
 // does not itself know the store's display name or whether the terms have been
 // accepted. Deliberately says nothing a caller could not already derive from the
 // credential they presented.
-app.get("/api/whoami", (req, res) => {
+app.get("/api/whoami", async (req, res) => {
   const shop = resolveShop(req);
   if (!shop) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
   const cfg = shopify.getStore(shop);
@@ -761,6 +762,20 @@ app.get("/api/whoami", (req, res) => {
   //
   // Reporting it lets the app say "reconnect" instead of "access denied".
   const connected = shopify.hasTokenForShop(shop);
+
+  // And a shop can be connected and still be missing a permission. Ask Shopify
+  // what it actually granted, so the app can say "reconnect to grant this" on
+  // the way in — rather than letting the merchant write a campaign, choose
+  // channels, and hit a raw 403 on the coupon step.
+  //
+  // null means we could not find out; that is reported as null and the client
+  // says nothing, because nagging on a failed lookup is worse than silence.
+  let missing_scopes = null;
+  if (connected) {
+    const granted = await shopify.grantedScopes(shop);
+    if (granted) missing_scopes = shopifyScopes.missingFrom(granted);
+  }
+
   res.json({
     ok: true,
     shop,
@@ -768,7 +783,11 @@ app.get("/api/whoami", (req, res) => {
     terms_accepted: shopify.hasAcceptedTerms(shop),
     embedded: !!(req._session && req._session.via === "shopify"),
     connected,
-    reconnect_url: connected ? null : `/auth?shop=${encodeURIComponent(shop)}`
+    missing_scopes,
+    scopes_ok: missing_scopes === null ? null : missing_scopes.length === 0,
+    reconnect_url: (connected && (!missing_scopes || !missing_scopes.length))
+      ? null
+      : `/auth?shop=${encodeURIComponent(shop)}`
   });
 });
 
@@ -4940,7 +4959,10 @@ app.get("/admin/add-store", async (req, res) => {
 // verification can never end up reading different variables.
 const ADVISOR_SHOPIFY_KEY = shopifyClientId() || "";
 const ADVISOR_SHOPIFY_SECRET = shopifyAppSecret() || "";
-const OAUTH_SCOPES = "read_customers,write_customers,read_orders,read_products,read_inventory,read_checkouts,read_fulfillments,read_locations,read_price_rules,read_discounts,read_marketing_events,write_discounts,write_draft_orders";
+// From shopify-scopes.js, which is also what the .toml must contain.
+// test-scopes.js fails if the two ever drift again — that drift is what put
+// a 403 in front of a merchant halfway through sending a campaign.
+const OAUTH_SCOPES = shopifyScopes.asString();
 // The OAuth redirect_uri is built from this, and Shopify rejects the install
 // outright unless it matches redirect_urls in the .toml exactly. It used to be
 // a literal here and PUBLIC_BASE_URL elsewhere, so setting the variable moved

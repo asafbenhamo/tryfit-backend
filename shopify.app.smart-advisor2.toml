@@ -20,7 +20,7 @@ application_url = "https://tryfit-backend-production.up.railway.app"
 embedded = true
 
 [access_scopes]
-scopes = "read_checkouts,read_customers,read_discounts,read_fulfillments,read_inventory,read_locations,read_marketing_events,read_orders,read_price_rules,read_products,write_customers,write_discounts,write_draft_orders"
+scopes = "read_checkouts,read_customers,read_discounts,read_fulfillments,read_inventory,read_orders,read_price_rules,read_products,write_customers,write_discounts,write_draft_orders,write_price_rules"
 optional_scopes = [ ]
 use_legacy_install_flow = false
 

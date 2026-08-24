@@ -221,11 +221,23 @@ async function clean(shop) {
     // customer's deletion just as a draft does. Cancel before delete: Shopify
     // refuses to delete an order that is still open.
     const o = await shopify.shopifyGet(shop, 'orders.json?limit=250&status=any');
+    let seededOrders = 0;
     for (const order of (o.orders || [])) {
       if (!/seeded-demo/.test(order.tags || '')) continue;
-      try { await shopifyPost(shop, `orders/${order.id}/cancel.json`, {}); } catch (e) { /* already cancelled */ }
+      seededOrders++;
+      try { await shopifyPost(shop, `orders/${order.id}/cancel.json`, {}); } catch (e) { /* already cancelled, or not permitted */ }
       if (await del(`orders/${order.id}.json`)) orders++;
       await sleep(280);
+    }
+    // Cancelling and deleting orders needs write_orders, which this app
+    // deliberately does not request: asking every merchant for permission to
+    // modify their orders, to support a script only we ever run, is not a trade
+    // worth making. So say plainly that the orders are staying, rather than
+    // printing "0 orders removed" and letting it look like there were none.
+    if (seededOrders && !orders) {
+      console.log(`  ${seededOrders} seeded order(s) left in place — removing orders needs the`);
+      console.log('  write_orders permission, which this app does not ask for. Delete them from');
+      console.log('  the Shopify admin if you want them gone.');
     }
   } catch (e) { console.log('  orders: ' + e.message.slice(0, 100)); }
 
