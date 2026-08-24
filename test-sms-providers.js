@@ -127,6 +127,44 @@ console.log('\n-- and Twilio refuses to send a marketing text without one --');
   ok('the link is in the message body', /x\.test/.test(decodeURIComponent(sentBody)), sentBody.slice(0, 120));
   ok('the shop name is the sender', /From=WILLOW/.test(sentBody), sentBody.slice(0, 120));
 
+  // -------------------------------------------------------------------------
+  // ONE CUSTOMER LIST, MANY COUNTRIES
+  //
+  // Buying a number in the Twilio console asks which country the NUMBER lives
+  // in. It does not decide who you may text. A Messaging Service is a POOL of
+  // senders and Twilio picks the legal one per destination — which is how a
+  // shop with customers in six countries is served by one account.
+  //
+  // The selection used to be unreachable: the condition read `&& !sender`, and
+  // sender is always the shop's name, so the pool was never used at all.
+  // -------------------------------------------------------------------------
+  console.log('\n-- one account, customers in several countries --');
+  process.env.TWILIO_MESSAGING_SERVICE_SID = 'MG_test';
+  const wire = [];
+  global.fetch = async (u, opts) => {
+    wire.push(decodeURIComponent(String(opts && opts.body || '')));
+    return { ok: true, text: async () => '{"sid":"SM1","status":"queued"}' };
+  };
+  const dests = ['+972541234567', '+447911123456', '+4915112345678', '+14155552671'];
+  for (const d of dests) {
+    await twilio.send(SHOP, { phone: d, message: 'hi', sender: 'WILLOW', optOutUrl: 'https://x.test/u?p=1' });
+  }
+  ok('Israel gets the shop name as sender', /From=WILLOW/.test(wire[0]), wire[0].slice(0, 60));
+  ok('the UK gets the shop name too', /From=WILLOW/.test(wire[1]), wire[1].slice(0, 60));
+  ok('Germany too', /From=WILLOW/.test(wire[2]), wire[2].slice(0, 60));
+  ok('the US, where a name is illegal, goes through the sender pool',
+     /MessagingServiceSid=MG_test/.test(wire[3]) && !/From=WILLOW/.test(wire[3]), wire[3].slice(0, 80));
+  ok('a Messaging Service makes US numbers reachable', twilio.canReach('+14155552671'));
+
+  ok('a geo-permission refusal is explained as a setting, not a bug',
+     twilio.TWILIO_CODES[21408] && /Geo Permissions/.test(twilio.TWILIO_CODES[21408].fix));
+  ok('a trial-account refusal names the real cause',
+     twilio.TWILIO_CODES[21608] && /trial/i.test(twilio.TWILIO_CODES[21608].en));
+
+  delete process.env.TWILIO_MESSAGING_SERVICE_SID;
+  ok('without a pool or a number, the US is honestly unreachable',
+     !twilio.canReach('+14155552671'));
+
   // A US destination with no number of ours to send from.
   delete process.env.TWILIO_FROM_NUMBER;
   r = await twilio.send(SHOP, { phone: '+14155552671', message: 'hi', sender: 'WILLOW', optOutUrl: 'https://x.test/u?p=1' });

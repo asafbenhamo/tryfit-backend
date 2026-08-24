@@ -171,13 +171,59 @@ function canReach(phone, opts = {}) {
   // A destination that forbids alphanumeric senders is only reachable if we
   // actually hold a number to send from. Saying "reachable" and then failing at
   // send time is the exact trap this replaces.
-  if (!allowsAlphaSender(to) && !fromNumber()) return false;
+  // A destination that forbids a shop-name sender is reachable only if we hold
+  // something else to send from: a Messaging Service pool, or a number. Saying
+  // "reachable" and then failing at send time is the trap this replaces.
+  if (!allowsAlphaSender(to) && !fromNumber() && !messagingServiceSid()) return false;
   return true;
 }
 
 function fromNumber() {
   return process.env.TWILIO_FROM_NUMBER || null;
 }
+
+// A Messaging Service is a POOL of senders — an alphanumeric id, a UK long code,
+// a US toll-free number, whatever has been added to it — and Twilio picks the
+// one that is legal for each destination, per message.
+//
+// This is what makes one account reach customers in many countries. Buying a
+// number in the console asks which country the NUMBER lives in; it does not
+// decide who you may text. Destinations are governed by the account's
+// Geo Permissions, and the sender for each destination is what the pool solves.
+function messagingServiceSid() {
+  return process.env.TWILIO_MESSAGING_SERVICE_SID || null;
+}
+
+// The Twilio errors whose cause is a setting, not a bug. Without this the
+// merchant sees a number and a sentence and has no idea that the answer is one
+// checkbox in a console they may never have opened.
+const TWILIO_CODES = {
+  21408: {
+    he: 'החשבון לא מורשה לשלוח למדינה הזו. צריך להפעיל אותה ב-Geo Permissions.',
+    en: 'The account is not permitted to send to this country. Enable it in Geo Permissions.',
+    fix: 'Twilio Console → Messaging → Settings → Geo Permissions'
+  },
+  21606: {
+    he: 'המספר שממנו שולחים לא מתאים ליעד הזה.',
+    en: 'The From number cannot send to this destination.',
+    fix: 'Add a sender for this country to the Messaging Service sender pool'
+  },
+  21612: {
+    he: 'אין מסלול מהמספר הזה ליעד הזה.',
+    en: 'No route from this sender to this destination.',
+    fix: 'Add a sender for this country to the Messaging Service sender pool'
+  },
+  21608: {
+    he: 'חשבון הניסיון של Twilio שולח רק למספרים מאומתים.',
+    en: 'A Twilio trial account can only send to verified numbers.',
+    fix: 'Upgrade the Twilio account, or verify the destination number'
+  },
+  21211: {
+    he: 'מספר הטלפון של הלקוח אינו תקין.',
+    en: "The customer's phone number is not valid.",
+    fix: null
+  }
+};
 
 async function send(shop, { phone, message, sender, country, optOutUrl }) {
   if (!isConfigured()) return { ok: false, error: 'not_configured' };
@@ -196,17 +242,22 @@ async function send(shop, { phone, message, sender, country, optOutUrl }) {
   // legal option — and if we hold none, refuse rather than borrow one, exactly
   // as the SMS path has always refused to borrow a sender id.
   let from = null;
+  let useService = false;
   if (sender && allowsAlphaSender(to)) {
+    // Most of the world: the shop's own name, no number needed anywhere.
     from = String(sender).slice(0, 11);
-  } else {
+  } else if (messagingServiceSid()) {
+    // The US, Canada and the rest of the no-name list. Let Twilio choose a
+    // compliant sender from the pool rather than guessing at one here.
+    useService = true;
+  } else if (fromNumber()) {
     from = fromNumber();
-    if (!from) {
-      return {
-        ok: false,
-        error: 'no_sender_for_destination',
-        detail: `במדינה של ${to} אי אפשר לשלוח בשם החנות, וצריך מספר טלפון אמיתי שאין לנו. ההודעה תישלח במייל.`
-      };
-    }
+  } else {
+    return {
+      ok: false,
+      error: 'no_sender_for_destination',
+      detail: `במדינה של ${to} אי אפשר לשלוח בשם החנות, וצריך מספר אמיתי או Messaging Service שאין לנו. ההודעה תישלח במייל.`
+    };
   }
 
   // The opt-out. TextMe added one for us; Twilio does not, and a marketing text
@@ -222,8 +273,12 @@ async function send(shop, { phone, message, sender, country, optOutUrl }) {
   // A Messaging Service handles sender selection, per-country compliance and
   // sticky sender for us when one is configured; the explicit From is the
   // fallback for a bare account.
-  if (process.env.TWILIO_MESSAGING_SERVICE_SID && !sender) {
-    form.set('MessagingServiceSid', process.env.TWILIO_MESSAGING_SERVICE_SID);
+  // This used to read `&& !sender`, and `sender` is always the shop's name — so
+  // the Messaging Service was never used at all, and every destination that
+  // forbids a name fell back to a single number or was refused. The pool is the
+  // whole point: it is what lets one account reach many countries.
+  if (useService) {
+    form.set('MessagingServiceSid', messagingServiceSid());
   } else {
     form.set('From', from);
   }
@@ -243,10 +298,20 @@ async function send(shop, { phone, message, sender, country, optOutUrl }) {
     let data; try { data = JSON.parse(raw); } catch (e) { data = { raw }; }
 
     if (!r.ok) {
-      // Twilio's own message is far more useful than "http_400" — it names the
-      // unverified number, the unsupported region, the bad sender id.
+      // Twilio's own message beats "http_400", but a few codes are worth naming
+      // outright because the fix is a setting in the console and the raw text
+      // does not say so.
+      const code = data && data.code;
+      const known = TWILIO_CODES[code];
       const msg = (data && (data.message || data.detail)) || `http_${r.status}`;
-      return { ok: false, error: `Twilio ${r.status}: ${msg}`, code: data && data.code, detail: raw.slice(0, 300) };
+      return {
+        ok: false,
+        error: known ? known.he : `Twilio ${r.status}: ${msg}`,
+        error_en: known ? known.en : msg,
+        code,
+        fix: known ? known.fix : null,
+        detail: raw.slice(0, 300)
+      };
     }
     // Twilio reports failure inside a 201 too, via status.
     if (data && (data.status === 'failed' || data.status === 'undelivered')) {
@@ -266,5 +331,6 @@ async function getBalance() {
 
 module.exports = {
   NAME, isConfigured, normalizePhone, canReach, send, getBalance,
-  allowsAlphaSender, countryOf, countryFromTimezone, NO_ALPHA_SENDER, DIAL_CODES
+  allowsAlphaSender, countryOf, countryFromTimezone, messagingServiceSid,
+  TWILIO_CODES, NO_ALPHA_SENDER, DIAL_CODES
 };
