@@ -3088,8 +3088,23 @@ app.get("/api/sms/status", async (req, res) => {
 app.post("/api/sms/test", express.json(), async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
-    if (!smsSender.isConfigured(shop)) return res.status(400).json({ ok: false, error: "SMS לא מוגדר (חסרים משתני TEXTME ב-Railway)" });
+    // The shop has to be resolved BEFORE it is asked about. Making the check
+    // shop-aware left this call one line above the declaration, in the temporal
+    // dead zone, so every test send threw a ReferenceError instead of testing
+    // anything.
     const shop = resolveShop(req) || DEFAULT_SHOP;
+    if (!smsSender.isConfigured(shop)) {
+      // Which provider is missing depends on which shop is asking, and the old
+      // message named TextMe for everyone.
+      const provider = smsSender.providerName(shop);
+      return res.status(400).json({
+        ok: false,
+        provider,
+        error: provider === "textme"
+          ? "SMS לא מוגדר (חסרים משתני TEXTME ב-Railway)"
+          : "SMS לא מוגדר (חסרים TWILIO_ACCOUNT_SID ו-TWILIO_AUTH_TOKEN ב-Railway)"
+      });
+    }
     const phone = (req.body.phone || "").trim();
     const message = (req.body.message || "בדיקת מערכת SMS מהיועץ החכם ✅").trim();
     if (!phone) return res.status(400).json({ ok: false, error: "חסר מספר טלפון" });
