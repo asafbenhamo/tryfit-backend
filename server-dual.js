@@ -724,12 +724,26 @@ app.post("/api/setup", express.json(), async (req, res) => {
 
     // The store's own reply-to address. It lives on advisor_stores because that
     // is where mailer resolves identity from.
-    if (req.body.owner_email !== undefined) {
+    //
+    // Required, and enforced here rather than only in the form: email is the
+    // channel that still works when SMS is skipped, and without an address the
+    // customers who reply to a marketing message reach nobody. A client-side
+    // check alone would be a suggestion.
+    const existingStore = shopify.getStore(shop) || {};
+    if (req.body.owner_email !== undefined || !existingStore.owner_email) {
       const em = String(req.body.owner_email || "").trim();
-      if (em && !/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(em)) {
+      if (!em) {
+        return res.status(400).json({
+          ok: false,
+          error: "צריך כתובת מייל — בלעדיה תשובות של לקוחות לא יגיעו לאף אחד",
+          error_en: "An email address is required — without one, customer replies reach nobody",
+          field: "owner_email"
+        });
+      }
+      if (!/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(em)) {
         return res.status(400).json({ ok: false, error: "כתובת מייל לא תקינה", error_en: "Invalid email address", field: "owner_email" });
       }
-      await shopify.setOwnerEmail(shop, em || null).catch(e => console.error("[setup] owner_email:", e.message));
+      await shopify.setOwnerEmail(shop, em).catch(e => console.error("[setup] owner_email:", e.message));
     }
 
     if (Object.keys(patch).length) {

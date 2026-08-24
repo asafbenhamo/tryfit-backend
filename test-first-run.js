@@ -173,6 +173,12 @@ async function waitForServer(tries = 80) {
   ok('a non-latin sender id is rejected', r.status === 400, JSON.stringify(r.body).slice(0, 120));
   r = await post('/api/setup', { owner_email: 'not-an-email' });
   ok('an invalid contact email is rejected', r.status === 400 && r.body.field === 'owner_email');
+  // Email is the channel that still works when SMS is skipped. A store with no
+  // address means every customer who replies to a marketing message reaches
+  // nobody, so setup must not be completable without one.
+  r = await post('/api/setup', { brand: 'New Store', sms_sender: 'NEWSTORE' });
+  ok('setup cannot be completed with no email at all',
+     r.status === 400 && r.body.field === 'owner_email', JSON.stringify(r.body).slice(0, 140));
 
   r = await get('/api/setup');
   ok('and none of those rejections marked setup complete', r.body.complete === false);
@@ -191,12 +197,14 @@ async function waitForServer(tries = 80) {
   ok('nothing is still missing', (r.body.missing || []).length === 0, JSON.stringify(r.body.missing));
 
   console.log('\n-- skipping SMS is a real choice, not a trap --');
-  r = await post('/api/setup', { sms_sender: '' });
+  r = await post('/api/setup', { sms_sender: '', owner_email: 'hi@newstore.test' });
   ok('clearing the sender id is allowed', r.status === 200 && r.body.ok === true);
   ok('SMS goes back to unavailable rather than failing at send time',
      r.body.channels.available.sms === false, JSON.stringify(r.body.channels.available));
   r = await get('/api/setup');
   ok('and setup stays complete — they chose email', r.body.complete === true);
+  ok('the email survived, so replies still reach the store',
+     r.body.values.owner_email === 'hi@newstore.test', r.body.values.owner_email);
 
   console.log(`\n${fail === 0 ? 'all' : pass + ' of ' + (pass + fail)} ${pass} assertions passed${fail ? `, ${fail} FAILED` : ''}`);
   done(fail === 0 ? 0 : 1);

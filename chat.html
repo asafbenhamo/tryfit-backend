@@ -1021,13 +1021,14 @@
       'setup.brand': 'שם החנות',
       'setup.brandHint': 'השם שהלקוחות יראו כשולח ההודעות',
       'setup.email': 'מייל ליצירת קשר',
-      'setup.emailHint': 'לקוח שילחץ "השב" על הודעה יגיע לכתובת הזו',
+      'setup.emailHint': 'ההודעות נשלחות בשם החנות שלך מהשרת שלנו, ותשובות של לקוחות מגיעות לכתובת הזו.',
       'setup.sms': 'מזהה שולח ל-SMS',
       'setup.smsHint': 'עד 11 תווים, אותיות באנגלית וספרות. דורש אישור של ספק ה-SMS לפני שמסרונים יֵצאו.',
       'setup.save': 'שמור והתחל',
       'setup.saving': 'שומר...',
       'setup.skipSms': 'דלג על SMS — נשתמש במייל',
       'setup.failed': 'השמירה נכשלה. נסה שוב.',
+      'setup.emailRequired': 'צריך כתובת מייל — בלעדיה תשובות של לקוחות לא יגיעו לאף אחד.',
       'embedFail.title': 'לא הצלחנו לזהות אותך',
       'embedFail.body': 'פתחת את האפליקציה מתוך הניהול של Shopify, אז אין צורך בסיסמה — Shopify כבר יודעת מי אתה. הפעם החיבור לא הושלם. רענון בדרך כלל פותר את זה.',
       'embedFail.retry': 'רענן',
@@ -1555,13 +1556,14 @@
       'setup.brand': 'Store name',
       'setup.brandHint': 'What customers see as the sender',
       'setup.email': 'Contact email',
-      'setup.emailHint': 'Where a customer who hits Reply will reach you',
+      'setup.emailHint': 'Messages go out in your store name from our server, and customer replies arrive at this address.',
       'setup.sms': 'SMS sender ID',
       'setup.smsHint': 'Up to 11 characters, English letters and digits. Needs approval from the SMS provider before texts go out.',
       'setup.save': 'Save and start',
       'setup.saving': 'Saving...',
       'setup.skipSms': 'Skip SMS — use email',
       'setup.failed': 'Could not save. Try again.',
+      'setup.emailRequired': 'An email address is required — without one, customer replies reach nobody.',
       'embedFail.title': "We could not identify you",
       'embedFail.body': "You opened the app from inside your Shopify admin, so no password is needed — Shopify already knows who you are. This time the handshake did not complete. A refresh usually fixes it.",
       'embedFail.retry': 'Refresh',
@@ -2716,7 +2718,6 @@
     if (!g) return;
     const v = (data && data.values) || {};
     const needSms = (data.missing || []).some(m => m.field === 'sms_sender');
-    const needEmail = (data.missing || []).some(m => m.field === 'owner_email');
 
     const row = (id, label, hint, value, extra) =>
       '<label style="display:block;margin:14px 0 4px;font-size:13.5px;font-weight:600">' + esc(label) + '</label>'
@@ -2729,9 +2730,14 @@
       + '<p>' + esc(t('setup.intro')) + '</p>'
       + '<div style="text-align:start;max-width:460px;margin:0 auto">'
       + row('setupBrand', t('setup.brand'), t('setup.brandHint'), v.brand)
-      + (needEmail || v.owner_email !== null
-          ? row('setupEmail', t('setup.email'), t('setup.emailHint'), v.owner_email, 'type="email" inputmode="email"')
-          : '')
+      // Email is always asked for and always required. It was behind a
+      // condition that happened to always be true, which made it look optional
+      // and read as an afterthought. Without it a customer who replies to a
+      // marketing message reaches nobody — and email is the channel that keeps
+      // working when SMS is skipped, so it is the one thing setup cannot leave
+      // unset.
+      + row('setupEmail', t('setup.email') + ' *', t('setup.emailHint'), v.owner_email,
+            'type="email" inputmode="email" required')
       + row('setupSms', t('setup.sms'), t('setup.smsHint'), v.sms_sender || v.suggested_sms_sender || '',
             'maxlength="11" placeholder="' + esc(v.suggested_sms_sender || '') + '"')
       + '</div>'
@@ -2747,10 +2753,18 @@
       err.textContent = '';
       const smsEl = document.getElementById('setupSms');
       const emailEl = document.getElementById('setupEmail');
+      // Skipping SMS never skips the email: it is the channel that still works.
+      const email = emailEl ? String(emailEl.value || '').trim() : '';
+      if (!email) {
+        err.textContent = t('setup.emailRequired');
+        if (emailEl) { emailEl.style.borderColor = '#d33'; emailEl.focus(); }
+        btn.disabled = false; btn.textContent = t('setup.save');
+        return;
+      }
       const body = {
         brand: (document.getElementById('setupBrand') || {}).value || undefined,
         sms_sender: withSms ? ((smsEl && smsEl.value) || '') : '',
-        owner_email: emailEl ? emailEl.value : undefined
+        owner_email: email
       };
       try {
         const res = await fetch('/api/setup', {
