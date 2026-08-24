@@ -65,6 +65,12 @@ const boot = [
   "        return { rows: [], rowCount: 1 };",
   "      }",
   "      if (/SELECT \\* FROM store_settings/.test(sql)) return { rows: SETTINGS ? [SETTINGS] : [] };",
+  // A customer base spread across several countries — the case a merchant
+  // actually has, and the one the sender-id question is really about.
+  "      if (/FROM store_customers/.test(sql) && /GROUP BY/.test(sql)) return { rows: [",
+  "        { country: 'Israel', n: 412 }, { country: 'United States', n: 48 },",
+  "        { country: 'United Kingdom', n: 30 }, { country: 'Canada', n: 6 },",
+  "        { country: '?', n: 4 } ] };",
   "      return { rows: [], rowCount: 0 };",
   "    }",
   "  };",
@@ -209,6 +215,29 @@ async function waitForServer(tries = 80) {
   ok('and setup stays complete — they chose email', r.body.complete === true);
   ok('the email survived, so replies still reach the store',
      r.body.values.owner_email === 'hi@newstore.test', r.body.values.owner_email);
+
+  // -------------------------------------------------------------------------
+  // "Will my customers know it is from me?"
+  //
+  // The setup screen used to answer "needs approval from the SMS provider",
+  // which is true and useless to a merchant with 412 Israeli customers and 48
+  // American ones. This answers it against their actual list.
+  // -------------------------------------------------------------------------
+  console.log('\n-- where the merchant\'s own name will actually show --');
+  r = await get('/api/sms/coverage');
+  ok('coverage is reported', r.status === 200 && r.body.ok === true, JSON.stringify(r.body).slice(0, 120));
+  ok('it counts every customer with a phone', r.body.total_with_phone === 500, String(r.body.total_with_phone));
+  ok('Israel and the UK see the shop name', r.body.name_shown.customers === 442,
+     JSON.stringify(r.body.name_shown).slice(0, 160));
+  ok('the US and Canada cannot, and are counted separately',
+     r.body.number_required.customers === 54, JSON.stringify(r.body.number_required).slice(0, 160));
+  ok('and it says whether we hold a number for them at all',
+     r.body.number_required.we_have_one === false);
+  ok('a customer with no country recorded is reported as unknown, not guessed',
+     r.body.unknown.customers === 4, JSON.stringify(r.body.unknown));
+  ok('the countries are named, not just counted',
+     r.body.number_required.countries.some(c => c.code === 'US') &&
+     r.body.name_shown.countries.some(c => c.code === 'IL'));
 
   console.log(`\n${fail === 0 ? 'all' : pass + ' of ' + (pass + fail)} ${pass} assertions passed${fail ? `, ${fail} FAILED` : ''}`);
   done(fail === 0 ? 0 : 1);

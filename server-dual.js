@@ -614,6 +614,103 @@ app.get("/api/settings", async (req, res) => {
   res.json({ ok: true, settings: s, today: cap });
 });
 
+// WILL MY NAME SHOW, AND TO WHOM?
+//
+// The whole point of the sender id is that a customer opening a text knows who
+// it is from. Whether that works is not a yes or no — it depends on the
+// country the customer is in, and every merchant has a different mix.
+//
+// The setup screen used to say "needs approval from the SMS provider", which is
+// true and useless: it does not tell a merchant with four hundred Israeli
+// customers and forty American ones what will actually happen. So this answers
+// the real question against their real customer list.
+//
+// Two facts that are not ours to change:
+//   - Most of the world accepts a name as the sender. No number, no cost.
+//   - The US and Canada never do. Carriers there require a real number, and no
+//     Twilio setting changes that. Those customers get email instead, unless a
+//     registered number is configured for them.
+app.get("/api/sms/coverage", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const settings = await storeSettings.getSettings(shop);
+    const twilio = require("./sms-provider-twilio");
+
+    // Only customers we could text at all: a phone, and not opted out.
+    const r = await db.query(
+      `SELECT COALESCE(NULLIF(TRIM(country), ''), '?') AS country, COUNT(*)::int AS n
+         FROM store_customers
+        WHERE shop_domain = $1 AND phone IS NOT NULL AND TRIM(phone) <> ''
+        GROUP BY 1 ORDER BY n DESC`,
+      [shop]
+    );
+
+    const byName = [], byNumber = [], unknown = [];
+    let total = 0;
+
+    for (const row of r.rows) {
+      total += row.n;
+      // store_customers.country is Shopify's display name ("Israel"), not a
+      // code, so map back through the dial table we already keep.
+      //
+      // A customer with no country recorded is reported as UNKNOWN, not folded
+      // into the store's own country. At send time their number may well
+      // resolve — a local number is expanded using the store's country — but
+      // that is a guess, and this screen exists so a merchant can trust what it
+      // says. Counting a guess as "your name will show" is the one answer here
+      // that is worse than "we cannot tell you".
+      const cc = countryCodeFromName(row.country);
+      const entry = { country: row.country === '?' ? null : row.country, code: cc, customers: row.n };
+      if (!cc) unknown.push(entry);
+      else if (twilio.NO_ALPHA_SENDER.has(cc)) byNumber.push(entry);
+      else byName.push(entry);
+    }
+
+    const sum = (a) => a.reduce((t, x) => t + x.customers, 0);
+    const haveNumber = !!(twilio.messagingServiceSid() || process.env.TWILIO_FROM_NUMBER);
+
+    res.json({
+      ok: true,
+      sender: settings.sms_sender || null,
+      total_with_phone: total,
+      // Where the merchant's own name is what the customer sees.
+      name_shown: { customers: sum(byName), countries: byName },
+      // Where carriers forbid a name. Reachable only from a registered number.
+      number_required: { customers: sum(byNumber), countries: byNumber, we_have_one: haveNumber },
+      // Country not recorded on the customer — usually an older import.
+      unknown: { customers: sum(unknown), countries: unknown }
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: safeError(e) });
+  }
+});
+
+// Shopify stores the country as a display name. Reverse just enough of it to
+// answer the sender question; anything unrecognised is reported as unknown
+// rather than guessed, because guessing here means telling a merchant their
+// name will show when it will not.
+const COUNTRY_NAMES = {
+  'israel': 'IL', 'united states': 'US', 'usa': 'US', 'canada': 'CA',
+  'united kingdom': 'GB', 'great britain': 'GB', 'england': 'GB', 'ireland': 'IE',
+  'germany': 'DE', 'france': 'FR', 'spain': 'ES', 'italy': 'IT',
+  'netherlands': 'NL', 'belgium': 'BE', 'portugal': 'PT', 'switzerland': 'CH',
+  'austria': 'AT', 'sweden': 'SE', 'norway': 'NO', 'denmark': 'DK',
+  'finland': 'FI', 'poland': 'PL', 'czechia': 'CZ', 'czech republic': 'CZ',
+  'greece': 'GR', 'romania': 'RO', 'hungary': 'HU', 'turkey': 'TR',
+  'australia': 'AU', 'new zealand': 'NZ', 'japan': 'JP', 'south korea': 'KR',
+  'singapore': 'SG', 'hong kong sar': 'HK', 'hong kong': 'HK', 'thailand': 'TH',
+  'india': 'IN', 'united arab emirates': 'AE', 'south africa': 'ZA',
+  'brazil': 'BR', 'mexico': 'MX', 'argentina': 'AR', 'chile': 'CL', 'colombia': 'CO',
+  'china': 'CN', 'egypt': 'EG', 'cyprus': 'CY', 'malta': 'MT'
+};
+function countryCodeFromName(name) {
+  const s = String(name || '').trim().toLowerCase();
+  if (!s || s === '?') return null;
+  if (/^[a-z]{2}$/.test(s)) return s.toUpperCase();   // already a code
+  return COUNTRY_NAMES[s] || null;
+}
+
 // FIRST-RUN SETUP — everything the app needs before it can do its job.
 //
 // The failure this exists to prevent: a merchant installed the app on a new
