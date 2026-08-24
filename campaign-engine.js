@@ -153,7 +153,9 @@ async function runCampaign(id, shop, segment, template, channels) {
   const mq = require('./message-queue');
   const storeSettings = require('./store-settings');
   const settings = await storeSettings.getSettings(shop).catch(() => ({ brand: '770', daily_cap: 500 }));
-  const BRAND = settings.brand || '770';
+  // Never '770'. A settings read that returns nothing must not put the pilot
+  // store's name on a different merchant's campaign.
+  const BRAND = settings.brand || String(shop || '').replace('.myshopify.com', '') || 'Shop';
   const IS_EN = settings.language === 'en';
   // {PRODUCT_LINE} used to expand to a hardcoded Hebrew phrase, which meant an
   // English store got Hebrew spliced into the middle of an English sentence.
@@ -385,7 +387,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           // opt-out against the pilot store -- so this merchant keeps mailing someone
           // who asked them to stop, with this merchant as sender of record.
           const html = mailer.buildHtmlEmail(fullBody, { brand: BRAND, language: settings.language, to: contact.email, shop });
-          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || (IS_EN ? ('A message from ' + BRAND) : ('הודעה מ-' + BRAND)), html, text: fullBody, fromName: BRAND });
+          const sent = await mailer.sendEmail({ to: contact.email, subject: template.subject || (IS_EN ? ('A message from ' + BRAND) : ('הודעה מ-' + BRAND)), html, text: fullBody, fromName: BRAND, shop });
           if (sent.ok) { c.sent++; didSomething = true; }
           else { c.log.push({ customer: cust.email, failed: sent.error }); }
         }

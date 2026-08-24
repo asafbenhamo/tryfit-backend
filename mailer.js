@@ -13,7 +13,39 @@ const LOGO_URL = process.env.MAIL_LOGO_URL || "";
  * Send a single email.
  * Returns { ok, id } or { ok:false, error }.
  */
-async function sendEmail({ to, subject, html, text, fromName, replyTo }) {
+// The shop's own identity for outgoing mail.
+//
+// mailer has always ACCEPTED a per-call replyTo — and not one caller in the
+// codebase ever passed one. So every marketing email, for every merchant, went
+// out with reply_to = MAIL_REPLY_TO, whose default is the pilot store's own
+// inbox. A customer of a brand-new boutique hit Reply on a win-back email and
+// reached an unrelated business, who received a stranger's customer asking
+// about an order they never took.
+//
+// The same hole exists for the logo: buildHtmlEmail reads opts.logo_url, no
+// caller passes one, so one shop's logo headed every shop's mail.
+//
+// Resolving it HERE rather than at the six send sites is deliberate. Threading
+// an argument through six call sites works until someone adds a seventh.
+//
+// This is the same rule sms-sender enforces by refusing to send at all without
+// a per-shop sender id: never sign one merchant's message with another's
+// identity.
+function shopIdentity(shop) {
+  const out = { replyTo: null, logoUrl: null, brand: null };
+  if (!shop) return out;
+  try {
+    const store = require('./shopify-client').getStore(shop);
+    if (store) {
+      out.replyTo = store.owner_email || null;
+      out.logoUrl = store.logo_url || null;
+      out.brand = store.name || null;
+    }
+  } catch (e) { /* unresolved: fall back to platform values below */ }
+  return out;
+}
+
+async function sendEmail({ to, subject, html, text, fromName, replyTo, shop }) {
   if (!RESEND_API_KEY) {
     return { ok: false, error: "RESEND_API_KEY not configured" };
   }
@@ -23,6 +55,12 @@ async function sendEmail({ to, subject, html, text, fromName, replyTo }) {
   // EMAIL AS A SERVICE: every shop sends through OUR infrastructure, but the
   // customer sees the SHOP's name as the sender ("Nora Boutique <noreply@...>").
   // The address stays ours (verified domain); only the display name is per-shop.
+  // The shop's own address wins; the platform address is the last resort, and
+  // only because a transactional mail with no reply-to at all bounces oddly in
+  // some clients.
+  const ident = shopIdentity(shop);
+  const effectiveReplyTo = replyTo || ident.replyTo || REPLY_TO;
+
   let from = FROM_EMAIL;
   if (fromName) {
     const addr = (FROM_EMAIL.match(/<([^>]+)>/) || [null, FROM_EMAIL])[1];
@@ -44,7 +82,7 @@ async function sendEmail({ to, subject, html, text, fromName, replyTo }) {
         // REPLY_TO -- later key wins in an object literal -- so every merchant's
         // customer who hit Reply landed in the pilot store's inbox.
         to: Array.isArray(to) ? to : [to],
-        ...((replyTo || REPLY_TO) ? { reply_to: replyTo || REPLY_TO } : {}),
+        ...(effectiveReplyTo ? { reply_to: effectiveReplyTo } : {}),
         subject,
         html: html || undefined,
         text: text || undefined
@@ -69,8 +107,13 @@ async function sendEmail({ to, subject, html, text, fromName, replyTo }) {
  * URLs in the text become clickable links automatically.
  */
 function buildHtmlEmail(bodyText, opts = {}) {
-  const brand = opts.brand || "770";
-  const logoUrl = opts.logo_url || LOGO_URL;
+  // Never fall back to another shop's name or logo. '770' was hardcoded here:
+  // a settings read that returned nothing put the pilot brand's name at the
+  // top of a different merchant's email.
+  const ident = shopIdentity(opts.shop);
+  const brand = opts.brand || ident.brand
+    || String(opts.shop || '').replace('.myshopify.com', '') || 'Shop';
+  const logoUrl = opts.logo_url || ident.logoUrl || LOGO_URL;
   // Direction follows the shop's language: Hebrew shops RTL, international LTR.
   const isEn = (opts.language === 'en');
   const dir = isEn ? 'ltr' : 'rtl';

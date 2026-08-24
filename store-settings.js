@@ -42,12 +42,18 @@ async function ensureTable() {
       shop_domain TEXT PRIMARY KEY,
       brand TEXT, language TEXT, currency TEXT,
       sms_sender TEXT, daily_cap INT, autopilot TEXT,
+      setup_completed_at TIMESTAMPTZ,
       followup_default BOOLEAN,
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )`).catch(e => console.error('[settings] table:', e.message));
   // Added after the table shipped — existing deployments need the column.
   await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS timezone TEXT`)
     .catch(e => console.error('[settings] timezone column:', e.message));
+  // Set once the merchant has been through first-run setup. Null means they
+  // never have — which is how a brand-new store ended up being offered an SMS
+  // channel it had never been asked to configure.
+  await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS setup_completed_at TIMESTAMPTZ`)
+    .catch(e => console.error('[settings] setup_completed_at column:', e.message));
   await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS whatsapp_enabled BOOLEAN DEFAULT FALSE`)
     .catch(e => console.error('[settings] whatsapp_enabled column:', e.message));
   tableReady = true;
@@ -113,12 +119,37 @@ async function getSettings(shop) {
     autopilot: (row && row.autopilot) || DEFAULTS.autopilot,
     followup_default: (row && row.followup_default != null) ? row.followup_default : DEFAULTS.followup_default,
     timezone: validTz(row && row.timezone) || DEFAULTS.timezone,
-    whatsapp_enabled: (row && row.whatsapp_enabled != null) ? row.whatsapp_enabled : DEFAULTS.whatsapp_enabled
+    whatsapp_enabled: (row && row.whatsapp_enabled != null) ? row.whatsapp_enabled : DEFAULTS.whatsapp_enabled,
+    setup_completed_at: (row && row.setup_completed_at) || null
   };
   // Never cache a failed read — the next call should try again rather than
   // serve guesses for a minute.
   if (read) cache.set(shop, { at: Date.now(), settings: s });
   return s;
+}
+
+// Record that the merchant has been through first-run setup.
+//
+// Deliberately separate from updateSettings: completing setup is an event, not
+// a field the merchant edits. Keeping it out of the allowed-keys list means a
+// POST /api/settings can never mark itself complete by accident.
+async function markSetupComplete(shop) {
+  shop = (shop || '').toLowerCase().trim();
+  if (!shop) return { ok: false, error: 'no_shop' };
+  await ensureTable();
+  try {
+    await db.query(
+      `INSERT INTO store_settings (shop_domain, setup_completed_at, updated_at)
+       VALUES ($1, NOW(), NOW())
+       ON CONFLICT (shop_domain) DO UPDATE SET setup_completed_at = NOW(), updated_at = NOW()`,
+      [shop]
+    );
+    cache.delete(shop);
+    return { ok: true };
+  } catch (e) {
+    console.error('[settings] markSetupComplete failed for', shop, '-', e.message);
+    return { ok: false, error: e.message };
+  }
 }
 
 async function updateSettings(shop, patch = {}) {
@@ -179,4 +210,4 @@ async function remainingToday(shop) {
   return { cap: s.daily_cap, used, remaining: Math.max(0, s.daily_cap - used) };
 }
 
-module.exports = { getSettings, updateSettings, remainingToday, outreachesToday, DEFAULT_SHOP };
+module.exports = { markSetupComplete, getSettings, updateSettings, remainingToday, outreachesToday, DEFAULT_SHOP };

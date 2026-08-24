@@ -262,7 +262,7 @@ async function runTaskAuto(shop, task, segment, templateName) {
           cta_url: storeUrl, cta_label: isEn ? 'Visit the store' : 'לאתר החנות',
           footer: isEn ? `Sent by ${storeName}` : `נשלח באמצעות היועץ החכם של ${storeName}`
         });
-        const sent = await mailer.sendEmail({ to: c.email, subject: tmpl.subject, html, text: body, fromName: storeName });
+        const sent = await mailer.sendEmail({ to: c.email, subject: tmpl.subject, html, text: body, fromName: storeName, shop });
         if (sent && sent.ok) { sentEmail++; await logAction(c, 'email', coupon); }
         else { failed++; if (priceRuleId) await shopify.deleteDiscountCode(shop, priceRuleId).catch(()=>{}); }
       } catch (e) {

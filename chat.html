@@ -1016,6 +1016,18 @@
       'reconnect.scopeTitle': 'צריך אישור נוסף',
       'reconnect.scopeBody': 'האפליקציה מחוברת ל-{store}, אבל Shopify עוד לא אישרה הרשאה אחת שהיא צריכה כדי לעבוד — בלעדיה יצירת קופון לקמפיין תיכשל. אישור לוקח קליק אחד ולא מוחק כלום.',
       'reconnect.scopeCta': 'אשר את ההרשאות',
+      'setup.title': 'הגדרה ראשונית',
+      'setup.intro': 'רגע לפני שמתחילים — כמה פרטים שהסוכן צריך כדי לפעול בשם החנות. מילאנו מראש את מה ש-Shopify כבר סיפרה לנו.',
+      'setup.brand': 'שם החנות',
+      'setup.brandHint': 'השם שהלקוחות יראו כשולח ההודעות',
+      'setup.email': 'מייל ליצירת קשר',
+      'setup.emailHint': 'לקוח שילחץ "השב" על הודעה יגיע לכתובת הזו',
+      'setup.sms': 'מזהה שולח ל-SMS',
+      'setup.smsHint': 'עד 11 תווים, אותיות באנגלית וספרות. דורש אישור של ספק ה-SMS לפני שמסרונים יֵצאו.',
+      'setup.save': 'שמור והתחל',
+      'setup.saving': 'שומר...',
+      'setup.skipSms': 'דלג על SMS — נשתמש במייל',
+      'setup.failed': 'השמירה נכשלה. נסה שוב.',
       'embedFail.title': 'לא הצלחנו לזהות אותך',
       'embedFail.body': 'פתחת את האפליקציה מתוך הניהול של Shopify, אז אין צורך בסיסמה — Shopify כבר יודעת מי אתה. הפעם החיבור לא הושלם. רענון בדרך כלל פותר את זה.',
       'embedFail.retry': 'רענן',
@@ -1538,6 +1550,18 @@
       'reconnect.scopeTitle': 'One more approval needed',
       'reconnect.scopeBody': 'The app is connected to {store}, but Shopify has not yet approved a permission it needs — without it, creating a campaign coupon will fail. Approving takes one click and deletes nothing.',
       'reconnect.scopeCta': 'Approve permissions',
+      'setup.title': 'Quick setup',
+      'setup.intro': 'Before we start — a few details the agent needs in order to act for your store. We filled in what Shopify already told us.',
+      'setup.brand': 'Store name',
+      'setup.brandHint': 'What customers see as the sender',
+      'setup.email': 'Contact email',
+      'setup.emailHint': 'Where a customer who hits Reply will reach you',
+      'setup.sms': 'SMS sender ID',
+      'setup.smsHint': 'Up to 11 characters, English letters and digits. Needs approval from the SMS provider before texts go out.',
+      'setup.save': 'Save and start',
+      'setup.saving': 'Saving...',
+      'setup.skipSms': 'Skip SMS — use email',
+      'setup.failed': 'Could not save. Try again.',
       'embedFail.title': "We could not identify you",
       'embedFail.body': "You opened the app from inside your Shopify admin, so no password is needed — Shopify already knows who you are. This time the handshake did not complete. A refresh usually fixes it.",
       'embedFail.retry': 'Refresh',
@@ -2216,8 +2240,11 @@
         showReconnect(d.name || '', d.reconnect_url, d.missing_scopes);
         return true;
       }
-      if (d.terms_accepted === false) showTermsGate(d.name || '');
-      else enterAdvisor(d.name || '', d.shop);
+      if (d.terms_accepted === false) { showTermsGate(d.name || ''); return true; }
+      // Setup comes after terms and before the app: the agent's first action
+      // must not be the thing that discovers the store was never configured.
+      if (await maybeShowSetup()) return true;
+      enterAdvisor(d.name || '', d.shop);
       return true;
     } catch (e) { return false; }
   }
@@ -2673,6 +2700,101 @@
       + '<p style="color:#888;font-size:12px;margin-top:16px">' + esc(t('terms.note')) + '</p>';
   }
 
+  // FIRST-RUN SETUP.
+  //
+  // A merchant installed the app, the agent wrote a win-back message, they
+  // ticked SMS because it was offered, and it failed — nobody had ever asked
+  // their store for a sender id. The first thing a new merchant did was
+  // guaranteed not to work.
+  //
+  // Everything Shopify already told us is prefilled, so this is a screen to
+  // confirm, not to fill in. SMS is genuinely skippable: a store may never want
+  // it, and a setup screen that will not let go is worse than one nobody needs.
+  async function showSetupGate(data) {
+    window.__showGate__();
+    const g = $('gate');
+    if (!g) return;
+    const v = (data && data.values) || {};
+    const needSms = (data.missing || []).some(m => m.field === 'sms_sender');
+    const needEmail = (data.missing || []).some(m => m.field === 'owner_email');
+
+    const row = (id, label, hint, value, extra) =>
+      '<label style="display:block;margin:14px 0 4px;font-size:13.5px;font-weight:600">' + esc(label) + '</label>'
+      + '<input id="' + id + '" value="' + esc(value == null ? '' : String(value)) + '" ' + (extra || '')
+      + ' style="width:100%;padding:11px;border:1px solid #d8dde8;border-radius:9px;font-size:15px;box-sizing:border-box">'
+      + (hint ? '<div class="code-hint" style="margin-top:4px">' + esc(hint) + '</div>' : '');
+
+    g.innerHTML =
+      '<h2>' + esc(t('setup.title')) + '</h2>'
+      + '<p>' + esc(t('setup.intro')) + '</p>'
+      + '<div style="text-align:start;max-width:460px;margin:0 auto">'
+      + row('setupBrand', t('setup.brand'), t('setup.brandHint'), v.brand)
+      + (needEmail || v.owner_email !== null
+          ? row('setupEmail', t('setup.email'), t('setup.emailHint'), v.owner_email, 'type="email" inputmode="email"')
+          : '')
+      + row('setupSms', t('setup.sms'), t('setup.smsHint'), v.sms_sender || v.suggested_sms_sender || '',
+            'maxlength="11" placeholder="' + esc(v.suggested_sms_sender || '') + '"')
+      + '</div>'
+      + '<button id="setupSave" style="width:100%;max-width:460px;padding:12px;margin-top:20px;border:none;border-radius:10px;background:#0a6fe0;color:#fff;font-size:15px;font-weight:600;cursor:pointer">'
+      + esc(t('setup.save')) + '</button>'
+      + (needSms ? '<button id="setupSkip" class="linkish" style="margin-top:8px">' + esc(t('setup.skipSms')) + '</button>' : '')
+      + '<div class="err" id="setupErr" style="min-height:18px;margin-top:8px"></div>';
+
+    const err = document.getElementById('setupErr');
+    const save = async (withSms) => {
+      const btn = document.getElementById('setupSave');
+      btn.disabled = true; btn.textContent = t('setup.saving');
+      err.textContent = '';
+      const smsEl = document.getElementById('setupSms');
+      const emailEl = document.getElementById('setupEmail');
+      const body = {
+        brand: (document.getElementById('setupBrand') || {}).value || undefined,
+        sms_sender: withSms ? ((smsEl && smsEl.value) || '') : '',
+        owner_email: emailEl ? emailEl.value : undefined
+      };
+      try {
+        const res = await fetch('/api/setup', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const d = await res.json();
+        if (!d.ok) {
+          // Never mark setup done behind a rejected value — the screen would
+          // not come back and the merchant would never learn it was refused.
+          err.textContent = d.error || t('setup.failed');
+          btn.disabled = false; btn.textContent = t('setup.save');
+          const bad = d.field && document.getElementById(
+            d.field === 'sms_sender' ? 'setupSms' : d.field === 'owner_email' ? 'setupEmail' : '');
+          if (bad) { bad.style.borderColor = '#d33'; bad.focus(); }
+          return;
+        }
+        // The channel picker must not keep yesterday's answer.
+        await loadSmsConfig();
+        location.reload();
+      } catch (e) {
+        err.textContent = t('setup.failed');
+        btn.disabled = false; btn.textContent = t('setup.save');
+      }
+    };
+    document.getElementById('setupSave').onclick = () => save(true);
+    const skip = document.getElementById('setupSkip');
+    if (skip) skip.onclick = () => save(false);
+  }
+
+  // Returns true if it took over the screen.
+  async function maybeShowSetup() {
+    try {
+      const res = await fetch('/api/setup');
+      const d = await res.json();
+      if (!d.ok || d.complete) return false;
+      await showSetupGate(d);
+      return true;
+    } catch (e) {
+      // Never block a merchant out of their app because a status call failed.
+      return false;
+    }
+  }
+
   function showTermsGate(storeName) {
     $('gatePass').style.display = 'none';
     document.querySelector('#gate button').style.display = 'none';
@@ -2770,15 +2892,31 @@
     } catch (e) { window._waConfigured = false; }
   }
 
-  // Is SMS (TextMe) configured for this store? Controls whether the SMS channel
-  // checkbox is enabled in the campaign card.
-  window._smsConfigured = false;
+  // Can THIS store send an SMS? Controls whether the SMS checkbox is offered.
+  //
+  // It used to ask whether the SMS PROVIDER was configured — which is about our
+  // account, not the merchant's store. That is always true in production, so a
+  // store installed minutes ago, with no sender id and no way to send anything,
+  // was shown an enabled SMS checkbox. It failed the moment it was used.
+  //
+  // _smsWhy carries the reason and _smsSetup carries the setting that would fix
+  // it, so the disabled checkbox can say something useful instead of just being
+  // grey.
+  window._smsAvailable = false;
+  window._smsWhy = null;
+  window._smsSetup = null;
   async function loadSmsConfig() {
     try {
       const res = await fetch('/api/sms/status?password=' + encodeURIComponent(PASSWORD));
       const d = await res.json();
-      window._smsConfigured = !!(d && d.ok && d.configured);
-    } catch (e) { window._smsConfigured = false; }
+      window._smsAvailable = !!(d && d.ok && d.available);
+      window._smsWhy = (d && d.why) || null;
+      window._smsSetup = (d && d.setup_needed) || null;
+    } catch (e) {
+      // Unknown means unavailable — never offer a channel we could not verify.
+      window._smsAvailable = false;
+      window._smsWhy = 'status_unavailable';
+    }
   }
 
   // The store's language is set at install time from its country (IL -> he, else
@@ -4731,7 +4869,7 @@
     if (totalValue > 0) html += '<div class="action-row"><span>' + esc(t('camp.projected')) + '</span> ' + esc(money(Math.round(totalValue))) + '</div>';
     // Channel selector — the merchant picks which channels to send through.
     // Same message goes out on every selected channel.
-    const smsReady = !!window._smsConfigured;
+    const smsReady = !!window._smsAvailable;
     html += '<div class="action-row" style="margin-top:8px"><span>' + esc(t('camp.whichChannels')) + '</span></div>';
     html += '<div class="channel-pick" data-camp="' + camp.id + '">'
       + '<label class="chan-opt"><input type="checkbox" class="chan-cb" value="whatsapp" checked> <span>' + esc(t('camp.whatsapp')) + '</span></label>'
@@ -5032,7 +5170,7 @@
     const card = document.createElement('div');
     card.className = 'action-card';
     const cartHasPhone = (f.phone && f.phone.length >= 8);
-    const cartSmsReady = !!window._smsConfigured;
+    const cartSmsReady = !!window._smsAvailable;
     const itemCount = (f.items || '').split(',').filter(Boolean).length;
     let html = '<div class="action-head">' + esc(t('cart.head')) + '</div>';
     html += '<div class="action-row"><span>' + esc(t('cart.recipient')) + '</span> ' + esc(f.name || f.email || f.phone || '—') + '</div>';
@@ -5217,7 +5355,7 @@
     if (f.subject) html += '<div class="action-row"><span>' + esc(t('act.subject')) + '</span> ' + esc(f.subject) + '</div>';
     if (f.body) html += '<div class="action-body">' + esc(f.body).replace(/\{COUPON\}/g, t('cart.couponPlaceholder')).replace(/\n/g,'<br>') + '</div>';
     const isWa = (f.phone && f.phone.length >= 8);
-    const smsReady = !!window._smsConfigured;
+    const smsReady = !!window._smsAvailable;
     const actModeId = 'am_' + Math.random().toString(36).slice(2, 8);
     // Channel picker: merchant chooses WhatsApp / Email / SMS (one or more).
     // Email + SMS send automatically; WhatsApp opens a ready link to send by hand.

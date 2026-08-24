@@ -269,19 +269,22 @@ async function processDue(limit = 60) {
             console.log(`[queue] #${m.id} sms -> email (${r.error})`);
             m.channel = 'email';
             const qs = await storeSettings.getSettings(m.shop_domain).catch(() => ({}));
-            const bn = qs.brand || '770';
+            // Never '770'. That .catch(() => ({})) above means a database hiccup
+            // returns an empty object — and the old fallback then signed this
+            // merchant's customer an email from the pilot store.
+            const bn = qs.brand || String(m.shop_domain || '').replace('.myshopify.com', '') || 'Shop';
             const fallbackHtml = mailer.buildHtmlEmail(body, { brand: bn, language: qs.language, to: m.email, shop: m.shop_domain });
             const fr = await mailer.sendEmail({
               to: m.email, subject: m.subject || ((qs.language === 'en' ? 'A message from ' : 'הודעה מ-') + bn),
-              html: fallbackHtml, text: body, fromName: bn
+              html: fallbackHtml, text: body, fromName: bn, shop: m.shop_domain
             });
             ok = fr.ok; err = fr.error || null;
           }
         } else if (m.channel === 'email' && m.email) {
           const qset = await storeSettings.getSettings(m.shop_domain).catch(() => ({}));
-          const brand = qset.brand || '770';
+          const brand = qset.brand || String(m.shop_domain || '').replace('.myshopify.com', '') || 'Shop';
           const html = mailer.buildHtmlEmail(body, { brand, language: qset.language, to: m.email, shop: m.shop_domain });
-          const r = await mailer.sendEmail({ to: m.email, subject: m.subject || ('הודעה מ-' + brand), html, text: body, fromName: brand });
+          const r = await mailer.sendEmail({ to: m.email, subject: m.subject || ('הודעה מ-' + brand), html, text: body, fromName: brand, shop: m.shop_domain });
           ok = r.ok; err = r.error || null;
         } else {
           await mark(m.id, 'skipped', null, 'no_channel'); skipped++; continue;

@@ -614,6 +614,138 @@ app.get("/api/settings", async (req, res) => {
   res.json({ ok: true, settings: s, today: cap });
 });
 
+// FIRST-RUN SETUP — everything the app needs before it can do its job.
+//
+// The failure this exists to prevent: a merchant installed the app on a new
+// store, the agent drafted a win-back message, they ticked SMS because the box
+// was offered, and the send failed. Nobody had ever asked that store for a
+// sender id. The very first action a new merchant took was guaranteed to fail.
+//
+// What this deliberately does NOT ask for:
+//   - an email sending address. Mail goes out through our verified domain with
+//     the shop's NAME as the sender; there is nothing for the merchant to set,
+//     and a box that changes nothing is worse than no box.
+//   - anything held in a platform environment variable. The merchant cannot set
+//     those, so asking would be theatre.
+//
+// Everything Shopify already told us at install is pre-filled. A form with six
+// empty boxes gets abandoned; a form that is already correct gets confirmed.
+app.get("/api/setup", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const settings = await storeSettings.getSettings(shop);
+    const store = shopify.getStore(shop) || {};
+    const chans = await require("./channel-router").shopChannels(shop, settings);
+
+    // "Missing" means the app cannot fully do its job, not that the merchant
+    // did something wrong. Each carries what it costs to leave unset, so the
+    // screen can be honest instead of demanding.
+    const missing = [];
+    if (!settings.sms_sender) {
+      missing.push({
+        field: "sms_sender",
+        blocks: "sms",
+        // Deliberately not framed as an error: a store may never want SMS.
+        why: "בלי מזהה שולח מאושר אי אפשר לשלוח מסרונים בשם החנות. אפשר לדלג ולהשתמש במייל.",
+        why_en: "Without an approved sender ID the store cannot send texts under its own name. You can skip this and use email."
+      });
+    }
+    if (!store.owner_email) {
+      missing.push({
+        field: "owner_email",
+        blocks: "replies",
+        why: "בלי כתובת מייל של החנות, לקוח שילחץ 'השב' על הודעה שיווקית לא יגיע אליך.",
+        why_en: "Without the store's email address, a customer who hits Reply on a marketing message will not reach you."
+      });
+    }
+
+    res.json({
+      ok: true,
+      complete: !!settings.setup_completed_at,
+      completed_at: settings.setup_completed_at,
+      missing,
+      channels: { available: chans, why: chans.why || {} },
+      // Prefilled from what Shopify told us at install.
+      values: {
+        brand: settings.brand || null,
+        language: settings.language,
+        currency: settings.currency,
+        timezone: settings.timezone,
+        sms_sender: settings.sms_sender || null,
+        owner_email: store.owner_email || null,
+        // A reasonable starting point for the sender id: the shop's own name,
+        // stripped to what the provider accepts. The merchant still confirms it.
+        suggested_sms_sender: String(settings.brand || shop.replace(".myshopify.com", ""))
+          .replace(/[^A-Za-z0-9]/g, "").slice(0, 11) || null
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: safeError(e) });
+  }
+});
+
+// Save first-run setup and mark it done.
+//
+// Marking complete is separate from saving values, so skipping SMS is a real
+// choice rather than a form that will not let go. What it must NOT do is let a
+// merchant mark setup complete while a value they typed was rejected — that
+// would hide the rejection behind a screen that never comes back.
+app.post("/api/setup", express.json(), async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const patch = {};
+    for (const k of ["brand", "language", "currency", "timezone", "sms_sender"]) {
+      if (req.body[k] !== undefined) patch[k] = req.body[k];
+    }
+
+    if (patch.sms_sender !== undefined) {
+      const v = String(patch.sms_sender || "").trim();
+      if (v === "") {
+        patch.sms_sender = null;
+      } else if (!/^[A-Za-z0-9]{1,11}$/.test(v)) {
+        return res.status(400).json({
+          ok: false,
+          error: "מזהה שולח ל-SMS: עד 11 תווים, אותיות באנגלית וספרות בלבד",
+          error_en: "SMS sender ID: up to 11 characters, English letters and digits only",
+          field: "sms_sender"
+        });
+      } else {
+        patch.sms_sender = v;
+      }
+    }
+    if (patch.language && !["he", "en"].includes(patch.language)) {
+      return res.status(400).json({ ok: false, error: "language must be he/en", field: "language" });
+    }
+    if (patch.timezone !== undefined && !storeTime.isValidTz(patch.timezone)) {
+      return res.status(400).json({ ok: false, error: "timezone must be a valid IANA zone", field: "timezone" });
+    }
+
+    // The store's own reply-to address. It lives on advisor_stores because that
+    // is where mailer resolves identity from.
+    if (req.body.owner_email !== undefined) {
+      const em = String(req.body.owner_email || "").trim();
+      if (em && !/^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(em)) {
+        return res.status(400).json({ ok: false, error: "כתובת מייל לא תקינה", error_en: "Invalid email address", field: "owner_email" });
+      }
+      await shopify.setOwnerEmail(shop, em || null).catch(e => console.error("[setup] owner_email:", e.message));
+    }
+
+    if (Object.keys(patch).length) {
+      const r = await storeSettings.updateSettings(shop, patch);
+      if (!r.ok) return res.status(500).json(r);
+    }
+    await storeSettings.markSetupComplete(shop);
+
+    const settings = await storeSettings.getSettings(shop);
+    const chans = await require("./channel-router").shopChannels(shop, settings);
+    res.json({ ok: true, complete: true, channels: { available: chans, why: chans.why || {} } });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: safeError(e) });
+  }
+});
+
 app.post("/api/settings", express.json(), async (req, res) => {
   if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
   const shop = resolveShop(req) || DEFAULT_SHOP;
@@ -625,6 +757,27 @@ app.post("/api/settings", express.json(), async (req, res) => {
   if (allowed.daily_cap !== undefined) allowed.daily_cap = Math.max(10, Math.min(parseInt(allowed.daily_cap) || 500, 5000));
   if (allowed.timezone !== undefined && !storeTime.isValidTz(allowed.timezone)) {
     return res.status(400).json({ ok: false, error: "timezone must be a valid IANA zone, e.g. America/New_York" });
+  }
+  // The SMS sender id is the `source` field TextMe puts in front of the
+  // customer. It allows at most 11 characters, letters and digits only, and
+  // sms-sender silently TRUNCATES anything longer at send time — so a shop that
+  // typed its full name saw the setting saved, the channel light up green, and
+  // then messages going out signed with a chopped-off word. Reject it here
+  // instead, while the merchant is looking at the field.
+  if (allowed.sms_sender !== undefined) {
+    const v = String(allowed.sms_sender || "").trim();
+    if (v === "") {
+      allowed.sms_sender = null;          // clearing it is allowed: it turns SMS off
+    } else if (!/^[A-Za-z0-9]{1,11}$/.test(v)) {
+      return res.status(400).json({
+        ok: false,
+        error: "מזהה שולח ל-SMS: עד 11 תווים, אותיות באנגלית וספרות בלבד",
+        error_en: "SMS sender ID: up to 11 characters, English letters and digits only",
+        field: "sms_sender"
+      });
+    } else {
+      allowed.sms_sender = v;
+    }
   }
   const r = await storeSettings.updateSettings(shop, allowed);
   res.json(r);
@@ -1131,7 +1284,7 @@ app.post("/api/public/popup/subscribe", express.json({ limit: "4kb" }), async (r
       });
       await mailer.sendEmail({
         to: req.body.email, subject: en ? `Confirm your subscription to ${brand}` : `אישור הרשמה ל-${brand}`,
-        html, text: body, fromName: brand
+        html, text: body, fromName: brand, shop
       }).catch(e => console.error("[popup] confirm mail:", e.message));
     }
     res.json({ ok: true, status: r.status, discount_code: r.discount_code || null });
@@ -1461,6 +1614,102 @@ const MASTER_PASSWORD = process.env.MASTER_PASSWORD || null;
   }
 })();
 const DEFAULT_SHOP = "seven770.myshopify.com";
+
+// Say why nothing was sent.
+//
+// Every send path already knows exactly why it refused — sms-sender returns
+// { error: 'no_sender_id', detail: 'לחנות הזו אין עדיין מזהה שולח מאושר…' },
+// the compliance gate returns a reason, the mailer returns the provider's
+// error. All of it was collected into result.steps and then thrown away, and
+// the merchant was handed one guess instead:
+//
+//   "לא נשלח בשום ערוץ (בדוק שבחרת ערוץ מתאים ושיש פרטי קשר)"
+//
+// which sent them looking at the customer's phone number — the one thing that
+// was fine. The real answer was that nobody had ever asked their store for an
+// SMS sender id.
+//
+// setup_needed is machine-readable so the client can offer the setting rather
+// than only naming it.
+function explainSendFailure(steps) {
+  const channels = (steps && steps.channels) || {};
+  const seen = [];
+
+  for (const [name, s] of Object.entries(channels)) {
+    if (!s || s.ok) continue;
+    const code = s.error || (s.blocked ? s.reason : null);
+    seen.push({ name, code, detail: s.detail || null });
+  }
+
+  // Ordered by how actionable it is: a missing setting the merchant can fix
+  // outranks a per-customer problem, which outranks a platform outage.
+  const BY_CODE = {
+    no_sender_id: {
+      msg: "לחנות אין עדיין מזהה שולח ל-SMS, ולכן אי אפשר לשלוח מסרונים בשמה.",
+      msg_en: "This store has no SMS sender ID yet, so it cannot send texts under its own name.",
+      setup_needed: "sms_sender"
+    },
+    not_configured: {
+      msg: "ערוץ ה-SMS אינו מוגדר בצד שלנו. זו תקלה אצלנו, לא אצלך.",
+      msg_en: "The SMS channel is not configured on our side. That is our problem, not yours.",
+      setup_needed: null
+    },
+    "RESEND_API_KEY not configured": {
+      msg: "שליחת המייל אינה מוגדרת בצד שלנו. זו תקלה אצלנו, לא אצלך.",
+      msg_en: "Email sending is not configured on our side. That is our problem, not yours.",
+      setup_needed: null
+    },
+    invalid_phone: {
+      msg: "מספר הטלפון של הלקוח אינו תקין, ולכן אי אפשר לשלוח לו מסרון.",
+      msg_en: "The customer's phone number is not valid, so no text could be sent.",
+      setup_needed: null
+    },
+    unreachable: {
+      msg: "אי אפשר להגיע למספר הזה ב-SMS. נסה מייל.",
+      msg_en: "That number is not reachable by SMS. Try email.",
+      setup_needed: null
+    },
+    opted_out: {
+      msg: "הלקוח ביקש לא לקבל הודעות. זה מכובד ולא ניתן לעקיפה.",
+      msg_en: "This customer opted out. That is honoured and cannot be overridden.",
+      setup_needed: null
+    }
+  };
+
+  for (const s of seen) {
+    const known = BY_CODE[s.code];
+    if (known) {
+      return {
+        error: known.msg,
+        error_en: known.msg_en,
+        setup_needed: known.setup_needed,
+        channel: s.name,
+        detail: s.detail
+      };
+    }
+  }
+
+  // Unknown reason: report what the channel actually said rather than inventing
+  // a friendlier lie.
+  const first = seen.find(s => s.code || s.detail);
+  if (first) {
+    return {
+      error: `${first.name}: ${first.detail || first.code}`,
+      error_en: `${first.name}: ${first.detail || first.code}`,
+      setup_needed: null,
+      channel: first.name,
+      detail: first.detail
+    };
+  }
+
+  return {
+    error: "לא נבחר אף ערוץ שאפשר לשלוח בו.",
+    error_en: "No channel was selected that could be sent on.",
+    setup_needed: null,
+    channel: null,
+    detail: null
+  };
+}
 
 // Display name of a shop for emails/branding (falls back to the domain prefix).
 function storeBrand(shop) {
@@ -2677,9 +2926,37 @@ app.get("/api/daily-summary", async (req, res) => {
 });
 
 // SMS (TextMe) configuration status — tells the UI whether to enable the SMS channel.
-app.get("/api/sms/status", (req, res) => {
-  if (!resolveShop(req)) return res.status(401).json({ error: "גישה נדחתה" });
-  res.json({ ok: true, configured: smsSender.isConfigured() });
+// Can THIS shop send an SMS?
+//
+// This used to answer smsSender.isConfigured(), which asks only whether OUR
+// TextMe account exists. On the live deployment it always does, so the SMS
+// checkbox was enabled for every store — including one installed five minutes
+// ago that has no sender id and cannot send a single message. The merchant
+// ticked SMS because we offered it, and the send failed.
+//
+// A channel is offered on the strength of the SHOP's configuration, never ours.
+// channel-router already computes exactly that, including the reason.
+app.get("/api/sms/status", async (req, res) => {
+  const shop = resolveShop(req);
+  if (!shop) return res.status(401).json({ error: "גישה נדחתה" });
+  try {
+    const settings = await storeSettings.getSettings(shop);
+    const chans = await require("./channel-router").shopChannels(shop, settings);
+    res.json({
+      ok: true,
+      available: chans.sms,
+      why: chans.sms ? null : (chans.why && chans.why.sms) || null,
+      // What the merchant can do about it, if anything. A provider outage on
+      // our side is not something they should be asked to fix.
+      setup_needed: (!chans.sms && smsSender.isConfigured()) ? "sms_sender" : null,
+      sms_sender: settings.sms_sender || null,
+      provider_configured: smsSender.isConfigured()
+    });
+  } catch (e) {
+    // Unknown means unavailable. Offering a channel we could not verify is how
+    // this went wrong in the first place.
+    res.json({ ok: true, available: false, why: "status_unavailable", setup_needed: null });
+  }
 });
 
 // SMS test send — lets you verify the TextMe connection with a single message
@@ -2769,7 +3046,7 @@ app.post("/api/send-email", express.json(), async (req, res) => {
     }
 
     const html = mailer.buildHtmlEmail(body, { cta_url, cta_label, brand: storeBrand(shop), to, shop });
-    const result = await mailer.sendEmail({ to, subject, html, text: body });
+    const result = await mailer.sendEmail({ to, subject, html, text: body, fromName: storeBrand(shop), shop });
     if (!result.ok) {
       return res.status(400).json(result);
     }
@@ -3593,7 +3870,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
       const gate = await compliance.canContactCustomer(shop, { email, phone });
       if (gate.allowed) {
         const html = mailer.buildHtmlEmail(finalBody, { cta_url, cta_label, brand: storeBrand(shop), to: email, shop });
-        const sent = await mailer.sendEmail({ to: email, subject: message_subject || ("הודעה מ-" + storeBrand(shop)), html, text: finalBody, fromName: storeBrand(shop) });
+        const sent = await mailer.sendEmail({ to: email, subject: message_subject || ("הודעה מ-" + storeBrand(shop)), html, text: finalBody, fromName: storeBrand(shop), shop });
         result.steps.channels.email = { channel: "email", ok: sent.ok, error: sent.error || null, id: sent.id || null };
         if (sent.ok) {
           didSomething = true;
@@ -3609,7 +3886,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
     }
 
     if (!didSomething) {
-      return res.status(400).json({ ok: false, error: "לא נשלח בשום ערוץ (בדוק שבחרת ערוץ מתאים ושיש פרטי קשר)", steps: result.steps });
+      return res.status(400).json({ ok: false, ...explainSendFailure(result.steps), steps: result.steps });
     }
 
     res.json(result);
@@ -3720,7 +3997,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
         const html = mailer.buildHtmlEmail(message_body || "הכנו לך עגלה אישית!", {
           cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email, shop
         });
-        const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody, fromName: storeBrand(shop) });
+        const sent = await mailer.sendEmail({ to: email, subject: message_subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody, fromName: storeBrand(shop), shop });
         result.steps.channels.email = { channel: "email", ok: sent.ok, error: sent.error || null, id: sent.id || null };
         if (sent.ok) { didSomething = true; if (!result.steps.message) result.steps.message = result.steps.channels.email; }
       } else {
@@ -3729,7 +4006,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     }
 
     if (!didSomething) {
-      return res.status(400).json({ ok: false, error: "לא נשלח בשום ערוץ (בדוק שבחרת ערוץ ושיש פרטי קשר)", steps: result.steps });
+      return res.status(400).json({ ok: false, ...explainSendFailure(result.steps), steps: result.steps });
     }
 
     await db.query(
@@ -3827,7 +4104,7 @@ app.post("/api/cart/build-batch", express.json(), async (req, res) => {
             const html = mailer.buildHtmlEmail(cart.body || "הכנו לך עגלה אישית!", {
               cta_url: linkForMessage, cta_label: "לעגלה שלך", brand: storeBrand(shop), to: email, shop
             });
-            const sent = await mailer.sendEmail({ to: email, subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody, fromName: storeBrand(shop) });
+            const sent = await mailer.sendEmail({ to: email, subject: cart.subject || "הכנו לך משהו מיוחד 🛍️", html, text: finalBody, fromName: storeBrand(shop), shop });
             if (sent.ok) emailsSent++; else failed++;
             // Send the owner ONE sample copy of what customers receive.
             if (sent.ok && !ownerSampleSent) {
