@@ -93,6 +93,51 @@ api_version = "2026-01"
 [pos]
 embedded = false
 
+# ============================================================================
+# TEMPORARY — WORK AROUND A SHOPIFY-SIDE VALIDATION REGRESSION (2026-08-24).
+#
+# `shopify app deploy` started failing with:
+#
+#     Validation error in shopify.app.smart-advisor2.toml:
+#     [events]: Required
+#
+# This app does not use the Events API, and nothing here changed to cause it.
+# The requirement is not in the CLI: in the installed @shopify/cli 4.7.0 the
+# events section is declared OPTIONAL —
+#
+#     chunk-ACTDYTAV.js:  CR = zo.extend({ events: F.any().optional() })
+#
+# so the compiled CLI cannot produce that error. The word "Required" is the
+# CLI's rendering of an AJV `missingProperty` violation —
+#
+#     if (o.params.missingProperty) { ... message: "Required" }
+#
+# against a JSON Schema Shopify's SERVERS hand the CLI at runtime, per app.
+# That is why downgrading the CLI does not help, and why apps that use no
+# Events at all — theme extensions, checkout UI, plain webhooks — all started
+# failing the same morning. Shopify staff have acknowledged it and say it
+# affects every CLI version.
+#
+# `subscription = []` declares ZERO event topics. Nothing is subscribed to,
+# nothing is delivered, and no scope is added. It exists only to satisfy the
+# validator.
+#
+# api_version is "unstable" on purpose and does NOT match the [webhooks] pin
+# of 2026-01 above: Events is a developer preview and accepts no dated
+# version. Do not "fix" the mismatch.
+#
+# DO NOT add an [[events.subscription]] with an Order, Customer or Checkout
+# topic — or a query selecting customer fields — until Protected Customer Data
+# is approved for this app. It hits the same wall as the three parked
+# [[webhooks.subscriptions]] above. test-scopes.js fails if anyone tries.
+#
+# REMOVE THIS BLOCK once Shopify ships the platform fix and a deploy succeeds
+# without it.
+# ============================================================================
+[events]
+api_version = "unstable"
+subscription = []
+
 [build]
 # automatically_update_urls_on_dev was left ON by the CLI. It rewrites
 # application_url and redirect_urls to a temporary tunnel every time

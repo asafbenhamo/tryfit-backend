@@ -62,6 +62,38 @@ for (const f of tomlFiles) {
 }
 
 // ---------------------------------------------------------------------------
+console.log('\n-- the [events] workaround stays inert --');
+//
+// [events] is present only to satisfy a Shopify-side validation regression that
+// began rejecting deploys with "[events]: Required" for apps that use no Events
+// at all. It declares zero subscriptions. If someone later adds one carrying a
+// customer-bearing topic while Protected Customer Data is still unapproved, the
+// deploy fails against the same wall the three parked webhook subscriptions are
+// already behind — so fail here first, where the reason is written down.
+// ---------------------------------------------------------------------------
+const PCD_TOPICS = /\b(Order|Customer|Checkout|Draft|Fulfillment|Subscription)\b/i;
+// Read only the live TOML. The comment above the section names the very things
+// this checks for — "DO NOT add an [[events.subscription]] with an Order topic"
+// — and a reader that does not drop comments flags the warning as the offence.
+const liveToml = (src) => src.split(/\r?\n/).filter(l => !/^\s*#/.test(l)).join('\n');
+
+for (const f of tomlFiles) {
+  const toml = liveToml(read(f));
+  if (!/^\s*\[events\]/m.test(toml)) { ok(`${f} has no [events] section to police`, true); continue; }
+  ok(`${f} declares no event subscriptions`,
+     /^\s*subscription\s*=\s*\[\s*\]/m.test(toml) && !/\[\[events\.subscription\]\]/.test(toml),
+     'an [[events.subscription]] block appeared');
+  const topics = [...toml.matchAll(/^\s*topic\s*=\s*"([^"]+)"/gm)].map(m => m[1]);
+  ok(`${f} subscribes to no customer-bearing event topic`,
+     !topics.some(t => PCD_TOPICS.test(t)),
+     topics.join(', '));
+  // This one deliberately reads the raw file — the explanation lives in comments.
+  const raw = read(f);
+  ok(`${f} records that the section is temporary, and how to remove it`,
+     /TEMPORARY/.test(raw) && /REMOVE THIS BLOCK/.test(raw));
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n-- the OAuth URL the server builds --');
 // ---------------------------------------------------------------------------
 const server = read('server-dual.js');
