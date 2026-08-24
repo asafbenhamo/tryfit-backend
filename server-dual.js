@@ -1419,7 +1419,12 @@ const MASTER_PASSWORD = process.env.MASTER_PASSWORD || null;
 // repository. A boot that cannot be secured should not boot.
 (function assertSecrets() {
   const missing = [];
-  if (!ADMIN_PASSWORD) missing.push("ADMIN_PASSWORD");
+  // ADMIN_PASSWORD is deliberately NOT required any more, and is no longer a
+  // credential at all: it authorizes nothing, on any route. It survives only as
+  // a legacy HMAC key, so that unsubscribe links signed with it — already
+  // sitting in customers' inboxes — keep verifying. Demanding it at boot
+  // implied it was still a way in, which is exactly the confusion that let it
+  // double as an auth secret for so long.
   if (!shopifyAppSecret()) missing.push("an app secret (one of: " + SECRET_NAMES.join(", ") + ") for webhook verification");
   if (missing.length) {
     console.error("FATAL: missing required secrets: " + missing.join(", "));
@@ -1429,8 +1434,11 @@ const MASTER_PASSWORD = process.env.MASTER_PASSWORD || null;
   if (!MASTER_PASSWORD) {
     console.warn("[boot] MASTER_PASSWORD is not set — platform admin routes are disabled.");
   }
-  for (const [name, val] of [["ADMIN_PASSWORD", ADMIN_PASSWORD], ["MASTER_PASSWORD", MASTER_PASSWORD]]) {
-    if (val && val.length < 12) console.warn(`[boot] ${name} is shorter than 12 characters.`);
+  if (MASTER_PASSWORD && MASTER_PASSWORD.length < 12) {
+    console.warn("[boot] MASTER_PASSWORD is shorter than 12 characters.");
+  }
+  if (ADMIN_PASSWORD) {
+    console.log("[boot] ADMIN_PASSWORD present — kept only to verify unsubscribe links signed before UNSUBSCRIBE_SECRET existed. It grants no access.");
   }
 })();
 const DEFAULT_SHOP = "seven770.myshopify.com";
@@ -1473,15 +1481,18 @@ function extractPassword(req) {
       || null;
 }
 
-// Resolve which shop a request is authorized for.
-//  - a valid session token          -> that token's shop (preferred)
-//  - 770's existing ADMIN_PASSWORD  -> seven770 (backward compat)
-//  - a store's own advisor_password -> that store
-//  - MASTER_PASSWORD                -> the store named in req.query/body.shop
-// Returns the shop_domain string, or null if nothing authorizes the request.
+// Resolve which shop a request is authorized for. There are two answers, and
+// no others:
+//  - a Shopify session token -> the shop named in the token, and ONLY that shop
+//  - MASTER_PASSWORD         -> the store named in req.query/body.shop
 //
-// Password auth is kept as a fallback so existing installs keep working while
-// clients migrate to tokens. Comparisons are timing-safe: a plain === leaks the
+// Note what is not in that list: a merchant cannot name their own shop. For a
+// merchant session the `shop` parameter is ignored entirely, so a request that
+// arrives holding a valid token for one store and `?shop=` pointing at another
+// reads the first. That is the whole cross-tenant guarantee, and it lives on
+// one line below. test-shop-binding.js exists to keep it there.
+//
+// Comparisons are timing-safe: a plain === leaks the
 // secret one character at a time to anyone who can measure response times.
 function resolveShop(req) {
   // 1. Session token (what the PWA uses after logging in).
