@@ -163,9 +163,42 @@ async function purgeStore(shopDomain) {
 }
 
 // Add or update a store, then refresh the cache.
+// Every row in the data-platform tables — store_customers, store_orders, and
+// the rest — carries a foreign key to shops(shop_domain). That table is left
+// over from the platform this app grew out of, and NOTHING in this codebase has
+// ever written to it: the rows in it were put there by hand for the pilot store.
+//
+// So for every shop that has installed since, the entire backfill inserted
+// nothing. Twenty customers fetched, twenty foreign-key violations, and then
+// "COMPLETE  Customers: 0/20" — a merchant whose agent reports zero customers
+// forever, with the reason visible only in a server log they never see.
+//
+// The access token is deliberately NOT written here. shops.shopify_access_token
+// is plaintext by the old schema's design; tokens live encrypted in
+// advisor_stores and stay there.
+async function ensureShopRow(shopDomain, displayName = null) {
+  const domain = String(shopDomain || '').toLowerCase().trim();
+  if (!domain) return false;
+  try {
+    await db.query(
+      `INSERT INTO shops (shop_domain, display_name, installed_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (shop_domain) DO NOTHING`,
+      [domain, displayName]
+    );
+    return true;
+  } catch (e) {
+    console.error(`❌ [DB] ensureShopRow failed for ${domain}: ${e.message}`);
+    return false;
+  }
+}
+
 async function upsertStore({ shop_domain, access_token, advisor_password, display_name, public_domain }) {
   const domain = shop_domain.toLowerCase().trim();
   await ensureStoreTable();
+  // Before anything else: without this row every customer and order we later
+  // pull for this shop is rejected by the foreign key.
+  await ensureShopRow(domain, display_name);
   await db.query(
     `INSERT INTO advisor_stores (shop_domain, access_token, advisor_password, display_name, public_domain, active)
      VALUES ($1,$2,$3,$4,$5,TRUE)
@@ -1046,6 +1079,11 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     return { success: false, reason: 'no_token' };
   }
 
+  // Self-healing for shops that installed before ensureShopRow existed. Cheap,
+  // idempotent, and it is the difference between saving every row and saving
+  // none of them.
+  await ensureShopRow(shopDomain);
+
   const startTime = Date.now();
   const stats = {
     started_at: new Date().toISOString(),
@@ -1107,25 +1145,44 @@ async function backfillEntireShop(shopDomain, onProgress = null) {
     console.log(`✅ [Backfill] Saved ${stats.orders_saved} orders (${stats.orders_failed} failed)`);
 
     stats.duration_seconds = Math.round((Date.now() - startTime) / 1000);
-    stats.success = true;
+    // A backfill that saved nothing is not a success. This used to be an
+    // unconditional `true`, so 0 of 20 printed the same cheerful COMPLETE as
+    // 20 of 20 and returned success to every caller.
+    const fetched = stats.customers_fetched + stats.orders_fetched;
+    const saved = stats.customers_saved + stats.orders_saved;
+    stats.success = fetched === 0 || saved > 0;
     stats.completed_at = new Date().toISOString();
 
     try {
+      // These are the columns data_access_log actually has. The old INSERT
+      // named action_type/action_details/performed_by — none of which exist —
+      // so every backfill of every shop failed to record its own access to
+      // customer data, and said so in a line starting with a warning sign that
+      // nobody was reading.
       await db.query(`
         INSERT INTO data_access_log (
-          shop_domain, action_type, action_details, performed_by, created_at
-        ) VALUES ($1, $2, $3, $4, NOW())
+          endpoint, shop_domain, accessor_type, accessor_id,
+          purpose, records_accessed, filters, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
       `, [
+        'backfillEntireShop',
         shopDomain,
+        'system',
+        'admin_endpoint',
         'full_backfill',
-        JSON.stringify(stats),
-        'admin_endpoint'
+        saved,
+        JSON.stringify(stats)
       ]);
     } catch (e) {
-      console.log('⚠️  Could not log to data_access_log:', e.message);
+      // Loud. This is the audit trail SECURITY.md promises Shopify exists.
+      console.error('❌ [Backfill] could not write data_access_log:', e.message);
     }
 
-    console.log(`\n🎉 [Backfill] COMPLETE in ${stats.duration_seconds}s`);
+    if (stats.success) {
+      console.log(`\n🎉 [Backfill] COMPLETE in ${stats.duration_seconds}s`);
+    } else {
+      console.error(`\n❌ [Backfill] FAILED in ${stats.duration_seconds}s — fetched ${fetched} record(s) from Shopify and saved none.`);
+    }
     console.log(`   Customers: ${stats.customers_saved}/${stats.customers_fetched}`);
     console.log(`   Orders: ${stats.orders_saved}/${stats.orders_fetched}\n`);
 
@@ -1694,6 +1751,7 @@ module.exports = {
   getAllCustomers,
   getAllOrders,
   backfillEntireShop,
+  ensureShopRow,
   getAllProducts,
   saveStoreProduct,
   syncProducts,

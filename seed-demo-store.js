@@ -73,6 +73,26 @@ const rnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// An Israeli mobile number Shopify will actually accept.
+//
+// Restricting to "prefixes in use" was not enough. Shopify validates with
+// libphonenumber, which does not treat 05X plus any seven digits as a number:
+// 054 never carries a 0 in the next position, and 055 is handed out in small
+// sub-blocks (5501, 5517, 552x…) rather than as a whole range. Random digits in
+// those ranges came back 422 {"phone":["is invalid"]} and cost a customer each
+// time — four of twenty on the last run.
+//
+// 050, 052, 053 and 058 are allocated whole, so anything after them is valid.
+// 054 is included with its first digit constrained, because Partner is too big
+// a carrier for a realistic demo list to be missing it.
+function israeliMobile() {
+  const prefix = pick(['50', '52', '53', '58', '54']);
+  const rest = prefix === '54'
+    ? String(rnd(1, 9)) + String(rnd(100000, 999999))
+    : String(rnd(1000000, 9999999));
+  return '+972' + prefix + rest;
+}
+
 async function shopifyPost(shop, endpoint, body, method = 'POST') {
   const token = await shopify.getFreshToken(shop);
   if (!token) throw new Error(`no usable access token for ${shop} — reconnect the app`);
@@ -89,8 +109,49 @@ async function shopifyPost(shop, endpoint, body, method = 'POST') {
   });
   const text = await res.text();
   let data; try { data = JSON.parse(text); } catch (e) { data = { raw: text }; }
-  if (!res.ok) throw new Error(`${endpoint} -> ${res.status}: ${text.slice(0, 300)}`);
+  if (!res.ok) {
+    // Carry the status and Retry-After out with the error. Callers that want to
+    // back off should not have to regex a message string to find out they were
+    // throttled.
+    const err = new Error(`${endpoint} -> ${res.status}: ${text.slice(0, 300)}`);
+    err.status = res.status;
+    err.retryAfterMs = Math.round((Number(res.headers.get('retry-after')) || 0) * 1000) || null;
+    throw err;
+  }
   return data;
+}
+
+// Completing a draft order is metered separately from the rest of the Admin
+// API, and far more tightly:
+//   429 {"errors":"Exceeded draft order API rate limit, please try again in a minute"}
+// The run that finally got past the 406 hit this on nearly every order and
+// produced six out of fifty. Shopify does not publish the number, so rather
+// than hard-code a guess the pace tunes itself: every 429 widens the gap, a
+// clean streak narrows it again. Slow, but it finishes, and it stops guessing.
+const MIN_GAP_MS = 2500, MAX_GAP_MS = 45000;
+let completionGapMs = 9000;
+let cleanStreak = 0;
+
+async function completeDraft(shop, draftId) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await sleep(completionGapMs);
+    try {
+      await shopifyPost(shop, `draft_orders/${draftId}/complete.json`, {}, 'PUT');
+      if (++cleanStreak >= 4) {
+        completionGapMs = Math.max(MIN_GAP_MS, Math.round(completionGapMs * 0.75));
+        cleanStreak = 0;
+      }
+      return true;
+    } catch (e) {
+      if (e.status !== 429) throw e;
+      cleanStreak = 0;
+      completionGapMs = Math.min(MAX_GAP_MS, Math.round(completionGapMs * 1.7));
+      const waitMs = e.retryAfterMs || completionGapMs;
+      console.log(`  rate limited — waiting ${Math.round(waitMs / 1000)}s, pacing now ${Math.round(completionGapMs / 1000)}s/order`);
+      await sleep(waitMs);
+    }
+  }
+  return false;
 }
 
 // Is this a store it is safe to invent people in?
@@ -152,9 +213,24 @@ async function clean(shop) {
     return r.ok || r.status === 404;
   };
 
-  let drafts = 0, custs = 0;
+  let drafts = 0, custs = 0, orders = 0;
   try {
-    // Dangling drafts first: a draft holding a customer blocks that customer's
+    // Completed orders first. A draft that was completed is no longer listed as
+    // an open draft — it is a real order now, carrying the tag it inherited
+    // from the draft — and an order attached to a customer blocks that
+    // customer's deletion just as a draft does. Cancel before delete: Shopify
+    // refuses to delete an order that is still open.
+    const o = await shopify.shopifyGet(shop, 'orders.json?limit=250&status=any');
+    for (const order of (o.orders || [])) {
+      if (!/seeded-demo/.test(order.tags || '')) continue;
+      try { await shopifyPost(shop, `orders/${order.id}/cancel.json`, {}); } catch (e) { /* already cancelled */ }
+      if (await del(`orders/${order.id}.json`)) orders++;
+      await sleep(280);
+    }
+  } catch (e) { console.log('  orders: ' + e.message.slice(0, 100)); }
+
+  try {
+    // Dangling drafts next: a draft holding a customer blocks that customer's
     // deletion, so the order matters.
     const d = await shopify.shopifyGet(shop, 'draft_orders.json?limit=250&status=open');
     for (const draft of (d.draft_orders || [])) {
@@ -187,25 +263,25 @@ async function clean(shop) {
     localC = r2.rows.length;
   } catch (e) { console.log('  local: ' + e.message.slice(0, 100)); }
 
-  console.log(`Removed ${custs} customers and ${drafts} draft orders from Shopify, `
+  console.log(`Removed ${custs} customers, ${orders} orders and ${drafts} draft orders from Shopify, `
     + `${localC} customers and ${localO} orders locally.`);
 }
 
 async function seed(shop, { customers = 20, force = false } = {}) {
+  const plannedOrders = PROFILES.reduce((sum, p) => sum + p.n * ((p.orders[0] + p.orders[1]) / 2), 0);
   console.log(`\nSeeding ${shop}\n`);
+  console.log(`About ${Math.round(plannedOrders)} orders to create. Shopify meters draft-order`);
+  console.log(`completion tightly, so this paces itself and will take several minutes.\n`);
 
   const created = [];
   let orderCount = 0;
+  let failedOrders = 0;
 
   for (const profile of PROFILES) {
     for (let i = 0; i < profile.n; i++) {
       const first = pick(FIRST), last = pick(LAST);
       const email = `${first}.${last}${rnd(100, 999)}@example.com`.toLowerCase();
-      // A REAL Israeli mobile prefix. '+9725' + any digit produced 51/56/57,
-      // which are not allocated, and Shopify refused the customer outright with
-      // 422 {"phone":["is invalid"]}. These are the prefixes actually in use.
-      const IL_PREFIX = ['50', '52', '53', '54', '55', '58'];
-      const phone = '+972' + pick(IL_PREFIX) + String(rnd(1000000, 9999999));
+      const phone = israeliMobile();
 
       let customer;
       try {
@@ -259,15 +335,20 @@ async function seed(shop, { customers = 20, force = false } = {}) {
               use_customer_default_address: false
             }
           });
-          // PUT. Sending POST here returns 406 with no body, so every draft was
-          // created and none were ever turned into an order — the store filled up
-          // with drafts and the agent still had nothing to learn from.
-          await shopifyPost(shop, `draft_orders/${draft.draft_order.id}/complete.json`, {}, 'PUT');
-          orderCount++;
+          // PUT, and paced. Sending POST here returned 406 with no body, so
+          // every draft was created and none was ever turned into an order;
+          // once that was fixed the draft-order rate limit rejected them
+          // instead. completeDraft owns both the method and the pacing.
+          if (await completeDraft(shop, draft.draft_order.id)) {
+            orderCount++;
+          } else {
+            failedOrders++;
+            console.log(`  order gave up after repeated rate limits for ${email}`);
+          }
         } catch (e) {
+          failedOrders++;
           console.log(`  order failed for ${email}: ${String(e.message).slice(0, 120)}`);
         }
-        await sleep(220);   // Shopify's REST limit is 2/sec; stay under it.
       }
 
       created.push({ email, daysAgo: profile.daysAgo, label: profile.label });
@@ -277,6 +358,10 @@ async function seed(shop, { customers = 20, force = false } = {}) {
   }
 
   console.log(`\n${created.length} customers, ${orderCount} orders created in Shopify.`);
+  if (failedOrders) {
+    console.log(`${failedOrders} order(s) could not be created. Re-run with --clean to start over,`);
+    console.log(`or leave it: the segments only need enough history to be distinguishable.`);
+  }
   return created;
 }
 
