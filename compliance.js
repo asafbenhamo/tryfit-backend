@@ -40,16 +40,37 @@ async function workingHoursStatus(shop) {
 }
 
 // ---------- Opt-out list ----------
+// The last nine digits of a phone number, ignoring punctuation, country code
+// and the national leading zero.
+//
+// Opt-outs were matched on exact string equality, which was fine while every
+// number in the system came from one Israeli provider in one format. It stops
+// being fine the moment a second provider writes numbers in E.164: the same
+// person is "0541234567" in one row and "+972541234567" in the next, the
+// equality misses, and we text somebody who told us to stop. That is the one
+// failure here with legal consequences, so the comparison is made on a form
+// that survives the difference.
+//
+// Nine digits can in principle collide between two countries. The query is
+// already scoped to a single shop, and the direction of a false match is to
+// send LESS — a message withheld, never one sent to someone who opted out.
+function phoneKey(phone) {
+  const d = String(phone || '').replace(/[^0-9]/g, '');
+  return d.length >= 9 ? d.slice(-9) : (d || null);
+}
+
 async function isOptedOut(shop, { email, phone } = {}) {
   if (!email && !phone) return false;
+  const key = phone ? phoneKey(phone) : null;
   try {
     const r = await db.query(
       `SELECT 1 FROM message_optouts
        WHERE shop_domain = $1
          AND (($2::text IS NOT NULL AND $2 <> '' AND email = $2)
-           OR ($3::text IS NOT NULL AND $3 <> '' AND phone = $3))
+           OR ($3::text IS NOT NULL AND $3 <> ''
+               AND RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 9) = $3))
        FETCH FIRST 1 ROWS ONLY`,
-      [shop, email || null, phone || null]
+      [shop, email || null, key]
     );
     return r.rows.length > 0;
   } catch (e) {
@@ -112,10 +133,12 @@ async function hasDeclinedMarketing(shop, { email, phone } = {}) {
         WHERE shop_domain = $1
           AND marketing_consent IS FALSE
           AND ( ($2::text <> '' AND LOWER(email) = LOWER($2))
-             OR ($3::text <> '' AND regexp_replace(COALESCE(phone,''),'[^0-9]','','g')
-                                    = regexp_replace($3,'[^0-9]','','g')) )
+             OR ($3::text <> '' AND RIGHT(regexp_replace(COALESCE(phone,''),'[^0-9]','','g'), 9) = $3) )
         FETCH FIRST 1 ROWS ONLY`,
-      [shop, email || '', phone || '']);
+      // Last nine digits, for the same reason as isOptedOut: this is a hard
+      // block, and a format mismatch here means messaging someone who ticked
+      // "no marketing" in the merchant's own checkout.
+      [shop, email || '', phone ? (phoneKey(phone) || '') : '']);
     return r.rows.length > 0;
   } catch (e) {
     console.error('[compliance] hasDeclinedMarketing:', e.message);
@@ -181,7 +204,7 @@ async function canContactCustomer(shop, { email, phone } = {}, opts = {}) {
   return { allowed: true };
 }
 
-module.exports = {
+module.exports = { phoneKey,
   israelHour,
   shopHour,
   isWithinWorkingHours,

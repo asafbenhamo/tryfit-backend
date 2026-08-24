@@ -54,6 +54,11 @@ async function ensureTable() {
   // channel it had never been asked to configure.
   await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS setup_completed_at TIMESTAMPTZ`)
     .catch(e => console.error('[settings] setup_completed_at column:', e.message));
+  // ISO country of the store, captured from Shopify at install. Twilio needs it
+  // to expand a LOCAL customer phone ("054...") into E.164 — without it, a
+  // number that is not already international simply cannot be delivered to.
+  await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS country_code TEXT`)
+    .catch(e => console.error('[settings] country_code column:', e.message));
   await db.query(`ALTER TABLE store_settings ADD COLUMN IF NOT EXISTS whatsapp_enabled BOOLEAN DEFAULT FALSE`)
     .catch(e => console.error('[settings] whatsapp_enabled column:', e.message));
   tableReady = true;
@@ -120,7 +125,8 @@ async function getSettings(shop) {
     followup_default: (row && row.followup_default != null) ? row.followup_default : DEFAULTS.followup_default,
     timezone: validTz(row && row.timezone) || DEFAULTS.timezone,
     whatsapp_enabled: (row && row.whatsapp_enabled != null) ? row.whatsapp_enabled : DEFAULTS.whatsapp_enabled,
-    setup_completed_at: (row && row.setup_completed_at) || null
+    setup_completed_at: (row && row.setup_completed_at) || null,
+    country_code: (row && row.country_code) || null
   };
   // Never cache a failed read — the next call should try again rather than
   // serve guesses for a minute.
@@ -156,7 +162,7 @@ async function updateSettings(shop, patch = {}) {
   shop = (shop || '').toLowerCase().trim();
   if (!shop) return { ok: false, error: 'no_shop' };
   await ensureTable();
-  const allowed = ['brand', 'language', 'currency', 'sms_sender', 'daily_cap', 'autopilot', 'followup_default', 'timezone', 'whatsapp_enabled'];
+  const allowed = ['brand', 'language', 'currency', 'sms_sender', 'daily_cap', 'autopilot', 'followup_default', 'timezone', 'whatsapp_enabled', 'country_code'];
   const cur = await getSettings(shop);
   const next = { ...cur };
   for (const k of allowed) if (patch[k] !== undefined) next[k] = patch[k];
@@ -164,11 +170,11 @@ async function updateSettings(shop, patch = {}) {
   next.timezone = validTz(next.timezone) || DEFAULTS.timezone;
   try {
     await db.query(
-      `INSERT INTO store_settings (shop_domain, brand, language, currency, sms_sender, daily_cap, autopilot, followup_default, timezone, whatsapp_enabled, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+      `INSERT INTO store_settings (shop_domain, brand, language, currency, sms_sender, daily_cap, autopilot, followup_default, timezone, whatsapp_enabled, country_code, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
        ON CONFLICT (shop_domain) DO UPDATE SET
-         brand=$2, language=$3, currency=$4, sms_sender=$5, daily_cap=$6, autopilot=$7, followup_default=$8, timezone=$9, whatsapp_enabled=$10, updated_at=NOW()`,
-      [shop, next.brand, next.language, next.currency, next.sms_sender, next.daily_cap, next.autopilot, next.followup_default, next.timezone, (next.whatsapp_enabled === true || next.whatsapp_enabled === 'true')]
+         brand=$2, language=$3, currency=$4, sms_sender=$5, daily_cap=$6, autopilot=$7, followup_default=$8, timezone=$9, whatsapp_enabled=$10, country_code=$11, updated_at=NOW()`,
+      [shop, next.brand, next.language, next.currency, next.sms_sender, next.daily_cap, next.autopilot, next.followup_default, next.timezone, (next.whatsapp_enabled === true || next.whatsapp_enabled === 'true'), next.country_code || null]
     );
     cache.delete(shop);
     return { ok: true, settings: await getSettings(shop) };

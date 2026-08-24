@@ -90,7 +90,11 @@ const child = spawn(process.execPath, ['-e', boot], {
     MASTER_PASSWORD: MASTER_PW,
     // The platform SMS account IS configured — that is the whole point. It was
     // enough to light up the checkbox for a shop that could not send.
+    // The platform SMS accounts ARE configured — that is the whole point. A
+    // working provider account was enough to light up the checkbox for a shop
+    // that could not send. Non-pilot shops route to Twilio.
     TEXTME_USERNAME: 'u', TEXTME_API_KEY: 'k', TEXTME_SENDER: 'PILOT',
+    TWILIO_ACCOUNT_SID: 'ACtest', TWILIO_AUTH_TOKEN: 'tok',
     RESEND_API_KEY: 'r',
     ADVISOR_SHOPIFY_SECRET: 's', SHOPIFY_API_SECRET: 's', ANTHROPIC_API_KEY: 'k',
     PUBLIC_BASE_URL: 'https://x.test', PORT: String(PORT)

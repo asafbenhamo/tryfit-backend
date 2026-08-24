@@ -1,0 +1,171 @@
+// ============================================================================
+// TEST: SMS goes global, without breaking the shop that already worked.
+//   node test-sms-providers.js
+//
+// TextMe reaches Israeli mobiles and nothing else. Any store outside Israel
+// could set a sender id, watch the SMS channel turn green, and then have every
+// message fall through to email. Twilio is the provider that makes SMS mean
+// something for the rest of the world.
+//
+// The pilot shop stays on TextMe on purpose. It holds an approved sender id
+// there; moving it would stop its texts until a new one is approved somewhere
+// else, for nothing. Half of this file exists to keep that true.
+//
+// THE THING THAT WOULD HAVE BEEN LOST SILENTLY
+//
+// Every text this platform has ever sent carried a legal opt-out that came from
+// TextMe, not from us — add_unsubscribe=3, one parameter, easy to not notice.
+// Twilio has no equivalent. Swapping providers without building one would have
+// removed the opt-out from every marketing SMS, and nothing would have failed,
+// errored, or looked different. So: Twilio refuses to send without a link, the
+// link is signed, and the endpoint behind it honours the request even when the
+// signature does not match — because turning someone away from an opt-out page
+// is the one failure here with legal consequences.
+// ============================================================================
+
+const fs = require('fs');
+const path = require('path');
+
+let pass = 0, fail = 0;
+const ok = (n, c, x) => { if (c) { pass++; console.log('  ok   ' + n); } else { fail++; console.log('  FAIL ' + n + (x ? '  -> ' + x : '')); } };
+
+process.env.PUBLIC_BASE_URL = 'https://smartadvisor.test';
+process.env.TWILIO_ACCOUNT_SID = 'ACtest';
+process.env.TWILIO_AUTH_TOKEN = 'tok';
+process.env.TEXTME_USERNAME = 'u';
+process.env.TEXTME_API_KEY = 'k';
+
+const sms = require('./sms-sender');
+const twilio = require('./sms-provider-twilio');
+const textme = require('./sms-provider-textme');
+
+const PILOT = sms.DEFAULT_SHOP;
+const SHOP = 'willow.myshopify.com';
+
+// ---------------------------------------------------------------------------
+console.log('\n-- the pilot shop does not move --');
+// ---------------------------------------------------------------------------
+ok('the pilot shop still sends through TextMe', sms.providerName(PILOT) === 'textme');
+ok('every other shop sends through Twilio', sms.providerName(SHOP) === 'twilio');
+ok('the pinning is by shop name, so adding Twilio keys cannot move the pilot',
+   /s === DEFAULT_SHOP\) return textme/.test(fs.readFileSync(path.join(__dirname, 'sms-sender.js'), 'utf8')));
+ok('an unknown shop defaults to the global provider, not the Israeli one',
+   sms.providerName('brand-new.myshopify.com') === 'twilio');
+
+// ---------------------------------------------------------------------------
+console.log('\n-- reach is answered by the right provider --');
+// ---------------------------------------------------------------------------
+ok('TextMe reaches an Israeli mobile', textme.canReach('+972541234567'));
+ok('TextMe does NOT reach a US number', !textme.canReach('+14155552671'));
+ok('Twilio reaches an Israeli mobile', twilio.canReach('+972541234567'));
+ok('Twilio reaches a UK mobile', twilio.canReach('+447911123456'));
+ok('a US number is unreachable while we hold no US number to send from',
+   !twilio.canReach('+14155552671'));
+
+// ---------------------------------------------------------------------------
+console.log('\n-- E.164, and when a local number cannot be resolved --');
+// ---------------------------------------------------------------------------
+ok('an international number passes through', twilio.normalizePhone('+972541234567') === '+972541234567');
+ok('00 is understood as +', twilio.normalizePhone('00972541234567') === '+972541234567');
+ok('a local number resolves when the store country is known',
+   twilio.normalizePhone('054-123-4567', { country: 'IL' }) === '+972541234567');
+ok('the national leading zero is dropped',
+   twilio.normalizePhone('07911123456', { country: 'GB' }) === '+447911123456');
+ok('North America keeps its digits', twilio.normalizePhone('(415) 555-2671', { country: 'US' }) === '+14155552671');
+ok('a local number with NO known country is refused rather than guessed',
+   twilio.normalizePhone('0541234567') === null);
+ok('nonsense is refused', twilio.normalizePhone('12345', { country: 'IL' }) === null);
+ok('the store country falls back to the timezone for shops installed before it was recorded',
+   twilio.countryFromTimezone('Asia/Jerusalem') === 'IL' &&
+   twilio.countryFromTimezone('America/New_York') === 'US' &&
+   twilio.countryFromTimezone('Mars/Olympus') === null);
+
+// ---------------------------------------------------------------------------
+console.log('\n-- the sender name, and where it is not allowed --');
+// ---------------------------------------------------------------------------
+ok('a shop name is allowed as sender in Israel', twilio.allowsAlphaSender('+972541234567'));
+ok('and in the UK', twilio.allowsAlphaSender('+447911123456'));
+ok('but never in the US', !twilio.allowsAlphaSender('+14155552671'));
+ok('nor in Canada', !twilio.allowsAlphaSender('+15145551234'));
+
+// ---------------------------------------------------------------------------
+console.log('\n-- the opt-out link Twilio will not add for us --');
+// ---------------------------------------------------------------------------
+const url = sms.optOutUrlFor(SHOP, '+972541234567');
+ok('a link is produced', !!url, String(url));
+ok('it is short enough to leave a usable message in one segment', url.length < 80, url.length + ' chars');
+ok('it carries the shop prefix, not the full domain', /[?&]s=willow(&|$)/.test(url), url);
+ok('it carries the last nine digits, the same form compliance matches on',
+   /[?&]p=541234567(&|$)/.test(url), url);
+ok('it is signed', /[?&]t=[A-Za-z0-9_-]{16}(&|$)/.test(url), url);
+ok('the same number written differently produces the SAME link',
+   sms.optOutUrlFor(SHOP, '0541234567') === url && sms.optOutUrlFor(SHOP, '00972541234567') === url);
+ok('a different shop produces a different signature',
+   sms.optOutUrlFor('other.myshopify.com', '+972541234567') !== url);
+ok('an unusable number produces no link at all', sms.optOutUrlFor(SHOP, '123') === null);
+
+// ---------------------------------------------------------------------------
+console.log('\n-- and Twilio refuses to send a marketing text without one --');
+// ---------------------------------------------------------------------------
+(async () => {
+  let called = false;
+  const realFetch = global.fetch;
+  global.fetch = async () => { called = true; return { ok: true, text: async () => '{"sid":"SM1"}' }; };
+
+  let r = await twilio.send(SHOP, { phone: '+972541234567', message: 'hi', sender: 'WILLOW', optOutUrl: null });
+  ok('no opt-out link means no send', r.ok === false && r.error === 'no_optout_link', JSON.stringify(r));
+  ok('and the provider was never called', called === false);
+
+  called = false;
+  let sentBody = null;
+  global.fetch = async (u, opts) => {
+    called = true; sentBody = String(opts && opts.body || '');
+    return { ok: true, text: async () => '{"sid":"SM1","status":"queued"}' };
+  };
+  r = await twilio.send(SHOP, { phone: '+972541234567', message: 'hi', sender: 'WILLOW', optOutUrl: 'https://x.test/u?p=1' });
+  ok('with a link, it sends', r.ok === true, JSON.stringify(r));
+  ok('the link is in the message body', /x\.test/.test(decodeURIComponent(sentBody)), sentBody.slice(0, 120));
+  ok('the shop name is the sender', /From=WILLOW/.test(sentBody), sentBody.slice(0, 120));
+
+  // A US destination with no number of ours to send from.
+  delete process.env.TWILIO_FROM_NUMBER;
+  r = await twilio.send(SHOP, { phone: '+14155552671', message: 'hi', sender: 'WILLOW', optOutUrl: 'https://x.test/u?p=1' });
+  ok('a US destination with no number of ours refuses, naming the reason',
+     r.ok === false && r.error === 'no_sender_for_destination', JSON.stringify(r).slice(0, 140));
+
+  global.fetch = realFetch;
+
+  // -------------------------------------------------------------------------
+  console.log('\n-- opt-outs survive the change of number format --');
+  // -------------------------------------------------------------------------
+  const compliance = require('./compliance');
+  const forms = ['+972541234567', '00972541234567', '972541234567', '0541234567', '054-123-4567'];
+  const keys = forms.map(f => compliance.phoneKey(f));
+  ok('the same person is one key however their number was written',
+     new Set(keys).size === 1, keys.join(' / '));
+  ok('the opt-out query matches on that key, not on string equality',
+     /RIGHT\(regexp_replace\(COALESCE\(phone, ''\), '\[\^0-9\]', '', 'g'\), 9\) = \$3/
+       .test(fs.readFileSync(path.join(__dirname, 'compliance.js'), 'utf8')));
+  ok('the declined-marketing block matches the same way',
+     /RIGHT\(regexp_replace\(COALESCE\(phone,''\),'\[\^0-9\]','','g'\), 9\) = \$3/
+       .test(fs.readFileSync(path.join(__dirname, 'compliance.js'), 'utf8')));
+
+  // -------------------------------------------------------------------------
+  console.log('\n-- nothing asks a provider about a shop it does not serve --');
+  // -------------------------------------------------------------------------
+  const sources = fs.readdirSync(__dirname)
+    .filter(f => f.endsWith('.js') && !f.startsWith('test-') && !f.startsWith('sms-'))
+    .map(f => ({ name: f, src: fs.readFileSync(path.join(__dirname, f), 'utf8') }));
+  const blind = [];
+  for (const f of sources) {
+    for (const m of f.src.matchAll(/smsSender\.(isConfigured|canReach)\(([^)]*)\)/g)) {
+      const args = m[2].trim();
+      const shopless = m[1] === 'isConfigured' ? args === '' : !/,/.test(args);
+      if (shopless) blind.push(`${f.name}: ${m[0]}`);
+    }
+  }
+  ok('every isConfigured/canReach call names the shop', blind.length === 0, blind.join(', '));
+
+  console.log(`\n${fail === 0 ? 'all' : pass + ' of ' + (pass + fail)} ${pass} assertions passed${fail ? `, ${fail} FAILED` : ''}`);
+  process.exit(fail === 0 ? 0 : 1);
+})();

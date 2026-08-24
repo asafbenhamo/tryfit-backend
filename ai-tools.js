@@ -958,7 +958,7 @@ async function getRFMSegments(shop, options = {}) {
 // ---------------------------------------------------------------------------
 async function sendSms(shop, options = {}) {
   try {
-    if (!smsSender.isConfigured()) return { ok: false, error: 'SMS לא מוגדר עדיין (חסרים מפתחות TextMe).' };
+    if (!smsSender.isConfigured(shop)) return { ok: false, error: 'SMS לא מוגדר עדיין (חסרים מפתחות TextMe).' };
     const phone = (options.phone || '').trim();
     if (!phone) return { ok: false, error: 'חסר מספר טלפון.' };
     let message = (options.message || '').trim();

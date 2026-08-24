@@ -2942,7 +2942,7 @@ app.get("/api/daily-summary", async (req, res) => {
 // SMS (TextMe) configuration status — tells the UI whether to enable the SMS channel.
 // Can THIS shop send an SMS?
 //
-// This used to answer smsSender.isConfigured(), which asks only whether OUR
+// This used to answer smsSender.isConfigured(shop), which asks only whether OUR
 // TextMe account exists. On the live deployment it always does, so the SMS
 // checkbox was enabled for every store — including one installed five minutes
 // ago that has no sender id and cannot send a single message. The merchant
@@ -2962,9 +2962,9 @@ app.get("/api/sms/status", async (req, res) => {
       why: chans.sms ? null : (chans.why && chans.why.sms) || null,
       // What the merchant can do about it, if anything. A provider outage on
       // our side is not something they should be asked to fix.
-      setup_needed: (!chans.sms && smsSender.isConfigured()) ? "sms_sender" : null,
+      setup_needed: (!chans.sms && smsSender.isConfigured(shop)) ? "sms_sender" : null,
       sms_sender: settings.sms_sender || null,
-      provider_configured: smsSender.isConfigured()
+      provider_configured: smsSender.isConfigured(shop)
     });
   } catch (e) {
     // Unknown means unavailable. Offering a channel we could not verify is how
@@ -2979,7 +2979,7 @@ app.get("/api/sms/status", async (req, res) => {
 app.post("/api/sms/test", express.json(), async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
-    if (!smsSender.isConfigured()) return res.status(400).json({ ok: false, error: "SMS לא מוגדר (חסרים משתני TEXTME ב-Railway)" });
+    if (!smsSender.isConfigured(shop)) return res.status(400).json({ ok: false, error: "SMS לא מוגדר (חסרים משתני TEXTME ב-Railway)" });
     const shop = resolveShop(req) || DEFAULT_SHOP;
     const phone = (req.body.phone || "").trim();
     const message = (req.body.message || "בדיקת מערכת SMS מהיועץ החכם ✅").trim();
@@ -3169,6 +3169,68 @@ h2{font-size:20px;margin:0 0 10px}p{color:#5b6472;line-height:1.65;font-size:14.
 button{margin-top:18px;padding:13px 30px;border:none;border-radius:10px;background:#d33;color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}</style>
 </head><body><div class="card"><h2>${title}</h2><p>${body}</p>${form || ""}</div></body></html>`;
 }
+
+// Opt out of SMS. Short on purpose: this URL is inside the text message, every
+// character is billed, and past 160 the message becomes two.
+//
+// It exists because Twilio does not append an opt-out and TextMe did. The legal
+// opt-out on every text this platform has sent came from the provider — so
+// changing provider without building this would have removed it from every
+// message, silently.
+//
+// `p` is the last nine digits of the number, which is also how compliance
+// matches opt-outs, so the same person is recognised whether their number was
+// stored as 0541234567 or +972541234567.
+app.get("/u", (req, res) => {
+  const p = String(req.query.p || "").replace(/[^0-9]/g, "");
+  if (!p) return res.status(400).send(unsubPage({ title: "קישור לא תקין", body: "חסר מספר טלפון." }));
+  const shop = expandShop(req.query.s);
+  const t = String(req.query.t || "");
+  res.set("Content-Type", "text/html; charset=utf-8").send(unsubPage({
+    title: "להסיר אותך מרשימת התפוצה?",
+    body: `נפסיק לשלוח הודעות שיווקיות למספר שמסתיים ב-<b>${esc(p.slice(-4))}</b>.`,
+    form: `<form method="POST" action="/u">
+      <input type="hidden" name="p" value="${esc(p)}">
+      <input type="hidden" name="s" value="${esc(shop)}">
+      <input type="hidden" name="t" value="${esc(t)}">
+      <button type="submit">כן, הסר אותי</button></form>`
+  }));
+});
+
+// The link carries the shop PREFIX to save fourteen billed characters per text.
+function expandShop(v) {
+  const s = String(v || "").toLowerCase().trim();
+  if (!s) return DEFAULT_SHOP;
+  return s.includes(".") ? s : s + ".myshopify.com";
+}
+
+app.post("/u", express.urlencoded({ extended: false }), async (req, res) => {
+  const p = String((req.body && req.body.p) || req.query.p || "").replace(/[^0-9]/g, "");
+  if (!p) return res.status(400).send(unsubPage({ title: "קישור לא תקין", body: "חסר מספר טלפון." }));
+  const shop = expandShop((req.body && req.body.s) || req.query.s);
+
+  // The signature is checked, and a bad one is LOGGED, not obeyed. Turning
+  // someone away from an opt-out page is the one failure here with legal
+  // consequences — the same rule the email unsubscribe follows.
+  const given = String((req.body && req.body.t) || req.query.t || "");
+  let signed = false;
+  try {
+    for (const secret of unsubSecrets()) {
+      const expect = crypto.createHmac("sha256", secret)
+        .update(p + "|" + shop, "utf8").digest("base64url").slice(0, 16);
+      if (expect === given) { signed = true; break; }
+    }
+  } catch (e) { /* fall through: honour it anyway */ }
+  if (!signed) console.warn(`[optout] unsigned SMS opt-out honoured for ${shop} ...${p.slice(-4)}`);
+
+  await compliance.addOptOut(shop, { phone: p, reason: "sms_link" })
+    .catch(e => console.error("[optout] sms:", e.message));
+
+  res.set("Content-Type", "text/html; charset=utf-8").send(unsubPage({
+    title: "הוסרת מרשימת התפוצה",
+    body: "לא נשלח אליך יותר הודעות שיווקיות. אם זו הייתה טעות, פנה לחנות."
+  }));
+});
 
 app.get("/unsubscribe", (req, res) => {
   const email = String(req.query.email || "");
@@ -3866,7 +3928,7 @@ app.post("/api/action/execute", express.json(), async (req, res) => {
     }
 
     // ---- SMS: send automatically via TextMe ----
-    if (chans.includes('sms') && hasPhone && smsSender.isConfigured()) {
+    if (chans.includes('sms') && hasPhone && smsSender.isConfigured(shop)) {
       const smsRes = await smsSender.sendOne(shop, { phone, message: finalBody });
       result.steps.channels.sms = { channel: "sms", ok: smsRes.ok, error: smsRes.error || null };
       if (smsRes.ok) {
@@ -3998,7 +4060,7 @@ app.post("/api/action/build-cart", express.json(), async (req, res) => {
     }
 
     // ---- SMS: send the cart automatically via TextMe ----
-    if (chans.includes('sms') && hasPhone && smsSender.isConfigured()) {
+    if (chans.includes('sms') && hasPhone && smsSender.isConfigured(shop)) {
       const smsRes = await smsSender.sendOne(shop, { phone, message: finalBody });
       result.steps.channels.sms = { channel: "sms", ok: smsRes.ok, error: smsRes.error || null };
       if (smsRes.ok) didSomething = true;
@@ -5443,7 +5505,9 @@ app.get("/auth/callback", async (req, res) => {
         language: isIsraeli ? "he" : "en",
         currency: isIsraeli ? "₪" : "$",
         daily_cap: 500,
-        timezone: shopTz || storeTime.DEFAULT_TZ
+        timezone: shopTz || storeTime.DEFAULT_TZ,
+        // Twilio needs this to expand a local customer phone into E.164.
+        country_code: shopInfo.country_code || null
       });
       console.log(`[OAuth] ${shopDomain} timezone = ${shopTz || storeTime.DEFAULT_TZ + " (fallback)"}`);
     } catch (e) { console.error("[OAuth] settings init:", e.message); }

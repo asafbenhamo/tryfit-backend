@@ -60,7 +60,7 @@ function extractInbound(body) {
 async function customerContext(shop, phone) {
   const ctx = { name: null, last_products: [], coupon: null };
   try {
-    const norm = smsSender.normalizePhone(phone);
+    const norm = smsSender.normalizePhone(phone, shop);
     const variants = [norm, norm ? '972' + norm.slice(1) : null, phone].filter(Boolean);
     const c = await db.query(
       `SELECT shopify_customer_id, first_name, last_name, email FROM store_customers
@@ -162,7 +162,7 @@ async function handleInbound(shop, rawBody) {
   const { phone, text } = extractInbound(rawBody);
   if (!phone || !text) return { ok: false, reason: 'unparsed', raw_keys: Object.keys(rawBody || {}) };
 
-  const norm = smsSender.normalizePhone(phone) || phone;
+  const norm = smsSender.normalizePhone(phone, shop) || phone;
   let pushEngine = null;
   try { pushEngine = require('./push-engine'); } catch (e) { /* optional */ }
 

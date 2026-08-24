@@ -236,7 +236,7 @@ async function runCampaign(id, shop, segment, template, channels) {
           .replace(/\{NAME\}/g, cust.name || '')
           .replace(/\{PRODUCT_LINE\}/g, productLineFor(cust.last_product))
           .replace(/\{PRODUCT\}/g, cust.last_product || '');
-        const capChannel = (wantSms && hasPhone && smsSender.isConfigured()) ? 'sms'
+        const capChannel = (wantSms && hasPhone && smsSender.isConfigured(shop)) ? 'sms'
                          : (wantEmail && contact.email) ? 'email' : null;
         if (capChannel) {
           await mq.enqueue(shop, {
@@ -352,7 +352,7 @@ async function runCampaign(id, shop, segment, template, channels) {
       }
 
       // ---- SMS: instant, or queued at her personal best hour (smart timing) ----
-      if (wantSms && hasPhone && smsSender.isConfigured()) {
+      if (wantSms && hasPhone && smsSender.isConfigured(shop)) {
         if (c.smart_timing) {
           const hour = bestHours[(contact.email || '').toLowerCase()] || 11;
           await mq.enqueue(shop, {
@@ -399,7 +399,7 @@ async function runCampaign(id, shop, segment, template, channels) {
       // slightly sweeter (+5%, capped 25%). Skipped automatically at send time if
       // she converted or opted out. Only when we generate personal % codes.
       if (c.followup && didSomething && !isFixed && !fixedCode && pct > 0) {
-        const fuChannel = (wantSms && hasPhone && smsSender.isConfigured()) ? 'sms'
+        const fuChannel = (wantSms && hasPhone && smsSender.isConfigured(shop)) ? 'sms'
                         : (wantEmail && contact.email) ? 'email' : null;
         if (fuChannel) {
           const firstName = (cust.name || '').split(' ')[0];

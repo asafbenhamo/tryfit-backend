@@ -43,9 +43,9 @@ async function shopChannels(shop, settings, opts = {}) {
   if (!out.email) out.why.email = 'RESEND_API_KEY not configured';
 
   // TextMe needs both the account env vars and a sender id approved for this shop.
-  out.sms = smsSender.isConfigured() && !!settings.sms_sender;
+  out.sms = smsSender.isConfigured(shop) && !!settings.sms_sender;
   if (!out.sms) {
-    out.why.sms = !smsSender.isConfigured()
+    out.why.sms = !smsSender.isConfigured(shop)
       ? 'SMS provider not configured'
       : 'no approved sender id for this shop';
   }
@@ -75,7 +75,10 @@ async function shopChannels(shop, settings, opts = {}) {
 
 // The channel for ONE customer, given what the shop can do.
 // Returns { channel, reason, considered } — channel is null when unreachable.
-function pickForCustomer(customer, available) {
+// `shop` is needed because reachability is now per-provider: TextMe serves the
+// pilot shop and Israeli mobiles only, Twilio serves everyone else globally.
+// Without it this asked the wrong provider whether it could reach a number.
+function pickForCustomer(customer, available, shop) {
   const considered = [];
   const phone = hasPhone(customer), email = hasEmail(customer);
 
@@ -94,7 +97,7 @@ function pickForCustomer(customer, available) {
     // Guarded: routing decides who gets contacted at all, so a missing helper
     // must degrade to the old behaviour rather than throw and abort the whole run.
     const reachable = (typeof smsSender.canReach === 'function')
-      ? smsSender.canReach(customer.phone) : true;
+      ? smsSender.canReach(customer.phone, shop) : true;
     if (phone && reachable) {
       return { channel: 'sms', reason: 'preferred_sms', considered };
     }
@@ -126,7 +129,7 @@ async function route(shop, customers, settings, opts = {}) {
 
   for (const c of customers || []) {
     const canWa = available.whatsapp && waLeft > 0;
-    const pick = pickForCustomer(c, { ...available, whatsapp: canWa });
+    const pick = pickForCustomer(c, { ...available, whatsapp: canWa }, shop);
     if (pick.channel === 'whatsapp') waLeft--;
     counts[pick.channel || 'unreachable']++;
     assignments.push({ customer: c, ...pick });

@@ -243,7 +243,7 @@ async function processDue(limit = 60) {
         if (r.ok) {
           ok = true; handled = true;
         } else if (r.reason === 'no_credits' || r.reason === 'not_configured') {
-          const fallback = (m.phone && smsSender.isConfigured()) ? 'sms' : (m.email ? 'email' : null);
+          const fallback = (m.phone && smsSender.isConfigured(m.shop_domain)) ? 'sms' : (m.email ? 'email' : null);
           if (!fallback) {
             await mark(m.id, 'skipped', null, 'wa_' + r.reason + '_no_fallback'); skipped++; continue;
           }
@@ -256,7 +256,7 @@ async function processDue(limit = 60) {
       }
 
       if (!handled) {
-        if (m.channel === 'sms' && m.phone && smsSender.isConfigured()) {
+        if (m.channel === 'sms' && m.phone && smsSender.isConfigured(m.shop_domain)) {
           const r = await smsSender.sendOne(m.shop_domain, { phone: m.phone, message: body });
           ok = r.ok; err = r.error || null;
           // Some SMS failures are permanent facts about the number or the shop,

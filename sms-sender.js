@@ -1,136 +1,156 @@
 // ============================================================================
-// SMS SENDER — sends SMS via TextMe (textme.co.il), an Israeli SMS provider.
+// SMS — one interface, two providers, chosen per shop.
 //
-// API: POST https://my.textme.co.il/api  (JSON)
-//   username     — account username
-//   source       — sender ID (e.g. "770"), max 11 chars, letters/digits only
-//   message      — up to 1005 chars (TextMe allows 201 Hebrew chars per single SMS)
-//   destinations — { phone: [{ phone: "05XXXXXXXX" }, ...] }
-//   add_unsubscribe = 3 — TextMe appends a one-click unsubscribe link automatically
+//   Twilio  — global. Every shop.
+//   TextMe  — Israeli only. The pilot shop, and nothing else.
 //
-// Config per shop (or global env):
-//   TEXTME_USERNAME, TEXTME_API_KEY (password), TEXTME_SENDER (default sender id)
+// TextMe reaches Israeli mobiles and nothing else, which meant a store anywhere
+// else could set a sender id, watch the SMS channel go green, and have every
+// send fall through to email. Twilio is the provider that makes SMS mean
+// something for the rest of the world.
 //
-// Opt-out is enforced TWICE for safety:
-//   1. We skip any phone already in our message_optouts table (compliance).
-//   2. We pass add_unsubscribe=3 so TextMe adds its own removal link (legal req).
+// The pilot shop stays on TextMe deliberately. It holds an approved sender id
+// there and has been sending through it; moving it would mean its texts stop
+// until a new sender id is approved somewhere else, for no benefit. That is the
+// whole reason the routing exists — not because two providers are nice, but
+// because one working thing should not be broken to tidy up.
+//
+// WHAT CHANGED IN THE PUBLIC INTERFACE
+//
+// isConfigured() and canReach() used to take no shop. With one provider that
+// was merely imprecise; with two it is wrong, and it is the same shape as the
+// bug that offered an SMS checkbox to a store that could not send. Both now
+// take the shop. Callers that pass none get the honest answer for the default.
 // ============================================================================
 
+const textme = require('./sms-provider-textme');
+const twilio = require('./sms-provider-twilio');
 const compliance = require('./compliance');
 
-const TEXTME_ENDPOINT = 'https://my.textme.co.il/api';
+const DEFAULT_SHOP = 'seven770.myshopify.com';
 
-function isConfigured() {
-  return !!(process.env.TEXTME_USERNAME && process.env.TEXTME_API_KEY);
+/**
+ * Which provider serves this shop?
+ *
+ * The pilot shop is pinned to TextMe by name rather than by configuration, so
+ * that adding Twilio credentials cannot silently move it.
+ */
+function providerFor(shop) {
+  const s = String(shop || '').toLowerCase().trim();
+  if (s === DEFAULT_SHOP) return textme;
+  return twilio;
 }
 
-// Normalize an Israeli phone to TextMe's accepted format (05XXXXXXXX).
+function providerName(shop) {
+  return providerFor(shop).NAME;
+}
+
+/** Is the provider serving this shop configured at all? */
+function isConfigured(shop) {
+  return providerFor(shop).isConfigured();
+}
+
+/**
+ * Can this shop's provider actually deliver to this number?
+ *
+ * Asked BEFORE the router picks SMS, so an unreachable number costs nothing and
+ * falls through to email — rather than being retried three times and marked
+ * failed while a perfectly good email address sat unused.
+ */
+function canReach(phone, shop, opts = {}) {
+  const p = providerFor(shop);
+  return p.canReach(phone, opts);
+}
+
+function normalizePhone(phone, shop, opts = {}) {
+  return providerFor(shop).normalizePhone(phone, opts);
+}
+
+// ---------------------------------------------------------------------------
+// THE OPT-OUT LINK
 //
-// TextMe is an Israeli provider and only reaches Israeli mobiles. That is a real
-// limit of the provider, not something normalisation can fix by accepting more
-// formats — a +1 number handed to TextMe is not delivered, it is rejected.
+// TextMe appended one automatically (add_unsubscribe=3). Twilio does not — so
+// the legal opt-out on every text this platform sends came from the provider,
+// and swapping providers without noticing would have removed it from every
+// message silently.
 //
-// What was wrong was the layers ABOVE this one. The settings screen lets any
-// shop enter a sender id, which switched SMS on; the router then sent every
-// phone-owning customer down this path; and the queue treated the resulting
-// invalid_phone as a transient failure, retried it three times and marked it
-// failed. Those customers were never reached by ANY channel, even though most
-// of them had a perfectly good email address — and they still counted against
-// the shop's daily budget. canReach() below lets the router skip SMS for a
-// number this provider cannot deliver to and fall through to email instead.
-function normalizePhone(raw) {
-  if (!raw) return null;
-  let p = String(raw).replace(/[^0-9]/g, '');
-  // Convert international 972 prefix to local 0.
-  if (p.startsWith('972')) p = '0' + p.slice(3);
-  // Must be a valid Israeli mobile: 05XXXXXXXX (10 digits).
-  if (/^05\d{8}$/.test(p)) return p;
-  // Sometimes stored without leading 0 (5XXXXXXXX).
-  if (/^5\d{8}$/.test(p)) return '0' + p;
-  return null; // invalid, not a mobile, or outside this provider's reach
-}
-
-// Can the configured SMS provider actually deliver to this number? Asked BEFORE
-// choosing SMS, so an unreachable number costs nothing and falls through to a
-// channel that works.
-function canReach(phone) {
-  return normalizePhone(phone) !== null;
-}
-
-// Send one SMS. Returns { ok, id?, error? }.
-async function sendOne(shop, { phone, message, sender }) {
-  if (!isConfigured()) return { ok: false, error: 'not_configured' };
-  const to = normalizePhone(phone);
-  if (!to) return { ok: false, error: 'invalid_phone' };
-
-  // Opt-out gate (our own list).
-  if (await compliance.isOptedOut(shop, { phone: to })) {
-    return { ok: false, error: 'opted_out', skipped: true };
+// An alphanumeric sender cannot receive replies, so "reply STOP" is not an
+// opt-out for us anywhere. A link is the only mechanism that works.
+//
+// Signed with the same key and the same scheme as the email unsubscribe links,
+// so one verifier serves both.
+// ---------------------------------------------------------------------------
+function optOutUrlFor(shop, phone) {
+  try {
+    const crypto = require('crypto');
+    const base = require('./base-url').baseUrl();
+    // The last nine digits, inlined rather than imported. This function decides
+    // whether a message can legally go out at all, and it must not fail because
+    // some caller replaced the compliance module with a partial stub.
+    const digits = String(phone || '').replace(/[^0-9]/g, '');
+    const key = digits.length >= 9 ? digits.slice(-9) : null;
+    if (!key) return null;
+    const secret = process.env.UNSUBSCRIBE_SECRET || process.env.ADMIN_PASSWORD || 'unsub';
+    const sig = crypto.createHmac('sha256', secret)
+      .update(key + '|' + String(shop), 'utf8')
+      .digest('base64url').slice(0, 16);
+    // Short on purpose: every character is billed, and past 160 the message
+    // becomes two. ".myshopify.com" is fourteen of those characters and is the
+    // same for every shop, so the link carries the prefix and the server puts
+    // the suffix back. The signature is still over the full domain.
+    const short = String(shop).replace(/\.myshopify\.com$/, '');
+    return `${base}/u?p=${encodeURIComponent(key)}&s=${encodeURIComponent(short)}&t=${sig}`;
+  } catch (e) {
+    return null;
   }
+}
 
-  // SMS AS A SERVICE: the sender id is the SHOP's own name/number (from its
-  // settings, once verified with the SMS provider), falling back to the global
-  // env sender. Every shop's customers see the shop's name, not ours.
+/**
+ * Send one SMS. Returns { ok, error?, skipped? }.
+ *
+ * The sender id is the SHOP's own, always. Without one we refuse rather than
+ * borrow another shop's: signing a store's text with a different brand's name
+ * is impersonation, and on a shared provider account it burns that brand's
+ * sender reputation for messages it never authorised.
+ */
+async function sendOne(shop, { phone, message, sender, country }) {
+  const p = providerFor(shop);
+  if (!p.isConfigured()) return { ok: false, error: 'not_configured' };
+
   let shopSender = sender || null;
-  if (!shopSender) {
-    try { shopSender = (await require('./store-settings').getSettings(shop)).sms_sender; }
-    catch (e) { /* handled below */ }
+  let shopCountry = country || null;
+  if (!shopSender || !shopCountry) {
+    try {
+      const settings = await require('./store-settings').getSettings(shop);
+      shopSender = shopSender || settings.sms_sender;
+      // country_code first; the timezone is the fallback for shops that
+      // installed before that column existed.
+      shopCountry = shopCountry || settings.country_code
+        || twilio.countryFromTimezone(settings.timezone) || null;
+    } catch (e) { /* handled below */ }
   }
-  // Refuse rather than borrow another shop's identity. Sending a store's
-  // customers a text signed with a different brand's name is impersonation, and
-  // on a shared provider account it also puts that brand's sender reputation at
-  // risk for messages it never authorised.
+
   if (!shopSender) {
     return { ok: false, error: 'no_sender_id',
       detail: 'לחנות הזו אין עדיין מזהה שולח מאושר ל-SMS. עד שיוגדר, הפניות יישלחו במייל.' };
   }
 
-  // Body per TextMe docs: everything wrapped in "sms", username under "user",
-  // each phone as { "_": "05xxxxxxxx" }. Auth is via Bearer TOKEN header.
-  const body = {
-    sms: {
-      user: { username: process.env.TEXTME_USERNAME },
-      source: String(shopSender).slice(0, 11),
-      message: message,
-      add_unsubscribe: 3, // TextMe appends its own one-click removal link (legal)
-      destinations: { phone: [ { "_": to } ] }
-    }
-  };
-
-  try {
-    const r = await fetch(TEXTME_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.TEXTME_API_KEY}`
-      },
-      body: JSON.stringify(body)
-    });
-    const raw = await r.text();
-    let data; try { data = JSON.parse(raw); } catch (e) { data = { raw }; }
-
-    if (!r.ok) return { ok: false, error: `http_${r.status}`, detail: raw.slice(0, 300) };
-
-    // TextMe success = status 0 (with a shipment_id). Any nonzero status is an error;
-    // the "message" field then describes it. We never report a false success.
-    const status = data && data.status;
-    const isSuccess = (status === 0 || status === '0');
-    if (isSuccess) {
-      return { ok: true, response: data, shipment_id: data.shipment_id || null };
-    }
-    // Error: surface TextMe's own message + the raw body for debugging.
-    const msg = (data && data.message) ? data.message : 'unknown_response';
-    return { ok: false, error: `TextMe status ${status}: ${msg}`, detail: raw.slice(0, 300), response: data };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+  return p.send(shop, {
+    phone,
+    message,
+    sender: shopSender,
+    country: shopCountry,
+    // TextMe builds its own; Twilio refuses to send without one.
+    optOutUrl: p.NAME === 'twilio' ? optOutUrlFor(shop, phone) : null
+  });
 }
 
-// Send to many recipients. Each recipient: { phone, message, name? }.
-// Messages can differ per recipient (personalization), so we send individually
-// but in a controlled loop. Returns { ok, sent, failed, skipped, results }.
+/**
+ * Send to many. Messages differ per recipient (personalisation), so this sends
+ * individually in a controlled loop.
+ */
 async function sendBatch(shop, recipients, { sender } = {}) {
-  if (!isConfigured()) return { ok: false, error: 'not_configured', sent: 0, failed: 0, skipped: 0 };
+  if (!isConfigured(shop)) return { ok: false, error: 'not_configured', sent: 0, failed: 0, skipped: 0 };
   let sent = 0, failed = 0, skipped = 0;
   const results = [];
   for (const rcp of recipients) {
@@ -143,26 +163,12 @@ async function sendBatch(shop, recipients, { sender } = {}) {
   return { ok: true, sent, failed, skipped, results };
 }
 
-// Check remaining balance (so the agent can warn before a big campaign).
-async function getBalance() {
-  if (!isConfigured()) return { ok: false, error: 'not_configured' };
-  try {
-    const r = await fetch('https://my.textme.co.il/api/getBalance', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.TEXTME_API_KEY}`
-      },
-      body: JSON.stringify({
-        username: process.env.TEXTME_USERNAME
-      })
-    });
-    const raw = await r.text();
-    let data; try { data = JSON.parse(raw); } catch (e) { data = { raw }; }
-    return { ok: r.ok, balance: data };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+/** Remaining balance, where the provider has such a concept. */
+async function getBalance(shop) {
+  return providerFor(shop).getBalance();
 }
 
-module.exports = { isConfigured, normalizePhone, sendOne, sendBatch, getBalance, canReach };
+module.exports = {
+  isConfigured, normalizePhone, sendOne, sendBatch, getBalance, canReach,
+  providerFor, providerName, optOutUrlFor, DEFAULT_SHOP
+};

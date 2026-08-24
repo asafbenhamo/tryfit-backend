@@ -116,6 +116,9 @@ const PILOT = 'seven770.myshopify.com';
 
   console.log('\n-- so SMS refuses rather than signing as another brand --');
   process.env.TEXTME_USERNAME = 'u'; process.env.TEXTME_API_KEY = 'k';
+  // Shops other than the pilot now go through Twilio, so the global provider
+  // has to be configured for a new shop's SMS to be attempted at all.
+  process.env.TWILIO_ACCOUNT_SID = 'ACtest'; process.env.TWILIO_AUTH_TOKEN = 'tok';
   global.fetch = async () => { SENT_SMS.push(1); return { ok: true, text: async () => '{"status":0}' }; };
   const r = await smsSender.sendOne(NEW_SHOP, { phone: '0501234567', message: 'hi' });
   ok('refused for the new shop', r.ok === false && r.error === 'no_sender_id', JSON.stringify(r).slice(0, 90));
