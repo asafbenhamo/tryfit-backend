@@ -37,6 +37,7 @@ async function discountTitle(shop, key, vars) {
 const storeTime = require("./store-time");
 const sessionAuth = require("./session-auth");
 const shopifySessionToken = require("./shopify-session-token");
+const publicUrl = require("./base-url");
 const shopifyTokens = require("./shopify-tokens");
 const login2fa = require("./login-2fa");
 const popupEngine = require("./popup-engine");
@@ -1449,26 +1450,6 @@ function ownerEmailFor(shop) {
   return (s && s.owner_email) || null;
 }
 
-// Which store does this login email belong to? Used by the two-step login so
-// the email picks the store and the password is then checked against that one
-// store — rather than the password alone deciding, which would resolve two
-// stores sharing a password to whichever happened to be listed first.
-//
-// Returns null for an unknown address, and the caller must answer identically
-// for "no such email" and "wrong password" so this cannot be used to discover
-// which stores use the product.
-function shopForEmail(email) {
-  const addr = String(email || "").toLowerCase().trim();
-  if (!addr) return null;
-  try {
-    for (const s of shopify.listStores()) {
-      const owner = ownerEmailFor(s.shop_domain);
-      if (owner && String(owner).toLowerCase().trim() === addr) return s.shop_domain;
-    }
-  } catch (e) { /* fall through */ }
-  return null;
-}
-
 // Send ONE sample copy of a campaign email to the store owner, so they see exactly
 // what their customers receive. Best-effort; never blocks the campaign.
 async function sendOwnerSample(shop, { subject, html, text }) {
@@ -1512,20 +1493,32 @@ function resolveShop(req) {
     return req._session.shop || null;
   }
 
-  // 2. Legacy password.
+  // 2. The operator's password.
+  //
+  // A STORE PASSWORD NO LONGER AUTHORIZES ANYTHING, and this is the line that
+  // matters — not the sign-in screen.
+  //
+  // Removing the login form on its own would have been theatre: the form was
+  // never the only way in. Every endpoint in this file reads its shop through
+  // resolveShop, and resolveShop accepted a bare `?password=` in the query
+  // string. So `GET /api/customers?password=<the store's password>` returned
+  // that merchant's customer list to anyone on the internet who had the string,
+  // with no session, no Shopify, and no login screen involved at all. Deleting
+  // the form while leaving this would have moved the door, not closed it.
+  //
+  // A merchant is now identified one way only: a token Shopify signed, for a
+  // session Shopify authenticated, valid for about a minute — handled above as
+  // req._session.
+  //
+  // MASTER_PASSWORD survives because Shopify cannot vouch for the platform
+  // operator, and it is already narrower than it looks: it authorizes only the
+  // shop explicitly named in the request.
   const pw = extractPassword(req);
   if (!pw) return null;
-  if (ADMIN_PASSWORD && sessionAuth.safeEqual(pw, ADMIN_PASSWORD)) return DEFAULT_SHOP;
   if (MASTER_PASSWORD && sessionAuth.safeEqual(pw, MASTER_PASSWORD)) {
     const target = (req.query && req.query.shop) || (req.body && req.body.shop) || null;
     return target ? String(target).toLowerCase().trim() : null;
   }
-  try {
-    for (const s of shopify.listStores()) {
-      const cfg = shopify.getStore(s.shop_domain);
-      if (cfg && cfg.password && sessionAuth.safeEqual(pw, cfg.password)) return s.shop_domain;
-    }
-  } catch (e) { /* ignore */ }
   return null;
 }
 
@@ -1545,8 +1538,6 @@ function checkAuth(req, res) {
   return shop;
 }
 
-// Admin gate: only 770's password or the master password (super-admin actions
-// like onboarding stores, backfills, syncs). Regular store passwords are rejected.
 // Platform super-admin. ADMIN_PASSWORD is deliberately NOT accepted here any
 // more: it is also the advisor login for the seven770 tenant, so treating it as
 // an admin credential handed one ordinary merchant the ability to reset every
@@ -1771,7 +1762,6 @@ app.post("/api/auth/login", express.json(), async (req, res) => {
   try {
     const pw = (req.body && req.body.password) || "";
     if (!pw) return res.status(401).json({ ok: false, error: "גישה נדחתה" });
-    const loginEmail = String((req.body && req.body.email) || "").toLowerCase().trim();
 
     // ---- Step 1 of two-step login ------------------------------------------
     // Send a code to the address on file and hand back a challenge, NOT a
@@ -1847,48 +1837,31 @@ app.post("/api/auth/login", express.json(), async (req, res) => {
       return res.json({ ok: true, mode: "master", stores, token: sess.token, expires_at: sess.expires_at });
     }
 
-    // 770's existing password
-    if (ADMIN_PASSWORD && sessionAuth.safeEqual(pw, ADMIN_PASSWORD)) {
-      loginRecordSuccess(ip);
-      const sentAdmin = await startChallenge({ shop: DEFAULT_SHOP, email: ownerEmailFor(DEFAULT_SHOP) });
-      if (sentAdmin) return sentAdmin;
-      const sess = await sessionAuth.create(DEFAULT_SHOP, { ip, userAgent: req.headers["user-agent"] });
-      return res.json({ ok: true, mode: "store", shop: DEFAULT_SHOP, name: "770", terms_accepted: true,
-        token: sess.token, expires_at: sess.expires_at });
-    }
-
-    // Per-store password.
+    // A MERCHANT CANNOT SIGN IN HERE AT ALL — by design, and this is the only
+    // place that decision is enforced.
     //
-    // The merchant now types an email as well. When they do, the email picks the
-    // store and the password is checked against THAT store — so two stores that
-    // happen to share a password no longer resolve to whichever comes first.
-    // Without an email we fall back to the old behaviour, where the password
-    // alone identifies the store, so existing installs keep working.
-    let shop = null;
-    if (loginEmail) {
-      shop = shopForEmail(loginEmail);
-      if (shop) {
-        const cfgE = shopify.getStore(shop);
-        if (!cfgE || !cfgE.password || !sessionAuth.safeEqual(pw, cfgE.password)) shop = null;
-      }
-    }
-    if (!shop) shop = resolveShop(req);
-    if (shop) {
-      loginRecordSuccess(ip);
-      const sentStore = await startChallenge({ shop, email: ownerEmailFor(shop) });
-      if (sentStore) return sentStore;
-      const cfg = shopify.getStore(shop);
-      const sess = await sessionAuth.create(shop, { ip, userAgent: req.headers["user-agent"] });
-      return res.json({
-        ok: true, mode: "store", shop,
-        name: (cfg && cfg.name) || shop.replace(".myshopify.com", ""),
-        terms_accepted: shopify.hasAcceptedTerms(shop),
-        token: sess.token, expires_at: sess.expires_at
-      });
-    }
-
+    // A merchant reaches this app one way: from inside their Shopify admin,
+    // where Shopify has already authenticated them and App Bridge hands us a
+    // signed token proving which shop is asking. There is nothing left for them
+    // to prove, so there is no password to check.
+    //
+    // Removing the store-password branch is a security change, not only a
+    // cosmetic one. It used to be true that anyone holding a store's password —
+    // guessed, reused from another site, or read out of an old email — could
+    // sign in from anywhere on the internet and read that merchant's entire
+    // customer list, never touching Shopify. That door is now closed: reaching
+    // the data requires a token Shopify itself signed, minted inside a session
+    // Shopify itself authenticated, expiring in about a minute.
+    //
+    // Only the platform operator gets past this point, above, because Shopify
+    // has no idea who the operator is and cannot vouch for them.
     loginRecordFail(ip);
-    return res.status(401).json({ ok: false, error: "סיסמה שגויה" });
+    return res.status(401).json({
+      ok: false,
+      error: "כניסה לחנות מתבצעת רק מתוך הניהול של Shopify",
+      error_en: "Stores sign in from inside the Shopify admin",
+      merchant_login_removed: true
+    });
   } catch (err) {
     console.error("auth/login error:", err.message);
     return res.status(500).json({ ok: false, error: "שגיאת שרת בהתחברות" });
@@ -4957,7 +4930,11 @@ app.get("/admin/add-store", async (req, res) => {
 const ADVISOR_SHOPIFY_KEY = shopifyClientId() || "";
 const ADVISOR_SHOPIFY_SECRET = shopifyAppSecret() || "";
 const OAUTH_SCOPES = "read_customers,write_customers,read_orders,read_products,read_inventory,read_checkouts,read_fulfillments,read_locations,read_price_rules,read_discounts,read_marketing_events,write_discounts,write_draft_orders";
-const APP_BASE_URL = "https://tryfit-backend-production.up.railway.app";
+// The OAuth redirect_uri is built from this, and Shopify rejects the install
+// outright unless it matches redirect_urls in the .toml exactly. It used to be
+// a literal here and PUBLIC_BASE_URL elsewhere, so setting the variable moved
+// the customer-facing links and left the install flow pointing at the old host.
+const APP_BASE_URL = publicUrl.baseUrl();
 // OAuth state — CSRF protection for the install flow.
 //
 // This was a process-local Map. Two consequences, both silent:
@@ -5479,7 +5456,7 @@ app.get("/admin/register-webhooks", async (req, res) => {
   const token = process.env.SHOPIFY_770_TOKEN;
   if (!token) return res.json({ ok: false, reason: "no token" });
 
-  const baseUrl = "https://tryfit-backend-production.up.railway.app";
+  const baseUrl = publicUrl.baseUrl();
   const topics = [
     { topic: "checkouts/create", address: `${baseUrl}/webhooks/checkouts/create` },
     { topic: "checkouts/update", address: `${baseUrl}/webhooks/checkouts/update` },
@@ -5520,6 +5497,10 @@ app.get("/admin/register-webhooks", async (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
   console.log("Server running on port " + PORT);
+  // Say what the outside world sees. This address goes out in unsubscribe links
+  // and in the popup script tag on the merchant's storefront, so it should never
+  // be a surprise.
+  publicUrl.report();
   console.log("Backend mode:", BACKEND_MODE.toUpperCase());
   if (BACKEND_MODE === "fashn") {
     console.log("FASHN API Key loaded:", process.env.FASHN_API_KEY ? "YES" : "NO");

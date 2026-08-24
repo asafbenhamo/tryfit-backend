@@ -7,6 +7,7 @@
 //   - Every function is wrapped in try/catch. If the DB fails, the tool returns
 //     { ok:false, error:... } and NEVER throws — TryFit core must keep working.
 
+const baseUrlModule = require('./base-url');
 const db = require('./database');
 const shopifyClient = require('./shopify-client');
 const rfmEngine = require('./rfm-engine');
@@ -1042,9 +1043,8 @@ async function sendSms(shop, options = {}) {
       try {
         const clickTracker = require('./click-tracker');
         const token = await clickTracker.createLink(shop, { actionId, email: null, phone, couponCode });
-        let BASE = process.env.PUBLIC_BASE_URL || 'https://tryfit-backend-production.up.railway.app';
+        let BASE = baseUrlModule.baseUrl();
         BASE = String(BASE).replace(/^[^=]*=\s*/, '').replace(/['"\s]/g, '').replace(/\/+$/, '');
-        if (!/^https?:\/\//.test(BASE)) BASE = 'https://tryfit-backend-production.up.railway.app';
         link = `${BASE}/go/${token}`;
       } catch (e) { /* plain store domain fallback */ }
       message += `\n🛍️ למימוש ולקנייה:\n${link}`;

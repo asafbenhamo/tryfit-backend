@@ -15,6 +15,7 @@
 //     deferred by the daily cap, clock drift) must never flush out at 3 AM.
 // ============================================================================
 
+const baseUrlModule = require('./base-url');
 const db = require('./database');
 const compliance = require('./compliance');
 const smsSender = require('./sms-sender');
@@ -213,9 +214,8 @@ async function processDue(limit = 60) {
             const clickTracker = require('./click-tracker');
             const token = await clickTracker.createLink(m.shop_domain,
               { actionId, email: m.email, phone: m.phone, couponCode: c.code });
-            let BASE = process.env.PUBLIC_BASE_URL || 'https://tryfit-backend-production.up.railway.app';
+            let BASE = baseUrlModule.baseUrl();
             BASE = String(BASE).replace(/^[^=]*=\s*/, '').replace(/['"\s]/g, '').replace(/\/+$/, '');
-            if (!/^https?:\/\//.test(BASE)) BASE = 'https://tryfit-backend-production.up.railway.app';
             link = `${BASE}/go/${token}`;
           } catch (e) { /* plain store link */ }
           body = body.replace(/\{COUPON\}/g, c.code).replace(/\{LINK\}/g, link);

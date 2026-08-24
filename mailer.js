@@ -1,6 +1,7 @@
 // mailer.js - Email sending via Resend for the AI Chief of Staff.
 // Sends real emails (e.g. cart-recovery, win-back) after merchant approval.
 // Fails safe: if RESEND_API_KEY is missing, returns an error instead of crashing.
+const baseUrlModule = require('./base-url');
 const RESEND_API_KEY = process.env.RESEND_API_KEY || null;
 // Default sender. Set MAIL_FROM in Railway, e.g. "SEVENSEVENTY 770 <noreply@sevenseventy.co.il>".
 const FROM_EMAIL = process.env.MAIL_FROM || "SEVENSEVENTY 770 <onboarding@resend.dev>";
@@ -97,7 +98,7 @@ function buildHtmlEmail(bodyText, opts = {}) {
   // The link is signed so the endpoint can tell which shop issued it, and it
   // only opens a confirmation page — the opt-out itself happens on POST, because
   // mail scanners follow links and were unsubscribing people who never clicked.
-  const unsubBase = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
+  const unsubBase = baseUrlModule.baseUrl();
   const unsubShop = opts.shop ? '&shop=' + encodeURIComponent(opts.shop) : '';
   let unsubSig = '';
   if (opts.to && opts.shop) {

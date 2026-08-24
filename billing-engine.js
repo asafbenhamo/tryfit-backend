@@ -46,6 +46,7 @@
 //     billed at all.
 // ============================================================================
 
+const baseUrlModule = require('./base-url');
 const db = require('./database');
 const shopify = require('./shopify-client');
 
@@ -56,7 +57,7 @@ const API_VERSION = '2026-01';
 // meant that on any deploy without PUBLIC_BASE_URL set, subscribing failed with
 // a GraphQL error and the app could never bill at all. Every other module in
 // the codebase already carried this fallback; this one did not.
-const DEFAULT_BASE = 'https://tryfit-backend-production.up.railway.app';
+const DEFAULT_BASE = baseUrlModule.baseUrl();
 function publicBase() {
   const raw = String(process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
   return /^https?:\/\/.+/i.test(raw) ? raw : DEFAULT_BASE;

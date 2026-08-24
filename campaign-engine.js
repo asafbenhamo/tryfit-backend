@@ -12,6 +12,7 @@
 // Progress is held in-memory (per running campaign). The UI polls /status and
 // reads the prepared WhatsApp links from there.
 
+const baseUrlModule = require('./base-url');
 const db = require('./database');
 const shopify = require('./shopify-client');
 const mailer = require('./mailer');
@@ -299,9 +300,8 @@ async function runCampaign(id, shop, segment, template, channels) {
 
       // Base URL for tracking links. Be defensive: strip any accidental
       // "NAME = value" or quotes, and keep only a clean https URL.
-      let BASE = process.env.PUBLIC_BASE_URL || "https://tryfit-backend-production.up.railway.app";
+      let BASE = baseUrlModule.baseUrl();
       BASE = String(BASE).replace(/^[^=]*=\s*/, '').replace(/['"\s]/g, '').replace(/\/+$/, '');
-      if (!/^https?:\/\//.test(BASE)) BASE = "https://tryfit-backend-production.up.railway.app";
 
       // Create ONE action row (for attribution) + ONE tracking link, shared across
       // whichever channels the merchant chose for this customer.

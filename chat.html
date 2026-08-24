@@ -28,8 +28,51 @@
   // Boot the embedded experience only when Shopify actually opened us. `host`
   // is the parameter Shopify adds, and its absence means the merchant is on the
   // standalone PWA, which keeps the password/token flow it already had.
-  window.__SHOPIFY_HOST__ = new URLSearchParams(location.search).get('host') || '';
-  window.__SHOPIFY_EMBEDDED__ = !!window.__SHOPIFY_HOST__;
+  (function () {
+    var q = new URLSearchParams(location.search);
+    // `host` is what Shopify appends when it opens us; `embedded=1` comes with
+    // it. Either is proof. Both are remembered for the session, because an
+    // in-app navigation that drops the query string must not turn a merchant
+    // sitting inside the Shopify admin back into an anonymous visitor being
+    // asked for a password.
+    var host = q.get('host') || '';
+    // Are we in a frame? Reading window.top across origins throws, and being
+    // thrown at is itself the answer.
+    var framed = true;
+    try { framed = window.top !== window.self; } catch (e) { framed = true; }
+    try {
+      if (host) sessionStorage.setItem('shopify_host', host);
+      // Only revive a remembered host while still inside a frame. Otherwise a
+      // merchant who was embedded earlier in this tab and later opens the
+      // standalone app at top level would be treated as embedded, App Bridge
+      // would never initialise, and they would get the diagnostic instead of
+      // the sign-in form they actually need.
+      else if (framed) host = sessionStorage.getItem('shopify_host') || '';
+    } catch (e) { /* private mode: fall back to the query string alone */ }
+    window.__SHOPIFY_HOST__ = host;
+    window.__SHOPIFY_EMBEDDED__ = !!host || q.get('embedded') === '1';
+
+    // Hide the sign-in form BEFORE the body renders. It used to be visible by
+    // default, so a merchant opening the app from their admin watched an email
+    // and password form sit on screen for as long as App Bridge took to boot —
+    // up to eight seconds — before it was replaced. That flash is the whole
+    // thing we are trying to remove: to a merchant, and to a Shopify reviewer,
+    // an app that asks for a password inside the admin looks like it is not
+    // really integrated. Inside Shopify the gate is never shown at all.
+    if (window.__SHOPIFY_EMBEDDED__) {
+      document.documentElement.classList.add('embedded-boot');
+      document.write('<style>html.embedded-boot #gate{display:none !important}</style>');
+    }
+    // Anything that legitimately needs the gate visible inside the admin — the
+    // reconnect prompt, the diagnostic when sign-in cannot complete — lifts the
+    // class first. A class rather than an inline style so those callers do not
+    // have to fight an !important rule.
+    window.__showGate__ = function () {
+      document.documentElement.classList.remove('embedded-boot');
+      var g = document.getElementById('gate');
+      if (g) g.style.display = 'flex';
+    };
+  })();
 </script>
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#0b8aff">
@@ -763,21 +806,35 @@
 </style>
 </head>
 <body>
+  <!-- THE MERCHANT NEVER SIGNS IN.
+       There is exactly one way into this app for a merchant: from inside their
+       Shopify admin, where Shopify has already authenticated them. So the
+       default state of this screen is an explanation of where to click, not a
+       form — and the sign-in fields below exist only for the platform operator,
+       who Shopify cannot vouch for, and are not in the page at all otherwise. -->
   <div class="gate" id="gate">
     <h2 id="gateTitle" data-i18n="app.title">Smart Advisor</h2>
     <p data-i18n="app.tagline">Your smart business assistant</p>
-    <input type="email" id="gateEmail" data-i18n-ph="gate.email" placeholder="Email address" autocomplete="username" inputmode="email">
-    <input type="password" id="gatePass" data-i18n-ph="gate.pass" placeholder="Access password" autocomplete="current-password">
-    <button id="gateBtn" onclick="unlock()" data-i18n="gate.enter">Sign in</button>
-    <!-- Step two: the code that was emailed. Hidden until the password checks
-         out, because showing it earlier would tell anyone at the login screen
-         that this account exists. -->
-    <div id="gateCodeStep" style="display:none">
-      <p id="gateCodeHint" class="code-hint"></p>
-      <input type="text" id="gateCode" data-i18n-ph="gate.codePh" placeholder="6-digit code"
-             inputmode="numeric" autocomplete="one-time-code" maxlength="6">
-      <button id="gateCodeBtn" onclick="submitCode()" data-i18n="gate.verify">Verify</button>
-      <button onclick="backToPassword()" class="linkish" data-i18n="gate.back">Back</button>
+
+    <div id="openFromShopify">
+      <p data-i18n="openIn.body">Open this app from your Shopify admin.</p>
+      <p class="code-hint" data-i18n="openIn.where">Shopify admin → Apps → Smart Advisor</p>
+    </div>
+
+    <div id="operatorLogin" style="display:none">
+      <input type="email" id="gateEmail" data-i18n-ph="gate.email" placeholder="Email address" autocomplete="username" inputmode="email">
+      <input type="password" id="gatePass" data-i18n-ph="gate.pass" placeholder="Access password" autocomplete="current-password">
+      <button id="gateBtn" onclick="unlock()" data-i18n="gate.enter">Sign in</button>
+      <!-- Step two: the code that was emailed. Hidden until the password checks
+           out, because showing it earlier would tell anyone at the login screen
+           that this account exists. -->
+      <div id="gateCodeStep" style="display:none">
+        <p id="gateCodeHint" class="code-hint"></p>
+        <input type="text" id="gateCode" data-i18n-ph="gate.codePh" placeholder="6-digit code"
+               inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+        <button id="gateCodeBtn" onclick="submitCode()" data-i18n="gate.verify">Verify</button>
+        <button onclick="backToPassword()" class="linkish" data-i18n="gate.back">Back</button>
+      </div>
     </div>
     <div class="err" id="gateErr"></div>
     <div id="storePicker" style="display:none;margin-top:18px">
@@ -956,6 +1013,12 @@
       'reconnect.title': 'צריך לחבר מחדש',
       'reconnect.body': 'האפליקציה מותקנת ב-{store}, אבל לא קיבלנו הרשאת גישה לנתוני החנות — ולכן אי אפשר לקרוא לקוחות והזמנות. חיבור מחדש לוקח כמה שניות ולא מוחק כלום.',
       'reconnect.cta': 'חבר מחדש',
+      'embedFail.title': 'לא הצלחנו לזהות אותך',
+      'embedFail.body': 'פתחת את האפליקציה מתוך הניהול של Shopify, אז אין צורך בסיסמה — Shopify כבר יודעת מי אתה. הפעם החיבור לא הושלם. רענון בדרך כלל פותר את זה.',
+      'embedFail.retry': 'רענן',
+      'embedFail.reinstall': 'חבר מחדש את החנות',
+      'openIn.body': 'פותחים את האפליקציה מתוך הניהול של Shopify. אין צורך בסיסמה — Shopify כבר מזהה אותך.',
+      'openIn.where': 'ניהול Shopify ← Apps ← Smart Advisor',
       'gate.loginError': 'שגיאה בהתחברות: {msg}',
       'gate.noStores': 'אין חנויות רשומות עדיין.',
       'gate.manageCredits': '💬 ניהול קרדיטים',
@@ -1469,6 +1532,12 @@
       'reconnect.title': 'Reconnect needed',
       'reconnect.body': 'The app is installed on {store}, but we never received access to the store data, so it cannot read customers or orders. Reconnecting takes a few seconds and deletes nothing.',
       'reconnect.cta': 'Reconnect',
+      'embedFail.title': "We could not identify you",
+      'embedFail.body': "You opened the app from inside your Shopify admin, so no password is needed — Shopify already knows who you are. This time the handshake did not complete. A refresh usually fixes it.",
+      'embedFail.retry': 'Refresh',
+      'embedFail.reinstall': 'Reconnect the store',
+      'openIn.body': 'Open this app from inside your Shopify admin. No password needed — Shopify already knows who you are.',
+      'openIn.where': 'Shopify admin → Apps → Smart Advisor',
       'gate.loginError': 'Sign-in error: {msg}',
       'gate.noStores': 'No stores registered yet.',
       'gate.manageCredits': '💬 Manage credits',
@@ -2142,7 +2211,7 @@
   function showReconnect(storeName, url) {
     const g = $('gate');
     if (!g) return;
-    g.style.display = 'flex';
+    window.__showGate__();
     g.innerHTML =
       '<h2>' + esc(t('reconnect.title')) + '</h2>'
       + '<p>' + esc(t('reconnect.body', { store: storeName || '' })) + '</p>'
@@ -2155,13 +2224,65 @@
     };
   }
 
+  // Inside the Shopify admin, sign-in could not complete. Shopify knows who the
+  // merchant is; we failed to hear it. Say so, and offer the two things that
+  // actually fix it — reload, and reinstall — because the alternative is the
+  // password form, and asking a signed-in merchant for a password is both a
+  // dead end for them and, to a reviewer, evidence the integration is fake.
+  function showEmbeddedFailure() {
+    const g = $('gate');
+    if (!g) return;
+    window.__showGate__();
+    const shop = (new URLSearchParams(location.search).get('shop') || '').trim();
+    g.innerHTML =
+      '<h2>' + esc(t('embedFail.title')) + '</h2>'
+      + '<p>' + esc(t('embedFail.body')) + '</p>'
+      + '<button id="embedRetry">' + esc(t('embedFail.retry')) + '</button>'
+      + (shop
+          ? '<button id="embedReinstall" class="linkish">' + esc(t('embedFail.reinstall')) + '</button>'
+          : '')
+      + '<div class="err" id="gateErr"></div>';
+    document.getElementById('embedRetry').onclick = () => location.reload();
+    const re = document.getElementById('embedReinstall');
+    // Shopify's consent screen refuses to render inside a frame, so this has to
+    // break out of the admin iframe or the merchant just sees a blank panel.
+    if (re) re.onclick = () => { window.top.location.href = '/auth?shop=' + encodeURIComponent(shop); };
+    console.error('[auth] embedded sign-in failed. App Bridge ready:', APP_BRIDGE_READY);
+  }
+
+  // The operator console. Shopify has no idea who the platform operator is and
+  // cannot vouch for them, so this one account still signs in with a password
+  // and an emailed code. It is behind an explicit flag so that nothing a
+  // merchant can reach ever renders a password field.
+  const OPERATOR_MODE = new URLSearchParams(location.search).get('console') === '1';
+
   // Order matters: a setup link is a one-time thing and takes precedence; the
-  // embedded path is the everyday one; the password gate is the fallback for
-  // the standalone PWA.
-  (async () => {
+  // embedded path is the only way a merchant arrives; the operator console is
+  // a deliberate detour.
+  //
+  // Deferred by a turn so the fetch wrapper further down this file is installed
+  // before the first /api call goes out — otherwise whoami would leave without
+  // its Authorization header and 401 for reasons that look like a server bug.
+  setTimeout(async () => {
     if (await trySetupLink()) return;
-    await tryEmbedded();
-  })();
+
+    if (EMBEDDED) {
+      if (await tryEmbedded()) return;
+      return showEmbeddedFailure();
+    }
+
+    if (OPERATOR_MODE) {
+      $('openFromShopify').style.display = 'none';
+      $('operatorLogin').style.display = 'block';
+      const e = $('gateEmail');
+      if (e) e.focus();
+      return;
+    }
+
+    // Not inside Shopify and not the operator. There is deliberately nothing to
+    // sign in to here: the screen already says where to click, and offering a
+    // form would be offering a door that no longer opens.
+  }, 0);
 
   // ===== Team / agents =====
   // The advisor is the "head of team". These are the agents it runs. Two are live

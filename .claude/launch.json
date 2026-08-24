@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "smart-advisor",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server-dual.js"],
+      "port": 3001
+    }
+  ]
+}
